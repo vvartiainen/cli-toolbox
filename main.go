@@ -9,7 +9,7 @@ import (
 
 	"cli-toolbox/internal/aws"
 	"cli-toolbox/internal/kitty"
-	sshhelper "cli-toolbox/internal/sshhelper"
+	"cli-toolbox/internal/sshhelper"
 )
 
 func main() {
