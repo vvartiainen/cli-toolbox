@@ -60,7 +60,7 @@ func TestRunPrintsHelp(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "tool-helper kitty-session [flags]") {
+	if !strings.Contains(stdout.String(), "cli-toolbox kitty-session [flags]") {
 		t.Fatalf("stdout missing kitty-session usage: %q", stdout.String())
 	}
 
@@ -82,7 +82,7 @@ func TestRunRejectsPositionalArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "tool-helper kitty-session [flags]") {
+	if !strings.Contains(stderr.String(), "cli-toolbox kitty-session [flags]") {
 		t.Fatalf("stderr missing kitty-session usage: %q", stderr.String())
 	}
 

@@ -14,7 +14,7 @@ func TestRunPrintsRootUsageWithoutArgs(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "tool-helper <command>") {
+	if !strings.Contains(stdout.String(), "cli-toolbox <command>") {
 		t.Fatalf("stdout missing root usage: %q", stdout.String())
 	}
 
@@ -31,7 +31,7 @@ func TestRunPrintsKittySessionHelp(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "tool-helper kitty-session [flags]") {
+	if !strings.Contains(stdout.String(), "cli-toolbox kitty-session [flags]") {
 		t.Fatalf("stdout missing kitty-session usage: %q", stdout.String())
 	}
 
@@ -48,7 +48,7 @@ func TestRunPrintsSSHHelp(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "tool-helper ssh [flags]") {
+	if !strings.Contains(stdout.String(), "cli-toolbox ssh [flags]") {
 		t.Fatalf("stdout missing ssh usage: %q", stdout.String())
 	}
 
@@ -65,7 +65,7 @@ func TestRunPrintsAWSProfileHelp(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), `eval "$(tool-helper aws profile)"`) {
+	if !strings.Contains(stdout.String(), `eval "$(cli-toolbox aws profile)"`) {
 		t.Fatalf("stdout missing aws profile usage: %q", stdout.String())
 	}
 
@@ -87,7 +87,7 @@ func TestRunRejectsKittySessionPositionalArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "tool-helper kitty-session [flags]") {
+	if !strings.Contains(stderr.String(), "cli-toolbox kitty-session [flags]") {
 		t.Fatalf("stderr missing kitty-session usage: %q", stderr.String())
 	}
 
@@ -109,7 +109,7 @@ func TestRunRejectsSSHPositionalArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "tool-helper ssh [flags]") {
+	if !strings.Contains(stderr.String(), "cli-toolbox ssh [flags]") {
 		t.Fatalf("stderr missing ssh usage: %q", stderr.String())
 	}
 
@@ -131,7 +131,7 @@ func TestRunRejectsUnknownKittySessionFlag(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "tool-helper kitty-session [flags]") {
+	if !strings.Contains(stderr.String(), "cli-toolbox kitty-session [flags]") {
 		t.Fatalf("stderr missing kitty-session usage: %q", stderr.String())
 	}
 
@@ -153,7 +153,7 @@ func TestRunRejectsUnknownAWSSubcommand(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "tool-helper aws <command>") {
+	if !strings.Contains(stderr.String(), "cli-toolbox aws <command>") {
 		t.Fatalf("stderr missing aws usage: %q", stderr.String())
 	}
 

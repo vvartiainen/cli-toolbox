@@ -82,7 +82,7 @@ func TestRunPrintsHelp(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "tool-helper ssh [flags]") {
+	if !strings.Contains(stdout.String(), "cli-toolbox ssh [flags]") {
 		t.Fatalf("stdout missing ssh usage: %q", stdout.String())
 	}
 
@@ -104,7 +104,7 @@ func TestRunRejectsPositionalArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "tool-helper ssh [flags]") {
+	if !strings.Contains(stderr.String(), "cli-toolbox ssh [flags]") {
 		t.Fatalf("stderr missing ssh usage: %q", stderr.String())
 	}
 

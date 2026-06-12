@@ -30,24 +30,24 @@
       nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
       nix-darwin.url = "github:LnL7/nix-darwin";
       home-manager.url = "github:nix-community/home-manager";
-      tool-helper-src = {
+      cli-toolbox-src = {
         url = "path:/Users/vvarti/prog/tool-helper";
         flake = false;
       };
     };
-    outputs = { self, nixpkgs, nix-darwin, home-manager, tool-helper-src, ... }:
+    outputs = { self, nixpkgs, nix-darwin, home-manager, cli-toolbox-src, ... }:
     let
       system = "aarch64-darwin";
       pkgs = import nixpkgs { inherit system; };
-      tool-helper = pkgs.buildGoModule {
-        pname = "tool-helper";
+      cli-toolbox = pkgs.buildGoModule {
+        pname = "cli-toolbox";
         version = "dev";
-        src = tool-helper-src;
+        src = cli-toolbox-src;
         vendorHash = null;
         nativeBuildInputs = [ pkgs.makeWrapper ];
         doCheck = true;
         postInstall = ''
-          wrapProgram $out/bin/tool-helper \
+          wrapProgram $out/bin/cli-toolbox \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf pkgs.kitty ]}
         '';
       };
@@ -58,7 +58,7 @@
           home-manager.darwinModules.home-manager
           {
             home-manager.users.vvarti = { ... }: {
-              home.packages = [ tool-helper ];
+              home.packages = [ cli-toolbox ];
             };
           }
         ];
@@ -71,22 +71,22 @@
   darwin-rebuild switch --flake .#your-hostname
 
   A few important notes:
-  • home.packages = [ tool-helper ]; is what “links it there”. Home Manager will symlink the binary into your profile so tool-helper is available on your shell PATH.
+  • home.packages = [ cli-toolbox ]; is what “links it there”. Home Manager will symlink the binary into your profile so cli-toolbox is available on your shell PATH.
   • Leave vendorHash = null for the first build. Nix may fail and print the correct hash; copy that hash back into the expression to make it reproducible.
   • Because your go.mod says go 1.26.4, if your nixpkgs channel is too old, you may need a newer channel or to explicitly select a newer Go toolchain.
 
-  If you prefer to keep the package definition separate, make pkgs/tool-helper.nix:
+  If you prefer to keep the package definition separate, make pkgs/cli-toolbox.nix:
 
   { lib, buildGoModule, makeWrapper, fzf, kitty, src }:
   buildGoModule {
-    pname = "tool-helper";
+    pname = "cli-toolbox";
     version = "dev";
     inherit src;
     vendorHash = null;
     nativeBuildInputs = [ makeWrapper ];
     doCheck = true;
     postInstall = ''
-      wrapProgram $out/bin/tool-helper \
+      wrapProgram $out/bin/cli-toolbox \
         --prefix PATH : ${lib.makeBinPath [ fzf kitty ]}
     '';
   }
@@ -95,8 +95,8 @@
 
   {
     home.packages = [
-      (pkgs.callPackage ./pkgs/tool-helper.nix {
-        src = inputs.tool-helper-src;
+      (pkgs.callPackage ./pkgs/cli-toolbox.nix {
+        src = inputs.cli-toolbox-src;
       })
     ];
   }

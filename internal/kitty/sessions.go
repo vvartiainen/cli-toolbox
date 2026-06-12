@@ -163,7 +163,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Select a kitty session file with fzf and launch it.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  tool-helper kitty-session [flags]")
+	fmt.Fprintln(w, "  cli-toolbox kitty-session [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -h, --help   Show help")

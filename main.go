@@ -7,9 +7,9 @@ import (
 	"io"
 	"os"
 
-	"tool-helper/internal/aws"
-	"tool-helper/internal/kitty"
-	sshhelper "tool-helper/internal/sshhelper"
+	"cli-toolbox/internal/aws"
+	"cli-toolbox/internal/kitty"
+	sshhelper "cli-toolbox/internal/sshhelper"
 )
 
 func main() {
@@ -20,7 +20,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("tool-helper", flag.ContinueOnError)
+	flags := flag.NewFlagSet("cli-toolbox", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 
 	var help bool
@@ -65,10 +65,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "tool-helper helps with small workflow tasks.")
+	fmt.Fprintln(w, "cli-toolbox helps with small workflow tasks.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  tool-helper <command>")
+	fmt.Fprintln(w, "  cli-toolbox <command>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  aws             AWS helpers")

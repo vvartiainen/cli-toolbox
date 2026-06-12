@@ -353,7 +353,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Select an SSH host from config and connect with kitten ssh.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  tool-helper ssh [flags]")
+	fmt.Fprintln(w, "  cli-toolbox ssh [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -h, --help   Show help")
