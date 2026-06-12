@@ -9,6 +9,7 @@ import (
 
 	"tool-helper/internal/aws"
 	"tool-helper/internal/kitty"
+	sshhelper "tool-helper/internal/sshhelper"
 )
 
 func main() {
@@ -55,6 +56,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return aws.Run(remaining[1:], stdout, stderr)
 	case "kitty-session":
 		return kitty.Run(remaining[1:], stdout, stderr)
+	case "ssh":
+		return sshhelper.Run(remaining[1:], stdout, stderr)
 	default:
 		printUsage(stderr)
 		return fmt.Errorf("unknown command %q", remaining[0])
@@ -70,4 +73,5 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  aws             AWS helpers")
 	fmt.Fprintln(w, "  kitty-session   Select a kitty session file with fzf and launch it")
+	fmt.Fprintln(w, "  ssh             Select an SSH host from config and connect with kitten ssh")
 }
