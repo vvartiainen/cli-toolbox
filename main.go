@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -16,20 +18,43 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
+	flags := flag.NewFlagSet("tool-helper", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+
+	var help bool
+	flags.BoolVar(&help, "h", false, "Show help")
+	flags.BoolVar(&help, "help", false, "Show help")
+
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printUsage(stdout)
+			return nil
+		}
+
+		printUsage(stderr)
+		return err
+	}
+
+	if help {
 		printUsage(stdout)
 		return nil
 	}
 
-	switch args[0] {
-	case "help", "-h", "--help":
+	remaining := flags.Args()
+	if len(remaining) == 0 {
+		printUsage(stdout)
+		return nil
+	}
+
+	switch remaining[0] {
+	case "help":
 		printUsage(stdout)
 		return nil
 	case "kitty-session":
-		return kitty.Run(stdout, stderr)
+		return kitty.Run(remaining[1:], stdout, stderr)
 	default:
 		printUsage(stderr)
-		return fmt.Errorf("unknown command %q", args[0])
+		return fmt.Errorf("unknown command %q", remaining[0])
 	}
 }
 
