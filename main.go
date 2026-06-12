@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"tool-helper/internal/aws"
 	"tool-helper/internal/kitty"
 )
 
@@ -50,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "help":
 		printUsage(stdout)
 		return nil
+	case "aws":
+		return aws.Run(remaining[1:], stdout, stderr)
 	case "kitty-session":
 		return kitty.Run(remaining[1:], stdout, stderr)
 	default:
@@ -65,5 +68,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  tool-helper <command>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  aws             AWS helpers")
 	fmt.Fprintln(w, "  kitty-session   Select a kitty session file with fzf and launch it")
 }
