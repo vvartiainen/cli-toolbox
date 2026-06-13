@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,9 +164,7 @@ func mergeProfiles(dst map[string]Profile, path string, mapper func(string) (str
 			}
 		}
 
-		for key, value := range settings {
-			profile.Settings[key] = value
-		}
+		maps.Copy(profile.Settings, settings)
 
 		dst[name] = profile
 	}
