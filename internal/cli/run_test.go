@@ -48,8 +48,29 @@ func TestRunPrintsSSHHelp(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "Usage: cli-toolbox ssh") {
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox ssh <command>") {
 		t.Fatalf("stdout missing ssh usage: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), "connect") {
+		t.Fatalf("stdout missing ssh connect subcommand: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunPrintsSSHConnectHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"ssh", "connect", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox ssh connect") {
+		t.Fatalf("stdout missing ssh connect usage: %q", stdout.String())
 	}
 
 	if stderr.Len() != 0 {
@@ -137,6 +158,28 @@ func TestRunRejectsUnknownAWSSubcommand(t *testing.T) {
 
 	if !strings.Contains(stderr.String(), "Usage: cli-toolbox aws <command>") {
 		t.Fatalf("stderr missing aws usage: %q", stderr.String())
+	}
+
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout not empty: %q", stdout.String())
+	}
+}
+
+func TestRunRejectsUnknownSSHSubcommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run([]string{"ssh", "wat"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("Run returned nil error")
+	}
+
+	if !strings.Contains(err.Error(), "expected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "Usage: cli-toolbox ssh <command>") {
+		t.Fatalf("stderr missing ssh usage: %q", stderr.String())
 	}
 
 	if stdout.Len() != 0 {

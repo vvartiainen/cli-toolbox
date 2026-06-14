@@ -15,7 +15,7 @@ import (
 type rootCommand struct {
 	AWS          awscmd.Command   `cmd:"" name:"aws" help:"AWS helpers."`
 	KittySession kittycmd.Command `cmd:"" name:"kitty-session" help:"Select a kitty session file with fzf and launch it."`
-	SSH          sshcmd.Command   `cmd:"" name:"ssh" help:"Select an SSH host from config and connect with kitten ssh."`
+	SSH          sshcmd.Command   `cmd:"" name:"ssh" help:"SSH helpers."`
 }
 
 func newRootCommand(stdout, stderr io.Writer) *rootCommand {
@@ -46,9 +46,8 @@ func Run(args []string, stdout, stderr io.Writer) (err error) {
 	}
 
 	if err != nil {
-		var parseErr *kong.ParseError
-		if errors.As(err, &parseErr) {
-			parseErr.Context.Kong.Stdout = stderr
+		if parseErr, ok := errors.AsType[*kong.ParseError](err); ok {
+			parseErr.Context.Stdout = stderr
 			_ = parseErr.Context.PrintUsage(false)
 		}
 
