@@ -1,10 +1,9 @@
-package sshhelper
+package ssh
 
 import (
 	"bufio"
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -19,40 +18,9 @@ type Host struct {
 	Name string
 }
 
-func Run(args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("ssh", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-
-	var help bool
-	flags.BoolVar(&help, "h", false, "Show help")
-	flags.BoolVar(&help, "help", false, "Show help")
-
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			printUsage(stdout)
-			return nil
-		}
-
-		printUsage(stderr)
-		return err
-	}
-
-	if help {
-		printUsage(stdout)
-		return nil
-	}
-
-	if flags.NArg() != 0 {
-		printUsage(stderr)
-		return fmt.Errorf("ssh does not accept positional arguments: %s", strings.Join(flags.Args(), " "))
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve home directory: %w", err)
-	}
-
+func SelectAndConnectHost(home string, stdout, stderr io.Writer) error {
 	configPath := filepath.Join(home, ".ssh", "config")
+
 	hosts, err := LoadHosts(configPath)
 	if err != nil {
 		return err
@@ -347,14 +315,4 @@ func kittenSSHCommand(host string) (string, []string, error) {
 	}
 
 	return "", nil, fmt.Errorf("neither kitten nor kitty is available on PATH")
-}
-
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Select an SSH host from config and connect with kitten ssh.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  cli-toolbox ssh [flags]")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  -h, --help   Show help")
 }

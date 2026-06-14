@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -21,80 +20,7 @@ type Profile struct {
 	Settings map[string]string
 }
 
-func Run(args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("aws", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-
-	var help bool
-	flags.BoolVar(&help, "h", false, "Show help")
-	flags.BoolVar(&help, "help", false, "Show help")
-
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			printUsage(stdout)
-			return nil
-		}
-
-		printUsage(stderr)
-		return err
-	}
-
-	if help {
-		printUsage(stdout)
-		return nil
-	}
-
-	remaining := flags.Args()
-	if len(remaining) == 0 {
-		printUsage(stdout)
-		return nil
-	}
-
-	switch remaining[0] {
-	case "profile":
-		return runProfile(remaining[1:], stdout, stderr)
-	case "help":
-		printUsage(stdout)
-		return nil
-	default:
-		printUsage(stderr)
-		return fmt.Errorf("unknown aws command %q", remaining[0])
-	}
-}
-
-func runProfile(args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("aws profile", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-
-	var help bool
-	flags.BoolVar(&help, "h", false, "Show help")
-	flags.BoolVar(&help, "help", false, "Show help")
-
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			printProfileUsage(stdout)
-			return nil
-		}
-
-		printProfileUsage(stderr)
-		return err
-	}
-
-	if help {
-		printProfileUsage(stdout)
-		return nil
-	}
-
-	if flags.NArg() != 0 {
-		printProfileUsage(stderr)
-		return fmt.Errorf("aws profile does not accept positional arguments: %s", strings.Join(flags.Args(), " "))
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve home directory: %w", err)
-	}
-
+func SelectAndExportProfile(home string, stdout, stderr io.Writer) error {
 	profiles, err := LoadProfiles(
 		filepath.Join(home, ".aws", "config"),
 		filepath.Join(home, ".aws", "credentials"),
@@ -347,27 +273,4 @@ func shellQuote(value string) string {
 	}
 
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
-}
-
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "AWS helpers.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  cli-toolbox aws <command>")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  profile   Select an AWS profile and print an export command")
-}
-
-func printProfileUsage(w io.Writer) {
-	fmt.Fprintln(w, "Select an AWS profile with fzf and print an export command.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  cli-toolbox aws profile [flags]")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Shell usage:")
-	fmt.Fprintln(w, `  eval "$(cli-toolbox aws profile)"`)
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  -h, --help   Show help")
 }

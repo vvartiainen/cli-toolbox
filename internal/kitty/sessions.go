@@ -3,10 +3,8 @@ package kitty
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -20,39 +18,7 @@ type choice struct {
 	Path  string
 }
 
-func Run(args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("kitty-session", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-
-	var help bool
-	flags.BoolVar(&help, "h", false, "Show help")
-	flags.BoolVar(&help, "help", false, "Show help")
-
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			printUsage(stdout)
-			return nil
-		}
-
-		printUsage(stderr)
-		return err
-	}
-
-	if help {
-		printUsage(stdout)
-		return nil
-	}
-
-	if flags.NArg() != 0 {
-		printUsage(stderr)
-		return fmt.Errorf("kitty-session does not accept positional arguments: %s", strings.Join(flags.Args(), " "))
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve home directory: %w", err)
-	}
-
+func SelectAndLaunchSession(home string, stdout, stderr io.Writer) error {
 	paths, err := FindSessions(home)
 	if err != nil {
 		return err
@@ -157,16 +123,6 @@ func LaunchSession(path string, stdout, stderr io.Writer) error {
 	}
 
 	return nil
-}
-
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Select a kitty session file with fzf and launch it.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  cli-toolbox kitty-session [flags]")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  -h, --help   Show help")
 }
 
 func remoteControlExecutable() (string, error) {

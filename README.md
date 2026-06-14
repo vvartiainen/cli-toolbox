@@ -14,6 +14,8 @@ cli-toolbox kitty-session
 cli-toolbox ssh
 ```
 
+Command parsing and help output are handled with [Kong](https://github.com/alecthomas/kong).
+
 ### `aws profile`
 
 Selects an AWS profile with `fzf`. If the profile uses AWS SSO, it runs `aws sso login` when needed, then prints:
@@ -39,7 +41,7 @@ Reads hosts from `~/.ssh/config`, lets you choose one with `fzf`, and connects w
 ## Build
 
 ```sh
-go build -o cli-toolbox .
+go build -o cli-toolbox ./cmd/cli-toolbox
 ```
 
 ## Run
@@ -47,9 +49,9 @@ go build -o cli-toolbox .
 Run without installing:
 
 ```sh
-go run . aws profile
-go run . kitty-session
-go run . ssh
+go run ./cmd/cli-toolbox aws profile
+go run ./cmd/cli-toolbox kitty-session
+go run ./cmd/cli-toolbox ssh
 ```
 
 Run the built binary:

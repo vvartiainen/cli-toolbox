@@ -1,11 +1,9 @@
-package sshhelper
+package ssh
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -71,45 +69,6 @@ func TestParseDirectiveSupportsEqualsAndComments(t *testing.T) {
 
 	if got, want := args, []string{"conf.d/*.conf", "extra.conf"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %v, want %v", got, want)
-	}
-}
-
-func TestRunPrintsHelp(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	if err := Run([]string{"--help"}, &stdout, &stderr); err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-
-	if !strings.Contains(stdout.String(), "cli-toolbox ssh [flags]") {
-		t.Fatalf("stdout missing ssh usage: %q", stdout.String())
-	}
-
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr not empty: %q", stderr.String())
-	}
-}
-
-func TestRunRejectsPositionalArgs(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := Run([]string{"extra"}, &stdout, &stderr)
-	if err == nil {
-		t.Fatal("Run returned nil error")
-	}
-
-	if !strings.Contains(err.Error(), "does not accept positional arguments") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !strings.Contains(stderr.String(), "cli-toolbox ssh [flags]") {
-		t.Fatalf("stderr missing ssh usage: %q", stderr.String())
-	}
-
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout not empty: %q", stdout.String())
 	}
 }
 
