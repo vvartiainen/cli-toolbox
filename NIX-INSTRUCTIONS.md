@@ -11,7 +11,7 @@ You can consume it from another flake, such as a `nix-darwin` + Home Manager con
 ### 1. Add it as a flake input
 
 ```nix
-inputs.cli-toolbox.url = "github:YOUR_GITHUB_USER/cli-toolbox";
+inputs.cli-toolbox.url = "github:vvartiainen/cli-toolbox";
 ```
 
 ### 2. Add the package to Home Manager

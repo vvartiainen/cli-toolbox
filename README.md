@@ -7,9 +7,9 @@ Command parsing and help output are handled with [Kong](https://github.com/alect
 ## Requirements
 
 - Go
-- `fzf`
-- `kitty`
-- `aws`
+- `fzf` for interactive selection
+- `kitty` for Kitty-specific commands
+- `aws` for AWS helpers
 - `just` (for development)
 
 ## Commands
@@ -74,3 +74,7 @@ Invoke the built binary directly:
 ```sh
 ./bin/cli-toolbox <arguments>
 ```
+
+## Nix
+
+If you want to consume this repo as a flake package from a `nix-darwin` or Home Manager setup, see [`NIX-INSTRUCTIONS.md`](./NIX-INSTRUCTIONS.md).
