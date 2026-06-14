@@ -38,7 +38,26 @@ Finds `*.kitty-session` files in your home directory, lets you choose one with `
 
 Reads hosts from `~/.ssh/config`, lets you choose one with `fzf`, and connects with `kitten ssh`.
 
+## Common Development Commands
+
+If you have [`just`](https://github.com/casey/just) installed, the repository now includes a `justfile` for the common workflows:
+
+```sh
+just
+just build
+just test
+just fmt
+```
+
 ## Build
+
+With `just`:
+
+```sh
+just build
+```
+
+Without `just`:
 
 ```sh
 go build -o cli-toolbox ./cmd/cli-toolbox
@@ -46,20 +65,12 @@ go build -o cli-toolbox ./cmd/cli-toolbox
 
 ## Run
 
-Run without installing:
+Invoke the built binary directly:
 
 ```sh
-go run ./cmd/cli-toolbox aws profile
-go run ./cmd/cli-toolbox kitty-session
-go run ./cmd/cli-toolbox ssh
-```
-
-Run the built binary:
-
-```sh
-./cli-toolbox aws profile
-./cli-toolbox kitty-session
-./cli-toolbox ssh
+./bin/cli-toolbox aws profile
+./bin/cli-toolbox kitty-session
+./bin/cli-toolbox ssh
 ```
 
 ## Requirements
