@@ -38,13 +38,19 @@ darwin-rebuild switch --flake .#YOUR_HOSTNAME
 
 ### 4. About `vendorHash`
 
-The flake sets:
+The flake pins Go module dependencies with a fixed `vendorHash`, for example:
 
 ```nix
-vendorHash = null;
+vendorHash = "sha256-...";
 ```
 
-That is intentional for this project. `cli-toolbox` currently has no external Go module dependencies to vendor, so there is no concrete vendor hash to fill in.
+This is required because `cli-toolbox` uses external Go modules. If you add, remove, or update Go dependencies, refresh the hash by temporarily setting:
+
+```nix
+vendorHash = pkgs.lib.fakeHash;
+```
+
+and then running `nix build` to get the expected hash from the failure message.
 
 ### Runtime dependencies
 

@@ -29,7 +29,7 @@
             version = "dev";
             src = self;
 
-            vendorHash = null;
+            vendorHash = "sha256-7t9ZaHHX2ECoC+qJvOuMV9b4IiBy+iS6GcyOZO7ptNQ=";
 
             doCheck = true;
           };
