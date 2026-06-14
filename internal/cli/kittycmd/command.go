@@ -9,18 +9,24 @@ import (
 )
 
 type Command struct {
-	Stdout io.Writer `kong:"-"`
-	Stderr io.Writer `kong:"-"`
+	SelectSession SelectSessionCmd `cmd:"" name:"select-session" help:"Select a kitty session file with fzf and launch it."`
 }
 
 func New(stdout, stderr io.Writer) Command {
 	return Command{
-		Stdout: stdout,
-		Stderr: stderr,
+		SelectSession: SelectSessionCmd{
+			Stdout: stdout,
+			Stderr: stderr,
+		},
 	}
 }
 
-func (c Command) Run() error {
+type SelectSessionCmd struct {
+	Stdout io.Writer `kong:"-"`
+	Stderr io.Writer `kong:"-"`
+}
+
+func (c SelectSessionCmd) Run() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home directory: %w", err)

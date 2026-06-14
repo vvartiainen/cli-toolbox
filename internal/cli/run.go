@@ -13,16 +13,16 @@ import (
 )
 
 type rootCommand struct {
-	AWS          awscmd.Command   `cmd:"" name:"aws" help:"AWS helpers."`
-	KittySession kittycmd.Command `cmd:"" name:"kitty-session" help:"Select a kitty session file with fzf and launch it."`
-	SSH          sshcmd.Command   `cmd:"" name:"ssh" help:"SSH helpers."`
+	AWS   awscmd.Command   `cmd:"" name:"aws" help:"AWS helpers."`
+	Kitty kittycmd.Command `cmd:"" name:"kitty" help:"Kitty helpers."`
+	SSH   sshcmd.Command   `cmd:"" name:"ssh" help:"SSH helpers."`
 }
 
 func newRootCommand(stdout, stderr io.Writer) *rootCommand {
 	return &rootCommand{
-		AWS:          awscmd.New(stdout, stderr),
-		KittySession: kittycmd.New(stdout, stderr),
-		SSH:          sshcmd.New(stdout, stderr),
+		AWS:   awscmd.New(stdout, stderr),
+		Kitty: kittycmd.New(stdout, stderr),
+		SSH:   sshcmd.New(stdout, stderr),
 	}
 }
 

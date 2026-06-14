@@ -23,16 +23,59 @@ func TestRunPrintsRootUsageWithoutArgs(t *testing.T) {
 	}
 }
 
-func TestRunPrintsKittySessionHelp(t *testing.T) {
+func TestRunPrintsKittyHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	if err := Run([]string{"kitty-session", "--help"}, &stdout, &stderr); err != nil {
+	if err := Run([]string{"kitty", "--help"}, &stdout, &stderr); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "Usage: cli-toolbox kitty-session") {
-		t.Fatalf("stdout missing kitty-session usage: %q", stdout.String())
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox kitty") {
+		t.Fatalf("stdout missing kitty usage: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), "select-session") {
+		t.Fatalf("stdout missing kitty select-session subcommand: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunRejectsKittyWithoutSubcommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run([]string{"kitty"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("Run returned nil error")
+	}
+
+	if !strings.Contains(err.Error(), "expected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "Usage: cli-toolbox kitty <command>") {
+		t.Fatalf("stderr missing kitty usage: %q", stderr.String())
+	}
+
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout not empty: %q", stdout.String())
+	}
+}
+
+func TestRunPrintsKittySelectSessionHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"kitty", "select-session", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox kitty") || !strings.Contains(stdout.String(), "select-session") {
+		t.Fatalf("stdout missing kitty select-session usage: %q", stdout.String())
 	}
 
 	if stderr.Len() != 0 {
@@ -99,11 +142,11 @@ func TestRunPrintsAWSProfileHelp(t *testing.T) {
 	}
 }
 
-func TestRunRejectsKittySessionPositionalArgs(t *testing.T) {
+func TestRunRejectsKittySelectSessionPositionalArgs(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := Run([]string{"kitty-session", "extra"}, &stdout, &stderr)
+	err := Run([]string{"kitty", "select-session", "extra"}, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("Run returned nil error")
 	}
@@ -112,8 +155,8 @@ func TestRunRejectsKittySessionPositionalArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "Usage: cli-toolbox kitty-session") {
-		t.Fatalf("stderr missing kitty-session usage: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "Usage: cli-toolbox kitty") || !strings.Contains(stderr.String(), "select-session") {
+		t.Fatalf("stderr missing kitty select-session usage: %q", stderr.String())
 	}
 
 	if stdout.Len() != 0 {
@@ -121,11 +164,11 @@ func TestRunRejectsKittySessionPositionalArgs(t *testing.T) {
 	}
 }
 
-func TestRunRejectsUnknownKittySessionFlag(t *testing.T) {
+func TestRunRejectsUnknownKittySelectSessionFlag(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := Run([]string{"kitty-session", "--wat"}, &stdout, &stderr)
+	err := Run([]string{"kitty", "select-session", "--wat"}, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("Run returned nil error")
 	}
@@ -134,8 +177,8 @@ func TestRunRejectsUnknownKittySessionFlag(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "Usage: cli-toolbox kitty-session") {
-		t.Fatalf("stderr missing kitty-session usage: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "Usage: cli-toolbox kitty") || !strings.Contains(stderr.String(), "select-session") {
+		t.Fatalf("stderr missing kitty select-session usage: %q", stderr.String())
 	}
 
 	if stdout.Len() != 0 {

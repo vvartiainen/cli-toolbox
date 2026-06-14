@@ -10,7 +10,8 @@ Small Go CLI for a few daily workflow helpers:
 
 ```text
 cli-toolbox aws profile
-cli-toolbox kitty-session
+cli-toolbox kitty
+cli-toolbox kitty select-session
 cli-toolbox ssh
 ```
 
@@ -30,9 +31,16 @@ Use it like this:
 eval "$(cli-toolbox aws profile)"
 ```
 
-### `kitty-session`
+### `kitty`
 
 Finds `*.kitty-session` files in your home directory, lets you choose one with `fzf`, and opens it through kitty remote control.
+
+You can run the selector either as:
+
+```sh
+cli-toolbox kitty
+cli-toolbox kitty select-session
+```
 
 ### `ssh`
 
@@ -69,7 +77,8 @@ Invoke the built binary directly:
 
 ```sh
 ./bin/cli-toolbox aws profile
-./bin/cli-toolbox kitty-session
+./bin/cli-toolbox kitty
+./bin/cli-toolbox kitty select-session
 ./bin/cli-toolbox ssh
 ```
 
