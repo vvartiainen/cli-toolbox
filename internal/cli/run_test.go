@@ -154,8 +154,91 @@ func TestRunPrintsGitAgentWorktreeHelp(t *testing.T) {
 		t.Fatalf("stdout missing git agent-worktree usage: %q", stdout.String())
 	}
 
-	if !strings.Contains(stdout.String(), `cd "$(cli-toolbox git agent-worktree)"`) {
-		t.Fatalf("stdout missing git agent-worktree shell usage: %q", stdout.String())
+	for _, subcommand := range []string{"create", "list", "cleanup"} {
+		if !strings.Contains(stdout.String(), subcommand) {
+			t.Fatalf("stdout missing git agent-worktree %s subcommand: %q", subcommand, stdout.String())
+		}
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunRejectsGitAgentWorktreeWithoutSubcommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run([]string{"git", "agent-worktree"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("Run returned nil error")
+	}
+
+	if !strings.Contains(err.Error(), "expected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "Usage: cli-toolbox git agent-worktree <command>") {
+		t.Fatalf("stderr missing git agent-worktree usage: %q", stderr.String())
+	}
+
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout not empty: %q", stdout.String())
+	}
+}
+
+func TestRunPrintsGitAgentWorktreeCreateHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"git", "agent-worktree", "create", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox git agent-worktree create") {
+		t.Fatalf("stdout missing git agent-worktree create usage: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), `cd "$(cli-toolbox git agent-worktree create)"`) {
+		t.Fatalf("stdout missing git agent-worktree create shell usage: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunPrintsGitAgentWorktreeListHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"git", "agent-worktree", "list", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox git agent-worktree list") {
+		t.Fatalf("stdout missing git agent-worktree list usage: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunPrintsGitAgentWorktreeCleanupHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"git", "agent-worktree", "cleanup", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox git agent-worktree cleanup") {
+		t.Fatalf("stdout missing git agent-worktree cleanup usage: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), "--all") {
+		t.Fatalf("stdout missing git agent-worktree cleanup --all flag: %q", stdout.String())
 	}
 
 	if stderr.Len() != 0 {
