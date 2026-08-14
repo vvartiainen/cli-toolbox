@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"cli-toolbox/internal/cli/awscmd"
+	"cli-toolbox/internal/cli/gitcmd"
 	"cli-toolbox/internal/cli/kittycmd"
 	"cli-toolbox/internal/cli/sshcmd"
 
@@ -14,6 +15,7 @@ import (
 
 type rootCommand struct {
 	AWS   awscmd.Command   `cmd:"" name:"aws" help:"AWS helpers."`
+	Git   gitcmd.Command   `cmd:"" name:"git" help:"Git helpers."`
 	Kitty kittycmd.Command `cmd:"" name:"kitty" help:"Kitty helpers."`
 	SSH   sshcmd.Command   `cmd:"" name:"ssh" help:"SSH helpers."`
 }
@@ -21,6 +23,7 @@ type rootCommand struct {
 func newRootCommand(stdout, stderr io.Writer) *rootCommand {
 	return &rootCommand{
 		AWS:   awscmd.New(stdout, stderr),
+		Git:   gitcmd.New(stdout, stderr),
 		Kitty: kittycmd.New(stdout, stderr),
 		SSH:   sshcmd.New(stdout, stderr),
 	}

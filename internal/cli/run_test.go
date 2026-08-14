@@ -121,6 +121,70 @@ func TestRunPrintsSSHConnectHelp(t *testing.T) {
 	}
 }
 
+func TestRunPrintsGitHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"git", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox git <command>") {
+		t.Fatalf("stdout missing git usage: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), "agent-worktree") {
+		t.Fatalf("stdout missing git agent-worktree subcommand: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunPrintsGitAgentWorktreeHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"git", "agent-worktree", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox git agent-worktree") {
+		t.Fatalf("stdout missing git agent-worktree usage: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), `cd "$(cli-toolbox git agent-worktree)"`) {
+		t.Fatalf("stdout missing git agent-worktree shell usage: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunRejectsUnknownGitSubcommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run([]string{"git", "wat"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("Run returned nil error")
+	}
+
+	if !strings.Contains(err.Error(), "expected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "Usage: cli-toolbox git <command>") {
+		t.Fatalf("stderr missing git usage: %q", stderr.String())
+	}
+
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout not empty: %q", stdout.String())
+	}
+}
+
 func TestRunPrintsAWSProfileHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
