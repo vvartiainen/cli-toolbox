@@ -28,7 +28,7 @@ In a Home Manager module:
 }
 ```
 
-This makes the `cli-toolbox` binary available in your user profile.
+This makes the `cli-toolbox` binary available in your user profile. The package also installs bash, zsh, and fish completions.
 
 ### 3. Rebuild your system
 

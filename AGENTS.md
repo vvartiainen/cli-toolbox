@@ -25,8 +25,8 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 
 - `cmd/cli-toolbox/main.go`: binary entrypoint
 - `internal/cli/run.go`: root CLI wiring and execution flow
-- `internal/cli/awscmd`, `internal/cli/kittycmd`, `internal/cli/sshcmd`: command-facing adapters for each top-level CLI area
-- `internal/aws`, `internal/kitty`, `internal/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command packages
+- `internal/cli/awscmd`, `internal/cli/gitcmd`, `internal/cli/kittycmd`, `internal/cli/sshcmd`: command-facing adapters for each top-level CLI area
+- `internal/aws`, `internal/git`, `internal/kitty`, `internal/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command packages
 - `*_test.go` files live next to the package they cover
 - `README.md`: end-user usage and development commands
 - `NIX-INSTRUCTIONS.md`: consuming the package from Nix flakes / `nix-darwin`

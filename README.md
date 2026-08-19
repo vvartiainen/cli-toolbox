@@ -10,6 +10,7 @@ Command parsing and help output are handled with [Kong](https://github.com/alect
 - `fzf` for interactive selection
 - `kitty` for Kitty-specific commands
 - `aws` for AWS helpers
+- `git` for git helpers
 - `just` (for development)
 
 ## Commands
@@ -26,6 +27,44 @@ Use it via `eval` so the exported variable is applied in your current shell:
 
 ```sh
 eval "$(cli-toolbox aws profile)"
+```
+
+### `git`
+
+Git helpers.
+
+#### `git agent-worktree`
+
+Manage sibling git worktrees for AI agents. Running the command without a subcommand prints help.
+
+Worktrees are created next to the current directory as `<cwd>-agent-wt`, `<cwd>-agent-wt-2`, and so on.
+
+##### `git agent-worktree create`
+
+Create a new worktree and branch, then print the worktree path.
+
+```sh
+cd "$(cli-toolbox git agent-worktree create)"
+```
+
+If the current directory is `/path/to/cli-toolbox`, the first call creates `/path/to/cli-toolbox-agent-wt` on branch `cli-toolbox-agent-wt`. Later calls allocate the next free numbered name.
+
+##### `git agent-worktree list`
+
+List agent worktrees for the current directory.
+
+```sh
+cli-toolbox git agent-worktree list
+```
+
+##### `git agent-worktree cleanup`
+
+Remove an agent worktree and its branch. Pass a worktree name or path to remove one of several, omit the name when only one exists, or use `--all` to remove every agent worktree for this directory.
+
+```sh
+cli-toolbox git agent-worktree cleanup
+cli-toolbox git agent-worktree cleanup cli-toolbox-agent-wt-2
+cli-toolbox git agent-worktree cleanup --all
 ```
 
 ### `kitty`
@@ -51,6 +90,25 @@ Choose an SSH host from your config and connect to it with Kitty's SSH kitten.
 ```sh
 cli-toolbox ssh connect
 ```
+
+## Completions
+
+Generate a completion script for your shell and source it:
+
+```sh
+# bash
+source <(cli-toolbox completion -c bash)
+
+# zsh
+source <(cli-toolbox completion -c zsh)
+
+# fish
+cli-toolbox completion -c fish | source
+```
+
+`cli-toolbox completion` with no arguments prints the command for your current login shell.
+
+If you install `cli-toolbox` from the Nix flake, bash, zsh, and fish completions are installed with the package.
 
 ## Common Development Commands
 

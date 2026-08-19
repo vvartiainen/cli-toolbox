@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"cli-toolbox/internal/cli/awscmd"
 	"cli-toolbox/internal/cli/gitcmd"
@@ -11,13 +12,15 @@ import (
 	"cli-toolbox/internal/cli/sshcmd"
 
 	"github.com/alecthomas/kong"
+	kongcompletion "github.com/jotaen/kong-completion"
 )
 
 type rootCommand struct {
-	AWS   awscmd.Command   `cmd:"" name:"aws" help:"AWS helpers."`
-	Git   gitcmd.Command   `cmd:"" name:"git" help:"Git helpers."`
-	Kitty kittycmd.Command `cmd:"" name:"kitty" help:"Kitty helpers."`
-	SSH   sshcmd.Command   `cmd:"" name:"ssh" help:"SSH helpers."`
+	AWS        awscmd.Command            `cmd:"" name:"aws" help:"AWS helpers."`
+	Git        gitcmd.Command            `cmd:"" name:"git" help:"Git helpers."`
+	Kitty      kittycmd.Command          `cmd:"" name:"kitty" help:"Kitty helpers."`
+	SSH        sshcmd.Command            `cmd:"" name:"ssh" help:"SSH helpers."`
+	Completion kongcompletion.Completion `cmd:"" help:"Generate shell completion scripts."`
 }
 
 func newRootCommand(stdout, stderr io.Writer) *rootCommand {
@@ -34,20 +37,34 @@ type parserExit struct {
 }
 
 func Run(args []string, stdout, stderr io.Writer) (err error) {
-	if len(args) == 0 {
-		_, _, err = parseArgs([]string{"--help"}, stdout, stderr)
-		return err
-	}
-
-	ctx, exited, err := parseArgs(args, stdout, stderr)
-	if exited != nil {
-		if exited.code == 0 {
-			return nil
+	// Kong uses its configured Exit function while parsing help and while
+	// running commands such as shell completion. Convert both cases into a
+	// normal return instead of allowing the CLI library to terminate the process.
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
 		}
 
-		return fmt.Errorf("CLI exited with code %d", exited.code)
+		exit, ok := recovered.(parserExit)
+		if !ok {
+			panic(recovered)
+		}
+
+		if exit.code == 0 {
+			err = nil
+			return
+		}
+
+		err = fmt.Errorf("CLI exited with code %d", exit.code)
+	}()
+
+	if len(args) == 0 && os.Getenv("COMP_LINE") == "" {
+		_, err = parseArgs([]string{"--help"}, stdout, stderr)
+		return
 	}
 
+	ctx, err := parseArgs(args, stdout, stderr)
 	if err != nil {
 		if parseErr, ok := errors.AsType[*kong.ParseError](err); ok {
 			parseErr.Context.Stdout = stderr
@@ -60,7 +77,7 @@ func Run(args []string, stdout, stderr io.Writer) (err error) {
 	return ctx.Run()
 }
 
-func parseArgs(args []string, stdout, stderr io.Writer) (ctx *kong.Context, exited *parserExit, err error) {
+func parseArgs(args []string, stdout, stderr io.Writer) (*kong.Context, error) {
 	app := newRootCommand(stdout, stderr)
 
 	parser, err := kong.New(
@@ -73,25 +90,10 @@ func parseArgs(args []string, stdout, stderr io.Writer) (ctx *kong.Context, exit
 		}),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build CLI parser: %w", err)
+		return nil, fmt.Errorf("build CLI parser: %w", err)
 	}
 
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			return
-		}
+	kongcompletion.Register(parser, worktreeNamesPredictor)
 
-		exit, ok := recovered.(parserExit)
-		if !ok {
-			panic(recovered)
-		}
-
-		exited = &exit
-		ctx = nil
-		err = nil
-	}()
-
-	ctx, err = parser.Parse(args)
-	return ctx, exited, err
+	return parser.Parse(args)
 }

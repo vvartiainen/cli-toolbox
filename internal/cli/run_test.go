@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -375,4 +376,151 @@ func TestRunRejectsUnknownSSHSubcommand(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout not empty: %q", stdout.String())
 	}
+}
+
+func TestRunPrintsCompletionHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"completion", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Usage: cli-toolbox completion") {
+		t.Fatalf("stdout missing completion usage: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), "--code") {
+		t.Fatalf("stdout missing --code flag: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), "tab completion") {
+		t.Fatalf("stdout missing completion description: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunPrintsZshCompletionScript(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := Run([]string{"completion", "-c", "zsh"}, &stdout, &stderr); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "#compdef cli-toolbox") {
+		t.Fatalf("stdout missing zsh #compdef: %q", stdout.String())
+	}
+
+	if !strings.Contains(stdout.String(), "complete") || !strings.Contains(stdout.String(), "-C") {
+		t.Fatalf("stdout missing complete -C hook: %q", stdout.String())
+	}
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr not empty: %q", stderr.String())
+	}
+}
+
+func TestRunCompletesRootCommands(t *testing.T) {
+	stdout, stderr := completeLine(t, "cli-toolbox ")
+
+	for _, command := range []string{"aws", "completion", "git", "kitty", "ssh"} {
+		if !containsLine(stdout, command) {
+			t.Fatalf("stdout missing %s: %q", command, stdout)
+		}
+	}
+
+	if stderr != "" {
+		t.Fatalf("stderr not empty: %q", stderr)
+	}
+}
+
+func TestRunCompletesCompletionShells(t *testing.T) {
+	stdout, stderr := completeLine(t, "cli-toolbox completion ")
+
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		if !containsLine(stdout, shell) {
+			t.Fatalf("stdout missing %s: %q", shell, stdout)
+		}
+	}
+
+	if stderr != "" {
+		t.Fatalf("stderr not empty: %q", stderr)
+	}
+}
+
+func TestRunCompletesGitAgentWorktreeSubcommands(t *testing.T) {
+	stdout, stderr := completeLine(t, "cli-toolbox git agent-worktree ")
+
+	for _, command := range []string{"create", "list", "cleanup"} {
+		if !containsLine(stdout, command) {
+			t.Fatalf("stdout missing %s: %q", command, stdout)
+		}
+	}
+
+	if stderr != "" {
+		t.Fatalf("stderr not empty: %q", stderr)
+	}
+}
+
+func TestRunCompletesCleanupFlags(t *testing.T) {
+	stdout, stderr := completeLine(t, "cli-toolbox git agent-worktree cleanup -")
+
+	if !containsLine(stdout, "--all") {
+		t.Fatalf("stdout missing --all: %q", stdout)
+	}
+
+	if !containsLine(stdout, "--help") {
+		t.Fatalf("stdout missing --help: %q", stdout)
+	}
+
+	if stderr != "" {
+		t.Fatalf("stderr not empty: %q", stderr)
+	}
+}
+
+func TestRunRejectsUnknownCompletionShell(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run([]string{"completion", "powershell"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("Run returned nil error")
+	}
+
+	if !strings.Contains(err.Error(), "powershell") && !strings.Contains(err.Error(), "must be one of") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout not empty: %q", stdout.String())
+	}
+}
+
+func completeLine(t *testing.T, line string) (stdout, stderr string) {
+	t.Helper()
+	t.Setenv("COMP_LINE", line)
+	t.Setenv("COMP_POINT", strconv.Itoa(len(line)))
+
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+
+	if err := Run(nil, &outBuf, &errBuf); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	return outBuf.String(), errBuf.String()
+}
+
+func containsLine(output, line string) bool {
+	for _, got := range strings.Split(strings.TrimSpace(output), "\n") {
+		if got == line {
+			return true
+		}
+	}
+
+	return false
 }

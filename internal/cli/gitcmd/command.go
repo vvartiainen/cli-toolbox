@@ -86,7 +86,7 @@ func (c AgentWorktreeListCmd) Run() error {
 type AgentWorktreeCleanupCmd struct {
 	Stdout io.Writer `kong:"-"`
 	Stderr io.Writer `kong:"-"`
-	Name   string    `arg:"" optional:"" name:"name" help:"Worktree name or path to remove."`
+	Name   string    `arg:"" optional:"" name:"name" help:"Worktree name or path to remove." completion-predictor:"worktree"`
 	All    bool      `help:"Remove all agent worktrees for the current directory."`
 }
 

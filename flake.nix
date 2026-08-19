@@ -29,9 +29,18 @@
             version = "dev";
             src = self;
 
-            vendorHash = "sha256-7t9ZaHHX2ECoC+qJvOuMV9b4IiBy+iS6GcyOZO7ptNQ=";
+            vendorHash = "sha256-a4U0pFczR4Lg3ngTKlS1LXkPQclqfYX9UZ1/w9v1ZIE=";
+
+            nativeBuildInputs = [ pkgs.installShellFiles ];
 
             doCheck = true;
+
+            postInstall = ''
+              installShellCompletion --cmd cli-toolbox \
+                --bash <($out/bin/cli-toolbox completion -c bash) \
+                --zsh <($out/bin/cli-toolbox completion -c zsh) \
+                --fish <($out/bin/cli-toolbox completion -c fish)
+            '';
           };
         });
 
