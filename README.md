@@ -1,17 +1,19 @@
 # cli-toolbox
 
-Small Go CLI for a few daily workflow helpers.
+Small Rust CLI for a few daily workflow helpers.
 
-Command parsing and help output are handled with [Kong](https://github.com/alecthomas/kong).
+Command parsing and help output are handled with [clap](https://github.com/clap-rs/clap). Interactive selection uses [fzf](https://github.com/junegunn/fzf) when it is on PATH, and a built-in [ratatui](https://github.com/ratatui/ratatui) picker otherwise.
 
 ## Requirements
 
-- Go
-- `fzf` for interactive selection
+- Rust
+- `fzf` for interactive selection (optional; a built-in picker is used if it is missing)
 - `kitty` for Kitty-specific commands
 - `aws` for AWS helpers
 - `git` for git helpers
 - `just` (for development)
+
+AWS profile, Kitty session, and SSH host selection run an interactive terminal UI. Those commands need a TTY.
 
 ## Commands
 
@@ -21,7 +23,7 @@ AWS helpers.
 
 #### `aws profile`
 
-Pick an AWS profile with `fzf`, log in to AWS SSO if needed, and print the `AWS_PROFILE` export for your shell.
+Pick an AWS profile, log in to AWS SSO if needed, and print the `AWS_PROFILE` export for your shell.
 
 Use it via `eval` so the exported variable is applied in your current shell:
 
@@ -135,4 +137,4 @@ Invoke the built binary directly:
 
 ## Nix
 
-If you want to consume this repo as a flake package from a `nix-darwin` or Home Manager setup, see [`NIX-INSTRUCTIONS.md`](./NIX-INSTRUCTIONS.md).
+If you want to consume this repo as a flake package from a `nix-darwin` or Home Manager setup, see [`NIX-INSTRUCTIONS.md`](NIX-INSTRUCTIONS.md).

@@ -1,5 +1,4 @@
 binary := "cli-toolbox"
-entrypoint := "./cmd/cli-toolbox"
 
 # Show available recipes
 default:
@@ -8,12 +7,14 @@ default:
 # Build the CLI into ./bin
 build:
     mkdir -p ./bin
-    go build -o ./bin/{{binary}} {{entrypoint}}
+    cargo build --release
+    cp target/release/{{binary}} ./bin/{{binary}}
 
 # Run all tests
 test:
-    go test ./...
+    cargo test
 
-# Format Go source files
+# Format and lint Rust sources
 fmt:
-    go fmt ./...
+    cargo fmt
+    cargo clippy --all-targets -- -D warnings

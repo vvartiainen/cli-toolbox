@@ -36,29 +36,18 @@ This makes the `cli-toolbox` binary available in your user profile. The package 
 darwin-rebuild switch --flake .#YOUR_HOSTNAME
 ```
 
-### 4. About `vendorHash`
+### 4. About `Cargo.lock`
 
-The flake pins Go module dependencies with a fixed `vendorHash`, for example:
-
-```nix
-vendorHash = "sha256-...";
-```
-
-This is required because `cli-toolbox` uses external Go modules. If you add, remove, or update Go dependencies, refresh the hash by temporarily setting:
-
-```nix
-vendorHash = pkgs.lib.fakeHash;
-```
-
-and then running `nix build` to get the expected hash from the failure message.
+The flake builds with `rustPlatform.buildRustPackage` and pins crate versions from `Cargo.lock`. Commit lockfile changes when you add, remove, or update Rust dependencies.
 
 ### Runtime dependencies
 
 This package only installs the `cli-toolbox` binary itself. Runtime tools used by some commands are expected to be installed separately in your environment, for example:
 
-- `fzf`
+- `fzf` (optional; a built-in picker is used if it is missing)
 - `kitty`
 - `aws`
+- `git`
 
 That matches setups where those tools are already provided via Homebrew, Home Manager, or some other package source.
 

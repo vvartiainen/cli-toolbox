@@ -1,6 +1,6 @@
 # cli-toolbox
 
-This is a small CLI toolbox / helper written with modern Golang.
+This is a small CLI toolbox / helper written with modern Rust.
 
 The purpose is to extend and help with the functionality of some CLIs I use, for example:
 
@@ -10,24 +10,26 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 
 ## Generic guidelines
 
-1. Use modern Golang features  (>=1.26.0)
+1. Use modern Rust (edition 2024)
 2. Prefer stdlib features to adding new dependencies
-3. Well established dependencies can be used, like Kong for CLI command and flag parsing
+3. Well established dependencies can be used, like clap for CLI command and flag parsing
 
 ## Development workflow
 
 1. Start by writing simple happy path tests for the feature
 2. Write the implementation
 3. Keep iterating the implementation until the tests pass
-4. Run go formatting and linting commands and fix the issues
+4. Run `just fmt` and fix the issues
 
 ## Repo structure
 
-- `cmd/cli-toolbox/main.go`: binary entrypoint
-- `internal/cli/run.go`: root CLI wiring and execution flow
-- `internal/cli/awscmd`, `internal/cli/gitcmd`, `internal/cli/kittycmd`, `internal/cli/sshcmd`: command-facing adapters for each top-level CLI area
-- `internal/aws`, `internal/git`, `internal/kitty`, `internal/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command packages
-- `*_test.go` files live next to the package they cover
+- `src/main.rs`: binary entrypoint
+- `src/lib.rs`: library root exposing `run()`
+- `src/cli/`: clap command adapters for each top-level CLI area
+- `src/aws`, `src/git`, `src/kitty`, `src/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command modules
+- `src/select.rs`: shared interactive picker (`fzf` when available, ratatui otherwise)
+- `src/exec.rs`: PATH lookup and process helpers
+- Tests live next to the module they cover
 - `README.md`: end-user usage and development commands
 - `NIX-INSTRUCTIONS.md`: consuming the package from Nix flakes / `nix-darwin`
 - `justfile`: common local development commands
@@ -35,7 +37,7 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 
 ## Change placement
 
-1. Add new executable wiring in `cmd/cli-toolbox` only when the process entrypoint changes
-2. Add or update top-level CLI commands in `internal/cli/...`
-3. Put reusable parsing, file access, external tool integration, and business logic in the matching `internal/<area>` package
-4. Prefer adding tests beside the package you change, starting with happy path coverage
+1. Add new executable wiring in `src/main.rs` only when the process entrypoint changes
+2. Add or update top-level CLI commands in `src/cli/`
+3. Put reusable parsing, file access, external tool integration, and business logic in the matching `src/<area>` module
+4. Prefer adding tests beside the module you change, starting with happy path coverage

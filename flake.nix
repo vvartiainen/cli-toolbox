@@ -1,5 +1,5 @@
 {
-  description = "Small Go CLI toolbox";
+  description = "Small Rust CLI toolbox";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -24,14 +24,15 @@
         let
           pkgs = pkgsFor system;
         in {
-          default = pkgs.buildGoModule {
+          default = pkgs.rustPlatform.buildRustPackage {
             pname = "cli-toolbox";
             version = "dev";
             src = self;
 
-            vendorHash = "sha256-a4U0pFczR4Lg3ngTKlS1LXkPQclqfYX9UZ1/w9v1ZIE=";
+            cargoLock.lockFile = ./Cargo.lock;
 
             nativeBuildInputs = [ pkgs.installShellFiles ];
+            nativeCheckInputs = [ pkgs.git ];
 
             doCheck = true;
 
