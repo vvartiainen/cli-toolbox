@@ -3,6 +3,7 @@ mod complete;
 mod git;
 mod kitty;
 mod ssh;
+mod tui;
 
 use std::io::Write;
 
@@ -13,6 +14,7 @@ use self::complete::CompletionCmd;
 use self::git::GitCmd;
 use self::kitty::KittyCmd;
 use self::ssh::SshCmd;
+use self::tui::TuiCmd;
 use crate::Error;
 
 #[derive(Debug, Parser)]
@@ -29,6 +31,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Open the interactive tool launcher.
+    Tui(TuiCmd),
     /// AWS helpers.
     Aws(AwsCmd),
     /// Git helpers.
@@ -70,6 +74,7 @@ pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> R
 impl Commands {
     fn run(self, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<(), Error> {
         match self {
+            Self::Tui(cmd) => cmd.run(stdout, stderr),
             Self::Aws(cmd) => cmd.run(stdout, stderr),
             Self::Git(cmd) => cmd.run(stdout, stderr),
             Self::Kitty(cmd) => cmd.run(stdout, stderr),
@@ -95,6 +100,20 @@ mod tests {
             String::from_utf8(stdout).unwrap(),
             String::from_utf8(stderr).unwrap(),
         )
+    }
+
+    #[test]
+    fn prints_tui_help_without_opening_terminal() {
+        let (result, stdout, stderr) = run_args(&["tui", "--help"]);
+        result.unwrap();
+        assert!(stdout.contains("Usage: cli-toolbox tui"), "{stdout}");
+        assert!(stderr.is_empty(), "{stderr}");
+    }
+
+    #[test]
+    fn completion_includes_tui() {
+        let script = generate_to_string("bash").unwrap();
+        assert!(script.contains("tui"));
     }
 
     #[test]

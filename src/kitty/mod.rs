@@ -84,7 +84,7 @@ fn select_session(home: &Path, paths: &[PathBuf]) -> Result<Option<PathBuf>, Err
         .ok_or_else(|| Error::msg("selected kitty session was not found"))
 }
 
-fn launch_session(
+pub(crate) fn launch_session(
     path: &Path,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,

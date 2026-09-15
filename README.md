@@ -17,6 +17,35 @@ AWS profile, Kitty session, and SSH host selection run an interactive terminal U
 
 ## Commands
 
+### `tui`
+
+Open the interactive tool launcher:
+
+```sh
+cli-toolbox tui
+```
+
+Select AWS profiles, switch Kitty sessions, connect to SSH hosts, or create, inspect,
+and clean up Git agent worktrees. Worktree operations use the directory from which
+you launched the toolbox. Cleanup asks you to confirm the selected worktree and
+branch before removing them.
+
+Type to search, use Up/Down (or Ctrl-P/Ctrl-N) to select, and press Enter to open.
+Esc goes back or exits from the tool menu; Ctrl-C exits while the launcher owns the
+terminal. Backspace edits the query and Ctrl-U clears it. F5 refreshes a resource
+list. Use arrows or PageUp/PageDown to scroll results. In cleanup confirmation,
+use Tab or Left/Right to choose between Cancel and Remove, then Enter to accept.
+
+The launcher always uses ratatui, whether or not `fzf` is installed. It requires
+stdin, stdout, and stderr to be terminals. SSH and AWS SSO temporarily take over
+the terminal; the launcher resumes when they finish.
+
+AWS exports and worktree directory changes appear as bash/zsh commands to run
+after exiting. The launcher cannot change your parent shell's environment or
+directory. For shell integration, keep using `eval "$(cli-toolbox aws profile)"`
+and `cd "$(cli-toolbox git agent-worktree create)"`. Do not pass `tui` output to
+`eval` or `cd`. Running `cli-toolbox` without arguments still prints help.
+
 ### `aws`
 
 AWS helpers.

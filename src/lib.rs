@@ -6,6 +6,8 @@ mod git;
 mod kitty;
 mod select;
 mod ssh;
+mod terminal;
+mod tui;
 
 use std::io::Write;
 

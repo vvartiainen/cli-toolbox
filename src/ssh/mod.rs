@@ -200,7 +200,11 @@ fn select_host(hosts: &[Host]) -> Result<Option<&Host>, Error> {
         .map(Some)
 }
 
-fn connect(host: &Host, _stdout: &mut dyn Write, _stderr: &mut dyn Write) -> Result<(), Error> {
+pub(crate) fn connect(
+    host: &Host,
+    _stdout: &mut dyn Write,
+    _stderr: &mut dyn Write,
+) -> Result<(), Error> {
     let (cmd_name, args) = kitten_ssh_command(&host.name)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     exec::run_inherited(cmd_name, &arg_refs).map_err(|err| {

@@ -32,6 +32,15 @@ pub fn create_agent_worktree(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), Error> {
+    let worktree = create_agent_worktree_record(cwd, stderr)?;
+    writeln!(stdout, "{}", worktree.path.display())?;
+    Ok(())
+}
+
+pub(crate) fn create_agent_worktree_record(
+    cwd: &Path,
+    stderr: &mut dyn Write,
+) -> Result<AgentWorktree, Error> {
     require_git()?;
     let layout = resolve_cwd(cwd)?;
     let used = used_agent_worktree_names(cwd, &layout)?;
@@ -48,8 +57,11 @@ pub fn create_agent_worktree(
             path.display()
         ))
     })?;
-    writeln!(stdout, "{}", path.display())?;
-    Ok(())
+    Ok(AgentWorktree {
+        name: name.clone(),
+        path,
+        branch: name,
+    })
 }
 
 pub fn list_agent_worktrees(
@@ -324,8 +336,13 @@ fn remove_agent_worktree(
     if worktree.branch.is_empty() {
         return Ok(());
     }
-    run_git(cwd, stderr, &["branch", "-D", "--", &worktree.branch])
-        .map_err(|err| Error::msg(format!("delete git branch \"{}\": {err}", worktree.branch)))
+    run_git(cwd, stderr, &["branch", "-D", "--", &worktree.branch]).map_err(|err| {
+        Error::msg(format!(
+            "worktree \"{}\" was removed, but could not delete git branch \"{}\": {err}",
+            worktree.path.display(),
+            worktree.branch
+        ))
+    })
 }
 
 fn require_git() -> Result<(), Error> {
@@ -344,8 +361,9 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_worktrees, cleanup_agent_worktree, create_agent_worktree, is_agent_worktree_name,
-        list_agent_worktrees, next_agent_worktree_name,
+        agent_worktrees, cleanup_agent_worktree, create_agent_worktree,
+        create_agent_worktree_record, is_agent_worktree_name, list_agent_worktrees,
+        next_agent_worktree_name,
     };
     use crate::exec;
     use std::collections::HashSet;
@@ -420,6 +438,27 @@ mod tests {
             "demo-agent-wt"
         );
         assert_worktree_listed(&repo, &want_path, "demo-agent-wt");
+    }
+
+    #[test]
+    fn create_agent_worktree_record_returns_created_worktree() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("demo");
+        init_git_repo(&repo);
+
+        let mut stderr = Vec::new();
+        let worktree = create_agent_worktree_record(&repo, &mut stderr).unwrap();
+
+        assert_eq!(worktree.name, "demo-agent-wt");
+        assert_same_path(
+            worktree.path.to_string_lossy(),
+            &root.path().join("demo-agent-wt"),
+        );
+        assert_eq!(worktree.branch, "demo-agent-wt");
+        assert!(worktree.path.exists());
     }
 
     #[test]
@@ -512,6 +551,89 @@ mod tests {
         let branch_set: HashSet<_> = branches.lines().collect();
         assert!(!branch_set.contains("demo-agent-wt"));
         assert!(branch_set.contains("demo-agent-wt-2"));
+    }
+
+    #[test]
+    fn cleanup_refuses_dirty_worktree_without_force() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("demo");
+        init_git_repo(&repo);
+
+        let mut stderr = Vec::new();
+        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
+        let worktree_path = root.path().join("demo-agent-wt");
+        fs::write(worktree_path.join("README.md"), "uncommitted change\n").unwrap();
+
+        let mut cleanup_stderr = Vec::new();
+        let result = cleanup_agent_worktree(
+            &repo,
+            "demo-agent-wt",
+            false,
+            &mut Vec::new(),
+            &mut cleanup_stderr,
+        );
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("remove git worktree"), "{error}");
+        assert!(worktree_path.exists());
+        assert_eq!(agent_worktrees(&repo).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cleanup_reports_branch_failure_after_worktree_removal() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("demo");
+        init_git_repo(&repo);
+
+        let mut stderr = Vec::new();
+        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
+        let worktree_path = root.path().join("demo-agent-wt");
+        let held_path = root.path().join("demo-agent-wt-held");
+        must_run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--force",
+                held_path.to_str().unwrap(),
+                "demo-agent-wt",
+            ],
+        );
+
+        let mut cleanup_stderr = Vec::new();
+        let result = cleanup_agent_worktree(
+            &repo,
+            "demo-agent-wt",
+            false,
+            &mut Vec::new(),
+            &mut cleanup_stderr,
+        );
+
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("delete git branch \"demo-agent-wt\""),
+            "{error}"
+        );
+        assert!(error.contains("was removed"), "{error}");
+        assert!(!cleanup_stderr.is_empty());
+        assert!(!worktree_path.exists());
+        assert!(held_path.exists());
+        let branches = must_git_output(
+            &repo,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        );
+        assert!(branches.lines().any(|branch| branch == "demo-agent-wt"));
+
+        must_run_git(
+            &repo,
+            &["worktree", "remove", "--force", held_path.to_str().unwrap()],
+        );
     }
 
     #[test]

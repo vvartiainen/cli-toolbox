@@ -2,20 +2,14 @@ use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 
+use crate::terminal::TerminalSession;
 use crate::{Error, exec};
 
 /// Prefer `fzf` when it is on PATH; otherwise use the built-in picker.
@@ -63,13 +57,7 @@ fn pick_with_ratatui(prompt: &str, items: &[String]) -> Result<Option<usize>, Er
         return Err(Error::msg("interactive selection requires a terminal"));
     }
 
-    let mut stderr = io::stderr();
-    enable_raw_mode()?;
-    execute!(stderr, EnterAlternateScreen, Hide)?;
-    let mut guard = TerminalGuard { restored: false };
-
-    let backend = CrosstermBackend::new(io::stderr());
-    let mut terminal = Terminal::new(backend)?;
+    let mut session = TerminalSession::new()?;
 
     let mut query = String::new();
     let mut selected = 0usize;
@@ -79,7 +67,7 @@ fn pick_with_ratatui(prompt: &str, items: &[String]) -> Result<Option<usize>, Er
             selected = visible.len().saturating_sub(1);
         }
 
-        terminal.draw(|frame| {
+        session.terminal_mut().draw(|frame| {
             draw(frame, prompt, &query, items, &visible, selected);
         })?;
 
@@ -103,7 +91,7 @@ fn pick_with_ratatui(prompt: &str, items: &[String]) -> Result<Option<usize>, Er
         }
     };
 
-    guard.restore()?;
+    session.restore()?;
     result
 }
 
@@ -229,28 +217,6 @@ fn draw(
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(list, list_area, &mut state);
     frame.render_widget(Paragraph::new(format!("{prompt}{query}")), input_area);
-}
-
-struct TerminalGuard {
-    restored: bool,
-}
-
-impl TerminalGuard {
-    fn restore(&mut self) -> io::Result<()> {
-        if self.restored {
-            return Ok(());
-        }
-        self.restored = true;
-        disable_raw_mode()?;
-        execute!(io::stderr(), LeaveAlternateScreen, Show)?;
-        Ok(())
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = self.restore();
-    }
 }
 
 #[cfg(test)]

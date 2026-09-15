@@ -121,7 +121,7 @@ pub(super) fn is_sso_profile(profile: &Profile) -> bool {
         .any(|key| key.starts_with("sso_") || key == "sso_session")
 }
 
-pub(super) fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".into();
     }
