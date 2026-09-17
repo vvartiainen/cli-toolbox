@@ -1,3 +1,5 @@
 /bin
 /target
 result
+/result-*
+.agent-sandbox/

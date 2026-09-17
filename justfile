@@ -18,3 +18,11 @@ test:
 fmt:
     cargo fmt
     cargo clippy --all-targets -- -D warnings
+
+# Start the agent-sandbox MicroVM (Apple silicon)
+sandbox *args:
+    nix run ./sandbox {{args}}
+
+# SSH into a running agent-sandbox VM
+sandbox-ssh *args:
+    nix run ./sandbox#ssh -- {{args}}
