@@ -61,7 +61,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         Screen::Home => draw_home(frame, app),
         Screen::Picker(picker) => draw_picker(frame, app, picker),
         Screen::WorktreeDetails(details) => draw_details(frame, app, details),
-        Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, confirm),
+        Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, app, confirm),
         Screen::Result(result) => draw_result(frame, result),
     }
 }
@@ -153,7 +153,7 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             if picker.tool == ToolId::AgentWorktrees {
                 entries.extend([
                     entry("⏎", "worktree details"),
-                    entry("^A", "new worktree"),
+                    entry("^A", "new worktree (init + Herdr)"),
                     entry("^D", "remove worktree"),
                 ]);
             } else {
@@ -450,7 +450,7 @@ fn field(name: &str, value: &str) -> Line<'static> {
     ])
 }
 
-fn draw_confirmation(frame: &mut Frame<'_>, confirm: &ConfirmState) {
+fn draw_confirmation(frame: &mut Frame<'_>, app: &App, confirm: &ConfirmState) {
     let area = frame.area();
     let block = panel(
         breadcrumb(ToolId::AgentWorktrees.category(), "Confirm cleanup"),
@@ -474,12 +474,15 @@ fn draw_confirmation(frame: &mut Frame<'_>, confirm: &ConfirmState) {
             field("Branch", &confirm.worktree.branch),
         )
     };
-    let content = vec![
+    let mut content = vec![
         Line::from(question.bold()),
         Line::default(),
         field("Path", &confirm.worktree.path.display().to_string()),
         branch,
     ];
+    if app.herdr {
+        content.push(field("Herdr", "an open workspace for it is closed too"));
+    }
     frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), body);
 
     let button = |label: &'static str, active: bool, color: Color| {
@@ -669,6 +672,8 @@ mod tests {
             return_picker: crate::tui::app::PickerState::new(ToolId::AgentWorktrees),
         });
         assert!(rendered(&app, 80, 12).contains("Remove this worktree and branch?"));
+        app.herdr = true;
+        assert!(rendered(&app, 80, 12).contains("workspace for it is closed too"));
     }
 
     #[test]

@@ -1,9 +1,12 @@
+mod agent;
 mod aws;
 mod cli;
 mod error;
 mod exec;
 mod git;
+mod herdr;
 mod kitty;
+mod project;
 mod select;
 mod ssh;
 mod terminal;

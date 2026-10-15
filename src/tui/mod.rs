@@ -27,6 +27,7 @@ pub(crate) fn run(
     let context = Context::new();
     let mut app = App::new(context.cwd_display());
     app.print_shell = print_shell;
+    app.herdr = crate::herdr::available();
     let mut session = Some(TerminalSession::inline(ui::HEIGHT)?);
     let result = event_loop(&context, &mut app, &mut session, stderr);
     let restoration = session.as_mut().map(Session::restore).transpose();

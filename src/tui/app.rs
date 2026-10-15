@@ -287,6 +287,8 @@ pub(crate) struct App {
     pub(crate) show_help: bool,
     /// Successful shell actions exit and print their command for `eval`.
     pub(crate) print_shell: bool,
+    /// Herdr is installed, so worktree removal also closes its workspace.
+    pub(crate) herdr: bool,
 }
 
 impl App {
@@ -301,6 +303,7 @@ impl App {
             loading: None,
             show_help: false,
             print_shell: false,
+            herdr: false,
         }
     }
 

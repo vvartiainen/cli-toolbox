@@ -26,7 +26,8 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 - `src/main.rs`: binary entrypoint
 - `src/lib.rs`: library root exposing `run()`
 - `src/cli/`: clap command adapters for each top-level CLI area
-- `src/aws`, `src/git`, `src/kitty`, `src/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command modules
+- `src/aws`, `src/git`, `src/herdr`, `src/kitty`, `src/project`, `src/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command modules
+- `src/agent`: agent worktree workflows that combine git, project init and Herdr; shared by the CLI and the TUI
 - `src/select.rs`: shared interactive picker (`fzf` when available, ratatui otherwise)
 - `src/exec.rs`: PATH lookup and process helpers
 - Tests live next to the module they cover

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::{Error, aws, git, kitty, ssh};
+use crate::{Error, agent, aws, git, kitty, ssh};
 
 use super::app::{Action, Resource, ToolId};
 
@@ -20,11 +20,17 @@ pub(super) struct Outcome {
 struct Done {
     body: String,
     shell: Option<String>,
+    /// The action ran, but an optional step such as init failed.
+    incomplete: bool,
 }
 
 impl Done {
     fn body(body: String) -> Self {
-        Self { body, shell: None }
+        Self {
+            body,
+            shell: None,
+            incomplete: false,
+        }
     }
 }
 
@@ -69,10 +75,12 @@ impl Context {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = self.execute_inner(action, &mut stdout, &mut stderr);
-        let failed = result.is_err();
-        let (mut body, shell) = match result {
-            Ok(done) => (done.body, done.shell),
-            Err(err) => (err.to_string(), None),
+        let (title, mut body, shell, failed) = match result {
+            Ok(done) if done.incomplete => {
+                ("Action completed with errors", done.body, done.shell, true)
+            }
+            Ok(done) => ("Action completed", done.body, done.shell, false),
+            Err(err) => ("Action failed", err.to_string(), None, true),
         };
         for bytes in [&stdout, &stderr] {
             if !bytes.is_empty() {
@@ -81,12 +89,7 @@ impl Context {
             }
         }
         Outcome {
-            title: if failed {
-                "Action failed"
-            } else {
-                "Action completed"
-            }
-            .into(),
+            title: title.into(),
             body,
             failed,
             shell,
@@ -108,6 +111,7 @@ impl Context {
                         profile.name
                     ),
                     shell: Some(export),
+                    incomplete: false,
                 })
             }
             Action::Kitty(path) => {
@@ -122,15 +126,24 @@ impl Context {
                 Ok(Done::body(format!("SSH session for {} ended.", host.name)))
             }
             Action::CreateWorktree => {
-                let worktree = git::create_agent_worktree_record(self.working_dir()?, stderr)?;
+                // The launcher has released the terminal, so git and the init
+                // command stream their progress to it directly.
+                let created = agent::create_worktree(
+                    self.working_dir()?,
+                    agent::Options::default(),
+                    &mut std::io::stderr(),
+                )?;
+                let path = &created.worktree.path;
                 Ok(Done {
                     body: format!(
-                        "Created worktree: {}\nBranch: {}\n\n{}",
-                        worktree.path.display(),
-                        worktree.branch,
-                        directory_instructions(&worktree.path)
+                        "Created worktree: {}\nBranch: {}\n\n{}\n\n{}",
+                        path.display(),
+                        created.worktree.branch,
+                        steps_text(&created.steps),
+                        directory_instructions(path)
                     ),
-                    shell: cd_command(&worktree.path),
+                    shell: cd_command(path),
+                    incomplete: created.steps.iter().any(agent::Step::failed),
                 })
             }
             Action::EnterWorktree(worktree) => Ok(Done {
@@ -140,13 +153,16 @@ impl Context {
                     directory_instructions(&worktree.path)
                 ),
                 shell: cd_command(&worktree.path),
+                incomplete: false,
             }),
             Action::Cleanup(worktree) => {
-                let target = worktree.path.to_str().ok_or_else(|| {
-                    Error::msg("cannot clean up a worktree whose path is not valid UTF-8")
-                })?;
-                git::cleanup_agent_worktree(self.working_dir()?, target, false, stdout, stderr)?;
-                Ok(Done::body(if worktree.branch.is_empty() {
+                let steps = agent::remove_worktree(
+                    self.working_dir()?,
+                    worktree,
+                    agent::Options::default(),
+                    stderr,
+                )?;
+                let removed = if worktree.branch.is_empty() {
                     format!("Removed worktree {}", worktree.path.display())
                 } else {
                     format!(
@@ -154,7 +170,12 @@ impl Context {
                         worktree.path.display(),
                         worktree.branch
                     )
-                }))
+                };
+                Ok(Done {
+                    body: format!("{removed}\n\n{}", steps_text(&steps)),
+                    shell: None,
+                    incomplete: steps.iter().any(agent::Step::failed),
+                })
             }
         }
     }
@@ -184,6 +205,11 @@ fn load_home(tool: ToolId, home: &Path) -> Result<Vec<Resource>, Error> {
             "this tool does not load resources from the home directory",
         )),
     }
+}
+
+fn steps_text(steps: &[agent::Step]) -> String {
+    let lines: Vec<String> = steps.iter().map(ToString::to_string).collect();
+    lines.join("\n")
 }
 
 /// A `cd` for bash/zsh, or nothing when the path cannot be quoted safely.

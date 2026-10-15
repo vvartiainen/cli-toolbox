@@ -27,16 +27,6 @@ struct GitWorktree {
     branch: String,
 }
 
-pub fn create_agent_worktree(
-    cwd: &Path,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> Result<(), Error> {
-    let worktree = create_agent_worktree_record(cwd, stderr)?;
-    writeln!(stdout, "{}", worktree.path.display())?;
-    Ok(())
-}
-
 pub(crate) fn create_agent_worktree_record(
     cwd: &Path,
     stderr: &mut dyn Write,
@@ -75,13 +65,13 @@ pub fn list_agent_worktrees(
     Ok(())
 }
 
-pub fn cleanup_agent_worktree(
+/// The worktrees a cleanup targets: the one named (or the only one), or all
+/// of them with `all`.
+pub(crate) fn select_agent_worktrees(
     cwd: &Path,
     name: &str,
     all: bool,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> Result<(), Error> {
+) -> Result<Vec<AgentWorktree>, Error> {
     require_git()?;
     if all && !name.is_empty() {
         return Err(Error::msg(
@@ -94,17 +84,11 @@ pub fn cleanup_agent_worktree(
         return Err(Error::msg("no agent worktrees found"));
     }
 
-    let selected = if all {
-        worktrees
+    if all {
+        Ok(worktrees)
     } else {
-        vec![select_agent_worktree(&worktrees, name)?]
-    };
-
-    for worktree in selected {
-        remove_agent_worktree(cwd, &worktree, stderr)?;
-        writeln!(stdout, "{}", worktree.path.display())?;
+        Ok(vec![select_agent_worktree(&worktrees, name)?])
     }
-    Ok(())
 }
 
 pub fn agent_worktrees(cwd: &Path) -> Result<Vec<AgentWorktree>, Error> {
@@ -317,7 +301,7 @@ fn worktree_matches(worktree: &AgentWorktree, query: &str) -> bool {
     fs::canonicalize(&abs).is_ok_and(|resolved| resolved == worktree.path)
 }
 
-fn remove_agent_worktree(
+pub(crate) fn remove_agent_worktree(
     cwd: &Path,
     worktree: &AgentWorktree,
     stderr: &mut dyn Write,
@@ -359,11 +343,11 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, Error> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
-        agent_worktrees, cleanup_agent_worktree, create_agent_worktree,
-        create_agent_worktree_record, is_agent_worktree_name, list_agent_worktrees,
-        next_agent_worktree_name,
+        agent_worktrees, create_agent_worktree_record, is_agent_worktree_name,
+        list_agent_worktrees, next_agent_worktree_name, remove_agent_worktree,
+        select_agent_worktrees,
     };
     use crate::exec;
     use std::collections::HashSet;
@@ -667,7 +651,35 @@ mod tests {
         assert!(agent_worktrees(&repo).unwrap().is_empty());
     }
 
-    fn skip_without_git() -> bool {
+    /// Create a worktree and print its path, like `agent worktree create`
+    /// without the init and Herdr steps.
+    fn create_agent_worktree(
+        cwd: &Path,
+        stdout: &mut dyn io::Write,
+        stderr: &mut dyn io::Write,
+    ) -> Result<(), crate::Error> {
+        let worktree = create_agent_worktree_record(cwd, stderr)?;
+        writeln!(stdout, "{}", worktree.path.display())?;
+        Ok(())
+    }
+
+    /// Remove worktrees and print their paths, like `agent worktree cleanup`
+    /// without the Herdr step.
+    fn cleanup_agent_worktree(
+        cwd: &Path,
+        name: &str,
+        all: bool,
+        stdout: &mut dyn io::Write,
+        stderr: &mut dyn io::Write,
+    ) -> Result<(), crate::Error> {
+        for worktree in select_agent_worktrees(cwd, name, all)? {
+            remove_agent_worktree(cwd, &worktree, stderr)?;
+            writeln!(stdout, "{}", worktree.path.display())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn skip_without_git() -> bool {
         if exec::look_path("git").is_none() {
             eprintln!("skipping: git is not available on PATH");
             true
@@ -676,7 +688,12 @@ mod tests {
         }
     }
 
-    fn init_git_repo(dir: &Path) {
+    pub(crate) fn commit_all(dir: &Path) {
+        must_run_git(dir, &["add", "-A"]);
+        must_run_git(dir, &["commit", "-m", "update"]);
+    }
+
+    pub(crate) fn init_git_repo(dir: &Path) {
         fs::create_dir_all(dir).unwrap();
         must_run_git(dir, &["init"]);
         fs::write(dir.join("README.md"), "demo\n").unwrap();

@@ -11,7 +11,8 @@ Command parsing and help output are handled with [clap](https://github.com/clap-
 - `kitty` for Kitty-specific commands
 - `aws` for AWS helpers
 - `git` for git helpers
-- `just` (for development)
+- `herdr` (optional) to open agent worktrees as Herdr workspaces
+- `just` for development, and optionally to run a project's `worktree-init` recipe
 
 AWS profile, Kitty session, and SSH host selection run an interactive terminal UI. Those commands need a TTY.
 
@@ -46,7 +47,10 @@ edits the query and Ctrl-U clears it. F5 refreshes the list and Esc goes back.
 
 - Enter opens a worktree's details. There, Enter (or `c`) shows the `cd` command and
   `d` removes the worktree.
-- Ctrl-A creates a new worktree and Ctrl-D removes the selected one.
+- Ctrl-A creates a new worktree, initializes it and opens it in Herdr (see
+  [`agent worktree create`](#agent-worktree-create)). Init output streams to the
+  terminal while it runs. Ctrl-D removes the selected worktree and closes its Herdr
+  workspace.
 - Removal asks for confirmation: `y` removes and `n` or Esc cancels. Tab or
   Left/Right with Enter also works.
 
@@ -98,13 +102,35 @@ The previous `git agent-worktree …` commands still work as a hidden alias.
 
 ##### `agent worktree create`
 
-Create a new worktree and branch, then print the worktree path.
+Create a new worktree and branch, set it up, then print the worktree path.
 
 ```sh
 cd "$(cli-toolbox agent worktree create)"
 ```
 
 If the current directory is `/path/to/cli-toolbox`, the first call creates `/path/to/cli-toolbox-agent-wt` on branch `cli-toolbox-agent-wt`. Later calls allocate the next free numbered name.
+
+The new worktree is then made ready to work in:
+
+1. **Init.** If the project's justfile has a `worktree-init` recipe, it runs in the
+   new worktree. `CLI_TOOLBOX_WORKTREE_SOURCE` holds the checkout the worktree was
+   created from, so the recipe can copy untracked files such as `.env`:
+
+   ```just
+   worktree-init:
+       cp "$CLI_TOOLBOX_WORKTREE_SOURCE/.env" .env
+       npm ci
+   ```
+
+   Without the recipe, the package manager whose lockfile is in the project root
+   installs dependencies: `pnpm install --frozen-lockfile`, `yarn install`,
+   `bun install`, `npm ci`, or `npm install` for a bare `package.json`.
+2. **Herdr.** If `herdr` is installed, the worktree opens as a focused Herdr
+   workspace (`herdr worktree open`), grouped with the source repository's workspace.
+
+Progress goes to stderr; only the path goes to stdout. Skip the steps with
+`--no-init` or `--no-herdr`. If a step fails, the worktree is kept, the path is
+still printed, and the command exits with an error.
 
 ##### `agent worktree list`
 
@@ -117,6 +143,8 @@ cli-toolbox agent worktree list
 ##### `agent worktree cleanup`
 
 Remove an agent worktree and its branch. Pass a worktree name or path to remove one of several, omit the name when only one exists, or use `--all` to remove every agent worktree for this directory.
+
+If a Herdr workspace has the worktree open, it is closed once the removal succeeds. Git refuses to remove a worktree with uncommitted changes, and the workspace then stays open. Use `--no-herdr` to leave Herdr alone.
 
 ```sh
 cli-toolbox agent worktree cleanup

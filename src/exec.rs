@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -89,12 +90,26 @@ pub fn run_discard(name: &str, args: &[&str]) -> Result<(), Error> {
 }
 
 pub fn run_on_stderr(name: &str, args: &[&str]) -> Result<(), Error> {
+    run_on_stderr_in(name, args, None, &[])
+}
+
+/// Like [`run_on_stderr`], in `cwd` and with extra environment variables.
+pub fn run_on_stderr_in(
+    name: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    envs: &[(&str, &OsStr)],
+) -> Result<(), Error> {
     let (stdout, stderr) = stderr_pair()?;
     let mut cmd = Command::new(name);
     cmd.args(args)
+        .envs(envs.iter().copied())
         .stdin(Stdio::inherit())
         .stdout(stdout)
         .stderr(stderr);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     let status = cmd.status().map_err(|err| command_error(name, args, err))?;
     if status.success() {
         Ok(())
