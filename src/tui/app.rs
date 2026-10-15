@@ -8,57 +8,110 @@ use crate::kitty::Choice;
 use crate::select;
 use crate::ssh::Host;
 
+/// Rows moved by PageUp/PageDown in lists. Matches the list height of the
+/// inline viewport.
+const PAGE: isize = 8;
+
+/// A group of related actions shown as one tab on the home screen.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum Category {
+    Aws,
+    Agents,
+    Terminal,
+}
+
+impl Category {
+    pub(crate) const ALL: [Self; 3] = [Self::Aws, Self::Agents, Self::Terminal];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Aws => "AWS",
+            Self::Agents => "Agents",
+            Self::Terminal => "Terminal",
+        }
+    }
+
+    /// Key that switches the home screen to this category.
+    pub(crate) fn hotkey(self) -> char {
+        match self {
+            Self::Aws => 'a',
+            Self::Agents => 'i',
+            Self::Terminal => 't',
+        }
+    }
+
+    pub(crate) fn tools(self) -> Vec<ToolId> {
+        ToolId::ALL
+            .into_iter()
+            .filter(|tool| tool.category() == self)
+            .collect()
+    }
+
+    fn from_hotkey(ch: char) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|category| category.hotkey() == ch)
+    }
+
+    fn offset(self, delta: isize) -> Self {
+        let len = Self::ALL.len() as isize;
+        let index = Self::ALL
+            .iter()
+            .position(|category| *category == self)
+            .unwrap_or_default() as isize;
+        Self::ALL[(index + delta).rem_euclid(len) as usize]
+    }
+}
+
 /// One of the actions offered by the launcher.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ToolId {
     AwsProfile,
+    AgentWorktrees,
     KittySession,
     SshConnect,
-    GitWorktreeCreate,
-    GitWorktreeList,
-    GitWorktreeCleanup,
 }
 
 impl ToolId {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::AwsProfile,
+        Self::AgentWorktrees,
         Self::KittySession,
         Self::SshConnect,
-        Self::GitWorktreeCreate,
-        Self::GitWorktreeList,
-        Self::GitWorktreeCleanup,
     ];
+
+    pub(crate) fn category(self) -> Category {
+        match self {
+            Self::AwsProfile => Category::Aws,
+            Self::AgentWorktrees => Category::Agents,
+            Self::KittySession | Self::SshConnect => Category::Terminal,
+        }
+    }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::AwsProfile => "AWS: select profile",
-            Self::KittySession => "Kitty: switch session",
-            Self::SshConnect => "SSH: connect",
-            Self::GitWorktreeCreate => "Git: create agent worktree",
-            Self::GitWorktreeList => "Git: list agent worktrees",
-            Self::GitWorktreeCleanup => "Git: clean up agent worktree",
+            Self::AwsProfile => "Select profile",
+            Self::KittySession => "Switch Kitty session",
+            Self::SshConnect => "SSH connect",
+            Self::AgentWorktrees => "Worktrees",
         }
     }
 
     pub(crate) fn description(self) -> &'static str {
         match self {
-            Self::AwsProfile => "Check SSO login when needed and prepare an AWS_PROFILE export.",
-            Self::KittySession => "Switch Kitty to a session from a file in your home directory.",
-            Self::SshConnect => "Connect to a configured host using Kitty's SSH kitten.",
-            Self::GitWorktreeCreate => "Create the next sibling worktree and branch.",
-            Self::GitWorktreeList => "Inspect paths and branches for the launch directory.",
-            Self::GitWorktreeCleanup => "Remove a selected worktree and its branch.",
+            Self::AwsProfile => "SSO login when needed, then AWS_PROFILE export",
+            Self::KittySession => "Switch to a .kitty-session file from your home directory",
+            Self::SshConnect => "Connect to a configured host with Kitty's SSH kitten",
+            Self::AgentWorktrees => "Create, inspect, cd into or remove agent worktrees",
         }
     }
 
     pub(crate) fn picker_title(self) -> &'static str {
         match self {
-            Self::AwsProfile => "AWS profiles",
+            Self::AwsProfile => "Profiles",
             Self::KittySession => "Kitty sessions",
             Self::SshConnect => "SSH hosts",
-            Self::GitWorktreeCreate => "Git worktrees",
-            Self::GitWorktreeList => "Git worktrees",
-            Self::GitWorktreeCleanup => "Git worktrees",
+            Self::AgentWorktrees => "Agent worktrees",
         }
     }
 }
@@ -97,10 +150,7 @@ impl Resource {
             (ToolId::AwsProfile, Self::Aws(_))
                 | (ToolId::KittySession, Self::Kitty(_))
                 | (ToolId::SshConnect, Self::Ssh(_))
-                | (
-                    ToolId::GitWorktreeList | ToolId::GitWorktreeCleanup,
-                    Self::Worktree(_)
-                )
+                | (ToolId::AgentWorktrees, Self::Worktree(_))
         )
     }
 }
@@ -112,7 +162,21 @@ pub(crate) enum Action {
     Kitty(PathBuf),
     Ssh(Host),
     CreateWorktree,
+    EnterWorktree(AgentWorktree),
     Cleanup(AgentWorktree),
+}
+
+impl Action {
+    /// The picker to reload after the result screen, if any. Other actions
+    /// return to the home screen.
+    pub(crate) fn return_tool(&self) -> Option<ToolId> {
+        match self {
+            Self::CreateWorktree | Self::EnterWorktree(_) | Self::Cleanup(_) => {
+                Some(ToolId::AgentWorktrees)
+            }
+            Self::Aws(_) | Self::Kitty(_) | Self::Ssh(_) => None,
+        }
+    }
 }
 
 /// Work requested by the state machine's owner.
@@ -167,6 +231,13 @@ impl PickerState {
             .get(self.selected)
             .and_then(|index| self.resources.get(*index))
     }
+
+    fn selected_worktree(&self) -> Option<AgentWorktree> {
+        match self.selected_resource() {
+            Some(Resource::Worktree(worktree)) => Some(worktree.clone()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -206,9 +277,16 @@ pub(crate) enum Screen {
 pub(crate) struct App {
     pub(crate) cwd_display: String,
     pub(crate) screen: Screen,
+    pub(crate) category: Category,
+    /// Searching across all categories instead of browsing one.
+    pub(crate) searching: bool,
     pub(crate) home_query: String,
     pub(crate) home_selected: usize,
     pub(crate) loading: Option<ToolId>,
+    /// The key help overlay is drawn over the current screen.
+    pub(crate) show_help: bool,
+    /// Successful shell actions exit and print their command for `eval`.
+    pub(crate) print_shell: bool,
 }
 
 impl App {
@@ -216,25 +294,34 @@ impl App {
         Self {
             cwd_display,
             screen: Screen::Home,
+            category: Category::Aws,
+            searching: false,
             home_query: String::new(),
             home_selected: 0,
             loading: None,
+            show_help: false,
+            print_shell: false,
         }
     }
 
-    pub(crate) fn home_visible_indices(&self) -> Vec<usize> {
+    /// Tools listed on the home screen: the active category, or every tool
+    /// that matches the search.
+    pub(crate) fn home_tools(&self) -> Vec<ToolId> {
+        if !self.searching {
+            return self.category.tools();
+        }
         let labels: Vec<String> = ToolId::ALL
             .iter()
-            .map(|tool| tool.label().to_string())
+            .map(|tool| format!("{} {}", tool.category().label(), tool.label()))
             .collect();
         select::filter_items(&self.home_query, &labels)
+            .into_iter()
+            .filter_map(|index| ToolId::ALL.get(index).copied())
+            .collect()
     }
 
     pub(crate) fn selected_tool(&self) -> Option<ToolId> {
-        self.home_visible_indices()
-            .get(self.home_selected)
-            .copied()
-            .and_then(|index| ToolId::ALL.get(index).copied())
+        self.home_tools().get(self.home_selected).copied()
     }
 
     /// Feed a discovery result back into the state machine.
@@ -286,6 +373,17 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             return Effect::Quit;
         }
+        // Any key closes the help overlay without acting on the screen below.
+        if self.show_help {
+            self.show_help = false;
+            return Effect::None;
+        }
+        if key.code == KeyCode::F(1)
+            || (key.code == KeyCode::Char('?') && self.question_opens_help())
+        {
+            self.show_help = true;
+            return Effect::None;
+        }
 
         match self.screen {
             Screen::Home => self.handle_home_key(key),
@@ -296,29 +394,111 @@ impl App {
         }
     }
 
-    fn handle_home_key(&mut self, key: KeyEvent) -> Effect {
-        if let Some(effect) = self.handle_text_key(key, true) {
-            return effect;
+    /// `?` is text input while searching or filtering, so only F1 opens help there.
+    fn question_opens_help(&self) -> bool {
+        match self.screen {
+            Screen::Home => !self.searching,
+            Screen::Picker(_) => false,
+            Screen::WorktreeDetails(_) | Screen::ConfirmCleanup(_) | Screen::Result(_) => true,
         }
-        match key.code {
-            KeyCode::Esc => Effect::Quit,
-            KeyCode::Enter => {
-                let Some(tool) = self.selected_tool() else {
-                    return Effect::None;
-                };
-                if tool == ToolId::GitWorktreeCreate {
-                    return Effect::Execute(Action::CreateWorktree);
-                }
-                self.screen = Screen::Picker(PickerState::new(tool));
-                self.loading = Some(tool);
-                Effect::Load(tool)
+    }
+
+    fn handle_home_key(&mut self, key: KeyEvent) -> Effect {
+        if self.searching {
+            return self.handle_search_key(key);
+        }
+        let visible_len = self.home_tools().len();
+        if list_key(key, &mut self.home_selected, visible_len) {
+            return Effect::None;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Effect::Quit,
+            (KeyCode::Enter, _) => self.open_selected(),
+            (KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
+                move_selection(&mut self.home_selected, visible_len, -1);
+                Effect::None
             }
-            KeyCode::F(5) => Effect::None,
+            (KeyCode::Char('j'), false) | (KeyCode::Char('n'), true) => {
+                move_selection(&mut self.home_selected, visible_len, 1);
+                Effect::None
+            }
+            (KeyCode::Right | KeyCode::Tab, _) | (KeyCode::Char('l' | ']'), false) => {
+                self.switch_category(self.category.offset(1));
+                Effect::None
+            }
+            (KeyCode::Left | KeyCode::BackTab, _) | (KeyCode::Char('h' | '['), false) => {
+                self.switch_category(self.category.offset(-1));
+                Effect::None
+            }
+            (KeyCode::Char('/'), false) => {
+                self.searching = true;
+                self.home_query.clear();
+                self.home_selected = 0;
+                Effect::None
+            }
+            (KeyCode::Char(ch), false) => {
+                if let Some(category) = Category::from_hotkey(ch) {
+                    self.switch_category(category);
+                    return Effect::None;
+                }
+                // Number keys run the n:th action of the active category.
+                match ch.to_digit(10).and_then(|digit| digit.checked_sub(1)) {
+                    Some(index) if (index as usize) < visible_len => {
+                        self.home_selected = index as usize;
+                        self.open_selected()
+                    }
+                    _ => Effect::None,
+                }
+            }
             _ => Effect::None,
         }
     }
 
+    fn handle_search_key(&mut self, key: KeyEvent) -> Effect {
+        match key.code {
+            KeyCode::Esc => {
+                self.searching = false;
+                self.home_query.clear();
+                self.home_selected = 0;
+                Effect::None
+            }
+            KeyCode::Enter => self.open_selected(),
+            _ => {
+                let visible_len = self.home_tools().len();
+                text_key(
+                    key,
+                    &mut self.home_query,
+                    &mut self.home_selected,
+                    visible_len,
+                )
+                .unwrap_or(Effect::None)
+            }
+        }
+    }
+
+    fn switch_category(&mut self, category: Category) {
+        if self.category != category {
+            self.category = category;
+            self.home_selected = 0;
+        }
+    }
+
+    fn open_selected(&mut self) -> Effect {
+        let Some(tool) = self.selected_tool() else {
+            return Effect::None;
+        };
+        // Coming back from a search result lands in the tool's own category.
+        self.category = tool.category();
+        self.screen = Screen::Picker(PickerState::new(tool));
+        self.loading = Some(tool);
+        Effect::Load(tool)
+    }
+
     fn handle_picker_key(&mut self, key: KeyEvent) -> Effect {
+        if let Some(effect) = self.handle_worktree_picker_key(key) {
+            return effect;
+        }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
         {
@@ -355,27 +535,15 @@ impl App {
                         Effect::Execute(Action::Kitty(choice.path))
                     }
                     (ToolId::SshConnect, Resource::Ssh(host)) => Effect::Execute(Action::Ssh(host)),
-                    (ToolId::GitWorktreeList, Resource::Worktree(worktree)) => {
+                    (ToolId::AgentWorktrees, Resource::Worktree(worktree)) => {
                         let return_picker = self
                             .picker()
                             .cloned()
-                            .unwrap_or_else(|| PickerState::new(ToolId::GitWorktreeList));
+                            .unwrap_or_else(|| PickerState::new(ToolId::AgentWorktrees));
                         self.screen = Screen::WorktreeDetails(DetailsState {
                             worktree,
                             return_picker,
                             scroll: 0,
-                        });
-                        Effect::None
-                    }
-                    (ToolId::GitWorktreeCleanup, Resource::Worktree(worktree)) => {
-                        let return_picker = self
-                            .picker()
-                            .cloned()
-                            .unwrap_or_else(|| PickerState::new(ToolId::GitWorktreeCleanup));
-                        self.screen = Screen::ConfirmCleanup(ConfirmState {
-                            worktree,
-                            confirm: false,
-                            return_picker,
                         });
                         Effect::None
                     }
@@ -386,95 +554,103 @@ impl App {
         }
     }
 
-    fn handle_details_key(&mut self, key: KeyEvent) -> Effect {
-        if let Screen::WorktreeDetails(details) = &mut self.screen {
-            match key.code {
-                KeyCode::Up => {
-                    details.scroll = details.scroll.saturating_sub(1);
-                    return Effect::None;
-                }
-                KeyCode::Down => {
-                    details.scroll = details.scroll.saturating_add(1);
-                    return Effect::None;
-                }
-                KeyCode::PageUp => {
-                    details.scroll = details.scroll.saturating_sub(10);
-                    return Effect::None;
-                }
-                KeyCode::PageDown => {
-                    details.scroll = details.scroll.saturating_add(10);
-                    return Effect::None;
-                }
-                _ => {}
-            }
+    /// Ctrl shortcuts of the worktree manager. Plain keys filter the list.
+    fn handle_worktree_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        let picker = self
+            .picker()
+            .filter(|picker| picker.tool == ToolId::AgentWorktrees)?;
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
-                if let Screen::WorktreeDetails(details) = &self.screen {
-                    self.screen = Screen::Picker(details.return_picker.clone());
-                }
-                Effect::None
+            KeyCode::Char('a') => {
+                self.loading = None;
+                Some(Effect::Execute(Action::CreateWorktree))
             }
-            _ => Effect::None,
+            KeyCode::Char('d') => {
+                let Some(worktree) = picker.selected_worktree() else {
+                    return Some(Effect::None);
+                };
+                let return_picker = picker.clone();
+                self.loading = None;
+                self.screen = Screen::ConfirmCleanup(ConfirmState {
+                    worktree,
+                    confirm: false,
+                    return_picker,
+                });
+                Some(Effect::None)
+            }
+            _ => None,
         }
     }
 
-    fn handle_confirm_key(&mut self, key: KeyEvent) -> Effect {
-        if let Screen::ConfirmCleanup(confirm) = &mut self.screen {
-            match key.code {
-                KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-                    confirm.confirm = !confirm.confirm;
-                    return Effect::None;
-                }
-                KeyCode::Esc => {
-                    self.screen = Screen::Picker(confirm.return_picker.clone());
-                    return Effect::None;
-                }
-                KeyCode::Enter => {
-                    if confirm.confirm {
-                        let worktree = confirm.worktree.clone();
-                        return Effect::Execute(Action::Cleanup(worktree));
-                    }
-                    self.screen = Screen::Picker(confirm.return_picker.clone());
-                    return Effect::None;
-                }
-                _ => {}
+    fn handle_details_key(&mut self, key: KeyEvent) -> Effect {
+        let Screen::WorktreeDetails(details) = &mut self.screen else {
+            return Effect::None;
+        };
+        match key.code {
+            KeyCode::Up => details.scroll = details.scroll.saturating_sub(1),
+            KeyCode::Down => details.scroll = details.scroll.saturating_add(1),
+            KeyCode::PageUp => details.scroll = details.scroll.saturating_sub(10),
+            KeyCode::PageDown => details.scroll = details.scroll.saturating_add(10),
+            KeyCode::Enter | KeyCode::Char('c') => {
+                return Effect::Execute(Action::EnterWorktree(details.worktree.clone()));
             }
+            KeyCode::Char('d') => {
+                self.screen = Screen::ConfirmCleanup(ConfirmState {
+                    worktree: details.worktree.clone(),
+                    confirm: false,
+                    return_picker: details.return_picker.clone(),
+                });
+            }
+            KeyCode::Esc => self.screen = Screen::Picker(details.return_picker.clone()),
+            _ => {}
         }
+        Effect::None
+    }
+
+    fn handle_confirm_key(&mut self, key: KeyEvent) -> Effect {
+        let Screen::ConfirmCleanup(confirm) = &mut self.screen else {
+            return Effect::None;
+        };
+        let remove = match key.code {
+            KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                confirm.confirm = !confirm.confirm;
+                return Effect::None;
+            }
+            KeyCode::Char('y') => true,
+            KeyCode::Char('n') | KeyCode::Esc => false,
+            KeyCode::Enter => confirm.confirm,
+            _ => return Effect::None,
+        };
+        if remove {
+            return Effect::Execute(Action::Cleanup(confirm.worktree.clone()));
+        }
+        self.screen = Screen::Picker(confirm.return_picker.clone());
         Effect::None
     }
 
     fn handle_result_key(&mut self, key: KeyEvent) -> Effect {
-        if let Screen::Result(result) = &mut self.screen {
-            match key.code {
-                KeyCode::Up => result.scroll = result.scroll.saturating_sub(1),
-                KeyCode::Down => result.scroll = result.scroll.saturating_add(1),
-                KeyCode::PageUp => result.scroll = result.scroll.saturating_sub(10),
-                KeyCode::PageDown => result.scroll = result.scroll.saturating_add(10),
-                KeyCode::Enter | KeyCode::Esc => {
-                    let cleanup = matches!(result.action, Action::Cleanup(_));
-                    if cleanup {
-                        self.screen = Screen::Picker(PickerState::new(ToolId::GitWorktreeCleanup));
-                        self.loading = Some(ToolId::GitWorktreeCleanup);
-                        return Effect::Load(ToolId::GitWorktreeCleanup);
-                    }
-                    self.screen = Screen::Home;
-                    self.loading = None;
+        let Screen::Result(result) = &mut self.screen else {
+            return Effect::None;
+        };
+        match key.code {
+            KeyCode::Up => result.scroll = result.scroll.saturating_sub(1),
+            KeyCode::Down => result.scroll = result.scroll.saturating_add(1),
+            KeyCode::PageUp => result.scroll = result.scroll.saturating_sub(10),
+            KeyCode::PageDown => result.scroll = result.scroll.saturating_add(10),
+            KeyCode::Enter | KeyCode::Esc => {
+                if let Some(tool) = result.action.return_tool() {
+                    self.screen = Screen::Picker(PickerState::new(tool));
+                    self.loading = Some(tool);
+                    return Effect::Load(tool);
                 }
-                _ => {}
+                self.screen = Screen::Home;
+                self.loading = None;
             }
+            _ => {}
         }
         Effect::None
-    }
-
-    fn handle_text_key(&mut self, key: KeyEvent, home: bool) -> Option<Effect> {
-        let (query, selected, visible_len) = if home {
-            let visible = self.home_visible_indices();
-            (&mut self.home_query, &mut self.home_selected, visible.len())
-        } else {
-            return None;
-        };
-        text_key(key, query, selected, visible_len)
     }
 
     fn picker(&self) -> Option<&PickerState> {
@@ -521,6 +697,9 @@ fn text_key(
     selected: &mut usize,
     visible_len: usize,
 ) -> Option<Effect> {
+    if list_key(key, selected, visible_len) {
+        return Some(Effect::None);
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('n') => {
@@ -541,14 +720,6 @@ fn text_key(
     }
 
     match key.code {
-        KeyCode::Up => {
-            move_selection(selected, visible_len, -1);
-            Some(Effect::None)
-        }
-        KeyCode::Down => {
-            move_selection(selected, visible_len, 1);
-            Some(Effect::None)
-        }
         KeyCode::Backspace => {
             query.pop();
             *selected = 0;
@@ -563,40 +734,62 @@ fn text_key(
     }
 }
 
-fn move_selection(selected: &mut usize, visible_len: usize, delta: i32) {
+/// Arrow, page and Home/End navigation shared by every list. Returns whether
+/// the key was consumed.
+fn list_key(key: KeyEvent, selected: &mut usize, visible_len: usize) -> bool {
+    match key.code {
+        KeyCode::Up => move_selection(selected, visible_len, -1),
+        KeyCode::Down => move_selection(selected, visible_len, 1),
+        KeyCode::PageUp => move_selection(selected, visible_len, -PAGE),
+        KeyCode::PageDown => move_selection(selected, visible_len, PAGE),
+        KeyCode::Home => move_selection(selected, visible_len, isize::MIN),
+        KeyCode::End => move_selection(selected, visible_len, isize::MAX),
+        _ => return false,
+    }
+    true
+}
+
+fn move_selection(selected: &mut usize, visible_len: usize, delta: isize) {
     if visible_len == 0 {
         *selected = 0;
         return;
     }
-    let next = *selected as i32 + delta;
-    *selected = next.clamp(0, visible_len as i32 - 1) as usize;
+    let next = (*selected as isize).saturating_add(delta);
+    *selected = next.clamp(0, visible_len as isize - 1) as usize;
 }
 
 fn worktree_label(worktree: &AgentWorktree) -> String {
-    let branch = if worktree.branch.is_empty() {
-        "(no branch)"
-    } else {
-        worktree.branch.as_str()
-    };
     format!(
         "{}  {}  [{}]",
         worktree.name,
         worktree.path.display(),
-        branch
+        branch_label(worktree)
     )
+}
+
+pub(crate) fn branch_label(worktree: &AgentWorktree) -> &str {
+    if worktree.branch.is_empty() {
+        "(no branch)"
+    } else {
+        worktree.branch.as_str()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, App, Effect, Resource, Screen, ToolId};
+    use super::{Action, App, Category, Effect, Resource, Screen, ToolId};
     use crate::aws::Profile;
     use crate::git::AgentWorktree;
     use crate::kitty::Choice;
-    use crossterm::event::{KeyEvent, KeyEventKind, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::path::PathBuf;
 
-    fn key(code: crossterm::event::KeyCode) -> KeyEvent {
+    fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
     }
 
     fn profile(name: &str) -> Resource {
@@ -606,27 +799,44 @@ mod tests {
         })
     }
 
+    fn worktree(name: &str) -> AgentWorktree {
+        AgentWorktree {
+            name: name.into(),
+            path: PathBuf::from(format!("/tmp/{name}")),
+            branch: name.into(),
+        }
+    }
+
+    /// Open the worktree manager with the given worktrees loaded.
+    fn worktree_manager(worktrees: &[AgentWorktree]) -> App {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('1'))),
+            Effect::Load(ToolId::AgentWorktrees)
+        );
+        app.loaded(
+            ToolId::AgentWorktrees,
+            Ok(worktrees.iter().cloned().map(Resource::Worktree).collect()),
+        );
+        app
+    }
+
     #[test]
     fn opening_and_selecting_a_filtered_resource_preserves_its_payload() {
         let mut app = App::new("/repo".into());
+        assert_eq!(app.handle_key(key(KeyCode::Char('a'))), Effect::None);
         assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Char('a'))),
-            Effect::None
-        );
-        assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Enter)),
+            app.handle_key(key(KeyCode::Enter)),
             Effect::Load(ToolId::AwsProfile)
         );
         app.loaded(
             ToolId::AwsProfile,
             Ok(vec![profile("prod"), profile("sandbox"), profile("admin")]),
         );
+        assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Effect::None);
         assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Char('s'))),
-            Effect::None
-        );
-        assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Enter)),
+            app.handle_key(key(KeyCode::Enter)),
             Effect::Execute(Action::Aws(Profile {
                 name: "sandbox".into(),
                 settings: Default::default()
@@ -637,8 +847,8 @@ mod tests {
     #[test]
     fn refresh_keeps_selection_by_identity_when_labels_are_duplicate() {
         let mut app = App::new("/repo".into());
-        app.handle_key(key(crossterm::event::KeyCode::Down));
-        app.handle_key(key(crossterm::event::KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::Enter));
         let first = Resource::Kitty(Choice {
             label: "same".into(),
             path: PathBuf::from("one"),
@@ -651,10 +861,10 @@ mod tests {
             ToolId::KittySession,
             Ok(vec![first.clone(), second.clone()]),
         );
-        app.handle_key(key(crossterm::event::KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
         app.loaded(ToolId::KittySession, Ok(vec![second.clone(), first]));
         assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Enter)),
+            app.handle_key(key(KeyCode::Enter)),
             Effect::Execute(Action::Kitty(PathBuf::from("two")))
         );
     }
@@ -662,10 +872,10 @@ mod tests {
     #[test]
     fn refresh_error_keeps_the_previous_resources_available() {
         let mut app = App::new("/repo".into());
-        app.handle_key(key(crossterm::event::KeyCode::Enter));
+        app.handle_key(key(KeyCode::Enter));
         let resource = profile("prod");
         app.loaded(ToolId::AwsProfile, Ok(vec![resource.clone()]));
-        app.handle_key(key(crossterm::event::KeyCode::F(5)));
+        app.handle_key(key(KeyCode::F(5)));
         app.loaded(
             ToolId::AwsProfile,
             Err("temporary discovery failure".into()),
@@ -677,7 +887,7 @@ mod tests {
                     && picker.error.as_deref() == Some("temporary discovery failure")
         ));
         assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Enter)),
+            app.handle_key(key(KeyCode::Enter)),
             Effect::Execute(Action::Aws(Profile {
                 name: "prod".into(),
                 settings: Default::default()
@@ -686,81 +896,160 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_defaults_to_cancel_and_requires_confirmation() {
+    fn brackets_cycle_tabs_both_ways() {
         let mut app = App::new("/repo".into());
-        app.handle_key(key(crossterm::event::KeyCode::Down));
-        for _ in 0..4 {
-            app.handle_key(key(crossterm::event::KeyCode::Down));
+        for expected in [Category::Agents, Category::Terminal, Category::Aws] {
+            app.handle_key(key(KeyCode::Char(']')));
+            assert_eq!(app.category, expected);
         }
+        app.handle_key(key(KeyCode::Char('[')));
+        assert_eq!(app.category, Category::Terminal);
+    }
+
+    #[test]
+    fn agents_tab_opens_the_worktree_manager() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(app.category, Category::Agents);
+        // Numbers beyond the category's actions do nothing.
+        assert_eq!(app.handle_key(key(KeyCode::Char('2'))), Effect::None);
         assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Enter)),
-            Effect::Load(ToolId::GitWorktreeCleanup)
-        );
-        let worktree = AgentWorktree {
-            name: "repo-agent-wt".into(),
-            path: PathBuf::from("/tmp/repo-agent-wt"),
-            branch: "repo-agent-wt".into(),
-        };
-        app.loaded(
-            ToolId::GitWorktreeCleanup,
-            Ok(vec![Resource::Worktree(worktree.clone())]),
-        );
-        app.handle_key(key(crossterm::event::KeyCode::Enter));
-        assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Enter)),
-            Effect::None
-        );
-        // Cancel returned to the same picker. Open it again, then opt in.
-        app.handle_key(key(crossterm::event::KeyCode::Enter));
-        app.handle_key(key(crossterm::event::KeyCode::Right));
-        assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Enter)),
-            Effect::Execute(Action::Cleanup(worktree))
+            app.handle_key(key(KeyCode::Char('1'))),
+            Effect::Load(ToolId::AgentWorktrees)
         );
     }
 
     #[test]
-    fn result_return_refreshes_cleanup_and_other_results_return_home() {
-        let mut app = App::new("/repo".into());
-        let worktree = AgentWorktree {
-            name: "repo-agent-wt".into(),
-            path: PathBuf::from("/tmp/repo-agent-wt"),
-            branch: String::new(),
-        };
-        let cleanup = Action::Cleanup(worktree);
-        app.finished(&cleanup, "Cleaned".into(), "done".into(), false);
+    fn worktree_details_cd_and_remove() {
+        let tree = worktree("repo-agent-wt");
+        let mut app = worktree_manager(std::slice::from_ref(&tree));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.screen, Screen::WorktreeDetails(_)));
         assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Esc)),
-            Effect::Load(ToolId::GitWorktreeCleanup)
+            app.handle_key(key(KeyCode::Char('c'))),
+            Effect::Execute(Action::EnterWorktree(tree.clone()))
         );
+        app.handle_key(key(KeyCode::Char('d')));
+        assert!(matches!(app.screen, Screen::ConfirmCleanup(_)));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Effect::Execute(Action::Cleanup(tree))
+        );
+    }
+
+    #[test]
+    fn manager_shortcuts_create_and_remove_with_cancel() {
+        let tree = worktree("repo-agent-wt");
+        let mut app = worktree_manager(std::slice::from_ref(&tree));
+        assert_eq!(
+            app.handle_key(ctrl('a')),
+            Effect::Execute(Action::CreateWorktree)
+        );
+        app.handle_key(ctrl('d'));
+        assert!(matches!(app.screen, Screen::ConfirmCleanup(_)));
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Effect::None);
+        assert!(matches!(
+            &app.screen,
+            Screen::Picker(picker) if picker.tool == ToolId::AgentWorktrees
+        ));
+    }
+
+    #[test]
+    fn cleanup_defaults_to_cancel_and_requires_confirmation() {
+        let tree = worktree("repo-agent-wt");
+        let mut app = worktree_manager(std::slice::from_ref(&tree));
+        app.handle_key(ctrl('d'));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None);
+        // Cancel returned to the same picker. Open it again, then opt in.
+        app.handle_key(ctrl('d'));
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::Cleanup(tree))
+        );
+    }
+
+    #[test]
+    fn worktree_results_reload_the_manager_and_other_results_return_home() {
+        let mut app = App::new("/repo".into());
+        for action in [
+            Action::CreateWorktree,
+            Action::EnterWorktree(worktree("a")),
+            Action::Cleanup(worktree("a")),
+        ] {
+            app.finished(&action, "Done".into(), "done".into(), false);
+            assert_eq!(
+                app.handle_key(key(KeyCode::Esc)),
+                Effect::Load(ToolId::AgentWorktrees)
+            );
+        }
         app.finished(
-            &Action::CreateWorktree,
-            "Created".into(),
+            &Action::Kitty(PathBuf::from("one")),
+            "Switched".into(),
             "done".into(),
             false,
         );
-        assert_eq!(
-            app.handle_key(key(crossterm::event::KeyCode::Esc)),
-            Effect::None
-        );
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), Effect::None);
         assert!(matches!(app.screen, Screen::Home));
+    }
+
+    #[test]
+    fn help_overlay_swallows_the_closing_key() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Effect::None);
+        assert!(!app.show_help);
+        // In pickers `?` filters, and F1 opens help.
+        app.handle_key(key(KeyCode::Enter));
+        app.loaded(ToolId::AwsProfile, Ok(vec![profile("prod")]));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(!app.show_help);
+        app.handle_key(key(KeyCode::F(1)));
+        assert!(app.show_help);
+    }
+
+    #[test]
+    fn page_and_end_keys_clamp_to_the_list() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected_tool(), Some(ToolId::SshConnect));
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected_tool(), Some(ToolId::KittySession));
+
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Enter));
+        let profiles = (0..20).map(|n| profile(&format!("p{n:02}"))).collect();
+        app.loaded(ToolId::AwsProfile, Ok(profiles));
+        app.handle_key(key(KeyCode::PageDown));
+        app.handle_key(key(KeyCode::PageDown));
+        app.handle_key(key(KeyCode::PageDown));
+        let Screen::Picker(picker) = &app.screen else {
+            panic!("expected picker")
+        };
+        assert_eq!(picker.selected, 19);
+        app.handle_key(key(KeyCode::Home));
+        let Screen::Picker(picker) = &app.screen else {
+            panic!("expected picker")
+        };
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]
     fn key_releases_and_enter_repeats_do_not_execute() {
         let mut app = App::new("/repo".into());
-        let mut release = key(crossterm::event::KeyCode::Enter);
+        let mut release = key(KeyCode::Enter);
         release.kind = KeyEventKind::Release;
         assert_eq!(app.handle_key(release), Effect::None);
-        app.handle_key(key(crossterm::event::KeyCode::Enter));
-        let mut repeat = key(crossterm::event::KeyCode::Enter);
+        app.handle_key(key(KeyCode::Enter));
+        let mut repeat = key(KeyCode::Enter);
         repeat.kind = KeyEventKind::Repeat;
         assert_eq!(app.handle_key(repeat), Effect::None);
     }
 
     #[test]
     fn unicode_filter_empty_results_and_back_preserve_home_state() {
-        use crossterm::event::KeyCode;
         let mut app = App::new("/repo".into());
         app.handle_key(key(KeyCode::Char('a')));
         app.handle_key(key(KeyCode::Enter));
@@ -775,14 +1064,53 @@ mod tests {
         app.handle_key(key(KeyCode::Char('z')));
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None);
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.home_query, "a");
+        assert_eq!(app.category, Category::Aws);
         assert_eq!(app.selected_tool(), Some(ToolId::AwsProfile));
         assert_eq!(app.handle_key(key(KeyCode::Esc)), Effect::Quit);
     }
 
     #[test]
-    fn all_catalog_entries_are_present() {
-        assert_eq!(ToolId::ALL.len(), 6);
-        assert!(ToolId::ALL.contains(&ToolId::GitWorktreeCleanup));
+    fn category_hotkey_and_number_run_an_action_directly() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.category, Category::Terminal);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('2'))),
+            Effect::Load(ToolId::SshConnect)
+        );
+    }
+
+    #[test]
+    fn search_spans_categories_and_esc_returns_to_tabs() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('/')));
+        for ch in "ssh".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(app.selected_tool(), Some(ToolId::SshConnect));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.searching);
+        assert_eq!(app.home_tools(), vec![ToolId::AwsProfile]);
+        app.handle_key(key(KeyCode::Char('/')));
+        for ch in "ssh".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Load(ToolId::SshConnect)
+        );
+        assert_eq!(app.category, Category::Terminal);
+    }
+
+    #[test]
+    fn category_hotkeys_are_unique_and_not_navigation_keys() {
+        let keys: Vec<char> = Category::ALL.iter().map(|c| c.hotkey()).collect();
+        for (index, key) in keys.iter().enumerate() {
+            assert!(!keys[index + 1..].contains(key));
+            assert!(!"hjklq/[]?".contains(*key) && !key.is_ascii_digit());
+        }
+        for category in Category::ALL {
+            assert!(!category.tools().is_empty() && category.tools().len() <= 9);
+        }
     }
 }

@@ -11,20 +11,33 @@ use crate::{Error, terminal::TerminalSession};
 use actions::{Context, Outcome};
 use app::{App, Effect};
 
-pub(crate) fn run(_stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<(), Error> {
+/// Run the launcher. With `print_shell`, a successful shell action (an AWS
+/// export or a `cd`) exits the launcher and is printed to `stdout` for `eval`.
+pub(crate) fn run(
+    print_shell: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Error> {
     check_terminals(
         io::stdin().is_terminal(),
         io::stdout().is_terminal(),
         io::stderr().is_terminal(),
+        print_shell,
     )?;
     let context = Context::new();
     let mut app = App::new(context.cwd_display());
-    let mut session = Some(TerminalSession::new()?);
+    app.print_shell = print_shell;
+    let mut session = Some(TerminalSession::inline(ui::HEIGHT)?);
     let result = event_loop(&context, &mut app, &mut session, stderr);
     let restoration = session.as_mut().map(Session::restore).transpose();
     match (result, restoration) {
-        (Ok(()), Ok(_)) => Ok(()),
-        (Err(err), Ok(_)) | (Ok(()), Err(err)) => Err(err),
+        (Ok(shell), Ok(_)) => {
+            if let Some(command) = shell {
+                writeln!(stdout, "{command}")?;
+            }
+            Ok(())
+        }
+        (Err(err), Ok(_)) | (Ok(_), Err(err)) => Err(err),
         (Err(err), Err(cleanup)) => {
             Err(Error::msg(format!("{err}; cleanup also failed: {cleanup}")))
         }
@@ -36,7 +49,8 @@ fn event_loop(
     app: &mut App,
     session: &mut Option<TerminalSession>,
     stderr: &mut dyn Write,
-) -> Result<(), Error> {
+) -> Result<Option<String>, Error> {
+    let print_shell = app.print_shell;
     loop {
         session
             .as_mut()
@@ -54,36 +68,67 @@ fn event_loop(
         };
         match app.handle_key(key) {
             Effect::None => {}
-            Effect::Quit => return Ok(()),
+            Effect::Quit => return Ok(None),
             Effect::Load(tool) => {
                 session
                     .as_mut()
                     .expect("active terminal")
                     .terminal_mut()
-                    .draw(|frame| ui::draw_loading(frame, app))?;
+                    .draw(|frame| ui::draw(frame, app))?;
                 app.loaded(tool, context.load(tool).map_err(|err| err.to_string()));
             }
             Effect::Execute(action) => {
                 let outcome = handoff(
                     session,
                     || context.execute(&action),
-                    || TerminalSession::new().map_err(Error::from),
+                    |outcome| {
+                        // Exiting with a shell command needs no launcher to return to.
+                        if shell_exit(print_shell, outcome).is_some() {
+                            return Ok(None);
+                        }
+                        TerminalSession::inline(ui::HEIGHT)
+                            .map(Some)
+                            .map_err(Error::from)
+                    },
                     stderr,
                 )?;
+                if let Some(command) = shell_exit(print_shell, &outcome) {
+                    return Ok(Some(command));
+                }
                 app.finished(&action, outcome.title, outcome.body, outcome.failed);
             }
         }
     }
 }
 
-fn check_terminals(stdin: bool, stdout: bool, stderr: bool) -> Result<(), Error> {
-    if stdin && stdout && stderr {
+/// The launcher draws on stderr. Stdout may be redirected only when it
+/// receives a shell command for `eval`.
+fn check_terminals(
+    stdin: bool,
+    stdout: bool,
+    stderr: bool,
+    print_shell: bool,
+) -> Result<(), Error> {
+    if print_shell && !(stdin && stderr) {
+        return Err(Error::msg(
+            "tui --print-shell requires stdin and stderr to be terminals",
+        ));
+    }
+    if print_shell || (stdin && stdout && stderr) {
         Ok(())
     } else {
         Err(Error::msg(
-            "tui requires stdin, stdout, and stderr to be terminals; use a direct CLI command for redirected output",
+            "tui requires stdin, stdout, and stderr to be terminals; use --print-shell to capture shell commands, or a direct CLI command for redirected output",
         ))
     }
+}
+
+/// The command to print and exit with after an action, if any.
+fn shell_exit(print_shell: bool, outcome: &Outcome) -> Option<String> {
+    if !print_shell || outcome.failed {
+        return None;
+    }
+    outcome.shell.clone()
 }
 
 trait Session {
@@ -96,17 +141,19 @@ impl Session for TerminalSession {
     }
 }
 
+/// Give the terminal to an action, then resume the launcher. `resume` may
+/// return `None` to leave the terminal released when the launcher exits next.
 fn handoff<S: Session>(
     session: &mut Option<S>,
     execute: impl FnOnce() -> Outcome,
-    initialize: impl FnOnce() -> Result<S, Error>,
+    resume: impl FnOnce(&Outcome) -> Result<Option<S>, Error>,
     stderr: &mut dyn Write,
 ) -> Result<Outcome, Error> {
     session.as_mut().expect("active terminal").restore()?;
     drop(session.take());
     let outcome = execute();
-    match initialize() {
-        Ok(active) => *session = Some(active),
+    match resume(&outcome) {
+        Ok(next) => *session = next,
         Err(err) => {
             writeln!(stderr, "{}\n{}", outcome.title, outcome.body)?;
             return Err(Error::msg(format!("resume tool launcher: {err}")));
@@ -154,14 +201,15 @@ mod tests {
                         title: "Result".into(),
                         body: "details".into(),
                         failed,
+                        shell: None,
                     }
                 },
-                || {
+                |_| {
                     events.borrow_mut().push("initialize");
-                    Ok(FakeSession {
+                    Ok(Some(FakeSession {
                         events: events.clone(),
                         fail_restore: false,
-                    })
+                    }))
                 },
                 &mut stderr,
             )
@@ -183,7 +231,7 @@ mod tests {
             handoff(
                 &mut session,
                 || panic!("must not execute"),
-                || panic!("must not resume"),
+                |_| panic!("must not resume"),
                 &mut Vec::new()
             )
             .is_err()
@@ -207,9 +255,10 @@ mod tests {
                     title: "Created".into(),
                     body: "/tmp/created-worktree".into(),
                     failed: false,
+                    shell: None,
                 }
             },
-            || Err(Error::msg("resume failed")),
+            |_| Err(Error::msg("resume failed")),
             &mut stderr,
         );
         assert!(result.is_err());
@@ -223,13 +272,63 @@ mod tests {
 
     #[test]
     fn requires_all_three_terminal_streams() {
-        assert!(check_terminals(true, true, true).is_ok());
+        assert!(check_terminals(true, true, true, false).is_ok());
         for streams in [
             (false, true, true),
             (true, false, true),
             (true, true, false),
         ] {
-            assert!(check_terminals(streams.0, streams.1, streams.2).is_err());
+            assert!(check_terminals(streams.0, streams.1, streams.2, false).is_err());
         }
+    }
+
+    #[test]
+    fn print_shell_allows_captured_stdout_only() {
+        assert!(check_terminals(true, false, true, true).is_ok());
+        assert!(check_terminals(false, false, true, true).is_err());
+        assert!(check_terminals(true, false, false, true).is_err());
+    }
+
+    #[test]
+    fn shell_exit_only_for_successful_shell_actions_in_print_mode() {
+        let outcome = |failed, shell: Option<&str>| Outcome {
+            title: String::new(),
+            body: String::new(),
+            failed,
+            shell: shell.map(String::from),
+        };
+        assert_eq!(
+            shell_exit(true, &outcome(false, Some("cd '/tmp/x'"))).as_deref(),
+            Some("cd '/tmp/x'")
+        );
+        assert_eq!(
+            shell_exit(false, &outcome(false, Some("cd '/tmp/x'"))),
+            None
+        );
+        assert_eq!(shell_exit(true, &outcome(true, Some("cd '/tmp/x'"))), None);
+        assert_eq!(shell_exit(true, &outcome(false, None)), None);
+    }
+
+    #[test]
+    fn resume_can_leave_the_terminal_released() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut session = Some(FakeSession {
+            events: events.clone(),
+            fail_restore: false,
+        });
+        handoff(
+            &mut session,
+            || Outcome {
+                title: String::new(),
+                body: String::new(),
+                failed: false,
+                shell: Some("cd /tmp".into()),
+            },
+            |_| Ok(None),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(session.is_none());
+        assert_eq!(*events.borrow(), ["restore"]);
     }
 }

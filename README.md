@@ -26,25 +26,49 @@ cli-toolbox tui
 ```
 
 Select AWS profiles, switch Kitty sessions, connect to SSH hosts, or create, inspect,
-and clean up Git agent worktrees. Worktree operations use the directory from which
-you launched the toolbox. Cleanup asks you to confirm the selected worktree and
-branch before removing them.
+enter, and remove agent worktrees. Worktree operations use the directory from which
+you launched the toolbox.
 
-Type to search, use Up/Down (or Ctrl-P/Ctrl-N) to select, and press Enter to open.
-Esc goes back or exits from the tool menu; Ctrl-C exits while the launcher owns the
-terminal. Backspace edits the query and Ctrl-U clears it. F5 refreshes a resource
-list. Use arrows or PageUp/PageDown to scroll results. In cleanup confirmation,
-use Tab or Left/Right to choose between Cancel and Remove, then Enter to accept.
+The launcher opens in a compact panel below your prompt instead of taking over the
+whole screen. Actions are grouped into tabs: **AWS** (`a`), **Agents** (`i`, agent
+worktrees) and **Terminal** (`t`, Kitty sessions and SSH). Press a tab's letter, or
+`[`/`]` (also Left/Right, Tab, `h`/`l`) to switch tabs. Then press a number to run
+that action directly; for example, `i` `1` opens the agent worktrees. Up/Down (or
+`j`/`k`, Ctrl-P/Ctrl-N), PageUp/PageDown, Home/End and Enter also work. Press `/` to
+search actions across all tabs and `?` (F1 in lists) to see every key of the current
+screen. `q` or Esc exits; Ctrl-C exits at any point while the launcher owns the
+terminal.
 
-The launcher always uses ratatui, whether or not `fzf` is installed. It requires
-stdin, stdout, and stderr to be terminals. SSH and AWS SSO temporarily take over
-the terminal; the launcher resumes when they finish.
+In resource lists (profiles, hosts, sessions, worktrees), type to filter. Backspace
+edits the query and Ctrl-U clears it. F5 refreshes the list and Esc goes back.
 
-AWS exports and worktree directory changes appear as bash/zsh commands to run
-after exiting. The launcher cannot change your parent shell's environment or
-directory. For shell integration, keep using `eval "$(cli-toolbox aws profile)"`
-and `cd "$(cli-toolbox git agent-worktree create)"`. Do not pass `tui` output to
-`eval` or `cd`. Running `cli-toolbox` without arguments still prints help.
+**Agents › Worktrees** manages the agent worktrees of the current directory:
+
+- Enter opens a worktree's details. There, Enter (or `c`) shows the `cd` command and
+  `d` removes the worktree.
+- Ctrl-A creates a new worktree and Ctrl-D removes the selected one.
+- Removal asks for confirmation: `y` removes and `n` or Esc cancels. Tab or
+  Left/Right with Enter also works.
+
+The launcher always uses ratatui, whether or not `fzf` is installed. It draws on
+stderr and requires stdin, stdout, and stderr to be terminals. SSH and AWS SSO
+temporarily take over the terminal; the launcher resumes when they finish.
+
+#### Applying exports and directory changes
+
+By default, AWS exports and worktree directory changes appear as bash/zsh commands to
+run after exiting, because the launcher cannot change your parent shell's
+environment or directory. With `--print-shell`, a successful AWS profile selection,
+worktree creation or worktree `cd` exits the launcher and prints that command to
+stdout instead, so a shell function can `eval` it:
+
+```sh
+# ~/.zshrc or ~/.bashrc
+ct() { local cmd; cmd="$(cli-toolbox tui --print-shell)" || return; [ -n "$cmd" ] && eval "$cmd"; }
+```
+
+Only pass `tui --print-shell` output to `eval`; plain `tui` never prints commands.
+Running `cli-toolbox` without arguments still prints help.
 
 ### `aws`
 
@@ -60,42 +84,44 @@ Use it via `eval` so the exported variable is applied in your current shell:
 eval "$(cli-toolbox aws profile)"
 ```
 
-### `git`
+### `agent`
 
-Git helpers.
+AI agent helpers.
 
-#### `git agent-worktree`
+#### `agent worktree`
 
 Manage sibling git worktrees for AI agents. Running the command without a subcommand prints help.
 
 Worktrees are created next to the current directory as `<cwd>-agent-wt`, `<cwd>-agent-wt-2`, and so on.
 
-##### `git agent-worktree create`
+The previous `git agent-worktree …` commands still work as a hidden alias.
+
+##### `agent worktree create`
 
 Create a new worktree and branch, then print the worktree path.
 
 ```sh
-cd "$(cli-toolbox git agent-worktree create)"
+cd "$(cli-toolbox agent worktree create)"
 ```
 
 If the current directory is `/path/to/cli-toolbox`, the first call creates `/path/to/cli-toolbox-agent-wt` on branch `cli-toolbox-agent-wt`. Later calls allocate the next free numbered name.
 
-##### `git agent-worktree list`
+##### `agent worktree list`
 
 List agent worktrees for the current directory.
 
 ```sh
-cli-toolbox git agent-worktree list
+cli-toolbox agent worktree list
 ```
 
-##### `git agent-worktree cleanup`
+##### `agent worktree cleanup`
 
 Remove an agent worktree and its branch. Pass a worktree name or path to remove one of several, omit the name when only one exists, or use `--all` to remove every agent worktree for this directory.
 
 ```sh
-cli-toolbox git agent-worktree cleanup
-cli-toolbox git agent-worktree cleanup cli-toolbox-agent-wt-2
-cli-toolbox git agent-worktree cleanup --all
+cli-toolbox agent worktree cleanup
+cli-toolbox agent worktree cleanup cli-toolbox-agent-wt-2
+cli-toolbox agent worktree cleanup --all
 ```
 
 ### `kitty`

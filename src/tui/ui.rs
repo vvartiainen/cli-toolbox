@@ -1,30 +1,39 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
-use super::app::{App, ConfirmState, DetailsState, PickerState, ResultState, Screen, ToolId};
+use super::app::{
+    App, Category, ConfirmState, DetailsState, PickerState, Resource, ResultState, Screen, ToolId,
+    branch_label,
+};
 
-const HELP_HOME: &str = "↑/↓ or Ctrl-P/Ctrl-N move • type to filter • Enter open • Esc/Ctrl-C quit";
-const HELP_PICKER: &str = "↑/↓ move • type to filter • Enter select • F5 refresh • Esc back";
-const HELP_RESULT: &str = "↑/↓ scroll • PageUp/PageDown page • Enter/Esc back";
+/// Rows used by the launcher below the shell prompt.
+pub(super) const HEIGHT: u16 = 12;
+
+const ACCENT: Color = Color::Cyan;
+const HELP_SEARCH: &str = "↑↓ move · ⏎ run · F1 help · esc back";
+const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help · esc back";
+const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
+const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
+const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
+const HELP_OVERLAY: &str = "any key closes help";
 
 /// Update viewport-dependent state before drawing, including after a resize.
 pub(super) fn update_scroll_bounds(app: &mut App, area: Rect) {
-    let inner = Block::bordered().inner(area);
+    let inner = panel(Vec::new(), String::new(), "").inner(area);
     match &mut app.screen {
         Screen::Result(result) => {
-            let [_, body, _] = result_layout(inner);
+            let [_, body] = result_layout(inner);
             result.scroll = result
                 .scroll
                 .min(max_scroll(&result_paragraph(result), body));
         }
         Screen::WorktreeDetails(details) => {
-            let [body, _] = details_layout(inner);
             details.scroll = details
                 .scroll
-                .min(max_scroll(&details_paragraph(details), body));
+                .min(max_scroll(&details_paragraph(details), inner));
         }
         _ => {}
     }
@@ -37,297 +46,493 @@ fn max_scroll(paragraph: &Paragraph<'_>, area: Rect) -> u16 {
         .min(usize::from(u16::MAX)) as u16
 }
 
-fn details_layout(inner: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner)
-}
-
-fn result_layout(inner: Rect) -> [Rect; 3] {
-    Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner)
+fn result_layout(inner: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Length(1), Constraint::Min(1)])
+        .spacing(1)
+        .areas(inner)
 }
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
+    if app.show_help {
+        draw_help(frame, app);
+        return;
+    }
     match &app.screen {
         Screen::Home => draw_home(frame, app),
         Screen::Picker(picker) => draw_picker(frame, app, picker),
-        Screen::WorktreeDetails(details) => draw_details(frame, details),
+        Screen::WorktreeDetails(details) => draw_details(frame, app, details),
         Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, confirm),
         Screen::Result(result) => draw_result(frame, result),
     }
 }
 
-/// Draw the short loading frame used immediately before synchronous discovery.
-pub(crate) fn draw_loading(frame: &mut Frame<'_>, app: &App) {
+/// The shared frame: a rounded border with the location on the left, context
+/// on the right and key hints in the bottom border.
+fn panel<'a>(title: Vec<Span<'a>>, context: String, help: &'a str) -> Block<'a> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(title);
+    spans.push(Span::raw(" "));
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1))
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title_top(Line::from(spans))
+        .title_bottom(Line::from(format!(" {help} ").dark_gray()));
+    if context.is_empty() {
+        return block;
+    }
+    block.title_top(Line::from(format!(" {} ", clean_text(&context)).dark_gray()).right_aligned())
+}
+
+fn breadcrumb(category: Category, page: &str) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("cli-toolbox", Style::new().fg(ACCENT).bold()),
+        " › ".dark_gray(),
+        Span::raw(category.label()),
+        " › ".dark_gray(),
+        Span::styled(page.to_string(), Style::new().bold()),
+    ]
+}
+
+fn tab_keys() -> String {
+    let keys: Vec<String> = Category::ALL
+        .iter()
+        .map(|category| category.hotkey().to_string())
+        .collect();
+    keys.join("/")
+}
+
+fn home_help() -> String {
+    format!(
+        "{} [ ] tabs · 1-9 run · / search · ? help · q quit",
+        tab_keys()
+    )
+}
+
+fn details_help(app: &App) -> &'static str {
+    if app.print_shell {
+        "⏎ cd & exit · d remove · ? help · esc back"
+    } else {
+        "⏎ cd here · d remove · ? help · esc back"
+    }
+}
+
+/// Every key of the current screen, shown by `?` or F1.
+fn help_entries(app: &App) -> Vec<(String, &'static str)> {
+    let entry = |keys: &str, what| (keys.to_string(), what);
+    let mut entries = match &app.screen {
+        Screen::Home if app.searching => vec![
+            entry("type", "search all actions"),
+            entry("↑↓ ^P ^N", "move"),
+            entry("PgUp PgDn", "move by page"),
+            entry("Home End", "first / last"),
+            entry("⏎", "run the action"),
+            entry("^U", "clear the search"),
+            entry("esc", "back to tabs"),
+        ],
+        Screen::Home => vec![
+            entry(&tab_keys(), "go to tab"),
+            entry("[ ] ←→ h l", "previous / next tab"),
+            entry("1-9", "run the n:th action"),
+            entry("↑↓ j k", "move"),
+            entry("Home End", "first / last"),
+            entry("⏎", "run the action"),
+            entry("/", "search all actions"),
+            entry("q esc", "quit"),
+        ],
+        Screen::Picker(picker) => {
+            let mut entries = vec![
+                entry("type", "filter the list"),
+                entry("↑↓ ^P ^N", "move"),
+                entry("PgUp PgDn", "move by page"),
+                entry("Home End", "first / last"),
+                entry("^U", "clear the filter"),
+                entry("F5", "refresh"),
+                entry("esc", "back"),
+            ];
+            if picker.tool == ToolId::AgentWorktrees {
+                entries.extend([
+                    entry("⏎", "worktree details"),
+                    entry("^A", "new worktree"),
+                    entry("^D", "remove worktree"),
+                ]);
+            } else {
+                entries.push(entry("⏎", "select"));
+            }
+            entries
+        }
+        Screen::WorktreeDetails(_) => vec![
+            entry(
+                "⏎ c",
+                if app.print_shell {
+                    "cd into it and exit"
+                } else {
+                    "show the cd command"
+                },
+            ),
+            entry("d", "remove worktree"),
+            entry("↑↓ PgUp PgDn", "scroll"),
+            entry("esc", "back to the list"),
+        ],
+        Screen::ConfirmCleanup(_) => vec![
+            entry("y", "remove"),
+            entry("n esc", "cancel"),
+            entry("←→ tab", "choose a button"),
+            entry("⏎", "accept the choice"),
+        ],
+        Screen::Result(_) => vec![entry("↑↓ PgUp PgDn", "scroll"), entry("⏎ esc", "back")],
+    };
+    entries.push(entry("^C", "quit at any point"));
+    entries
+}
+
+fn draw_help(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    let block = Block::bordered().title("cli-toolbox");
+    let block = panel(
+        vec![
+            Span::styled("cli-toolbox", Style::new().fg(ACCENT).bold()),
+            " › ".dark_gray(),
+            Span::styled("Keys", Style::new().bold()),
+        ],
+        String::new(),
+        HELP_OVERLAY,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let tool = app.loading.map(ToolId::picker_title).unwrap_or("resources");
-    let text = Paragraph::new(format!("Loading {tool}…"))
-        .style(Style::default().fg(Color::Yellow))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(text, inner);
+
+    let entries = help_entries(app);
+    let key_width = entries
+        .iter()
+        .map(|(keys, _)| keys.chars().count())
+        .max()
+        .unwrap_or_default();
+    let line = |(keys, what): &(String, &str)| {
+        Line::from(vec![
+            Span::styled(format!("{keys:<key_width$}  "), Style::new().fg(ACCENT)),
+            Span::raw(what.to_string()),
+        ])
+    };
+    // Two columns keep every screen's keys inside the inline viewport.
+    let rows = usize::from(inner.height.max(1));
+    let columns: [Rect; 2] = if entries.len() > rows {
+        Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)])
+            .spacing(2)
+            .areas(inner)
+    } else {
+        [inner, Rect::default()]
+    };
+    let (left, right) = entries.split_at(entries.len().min(rows));
+    frame.render_widget(
+        Paragraph::new(left.iter().map(line).collect::<Vec<_>>()),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(right.iter().map(line).collect::<Vec<_>>()),
+        columns[1],
+    );
 }
 
 fn draw_home(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    let block = Block::bordered().title("cli-toolbox");
+    let help = if app.searching {
+        HELP_SEARCH.to_string()
+    } else {
+        home_help()
+    };
+    let block = panel(
+        vec![Span::styled("cli-toolbox", Style::new().fg(ACCENT).bold())],
+        app.cwd_display.clone(),
+        &help,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [cwd, search, list, description, help] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
+    let [header, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)])
+        .spacing(1)
+        .areas(inner);
+    let header_line = if app.searching {
+        search_line("/", &app.home_query)
+    } else {
+        tabs_line(app.category)
+    };
+    frame.render_widget(Paragraph::new(header_line), header);
 
-    frame.render_widget(
-        Paragraph::new(format!("Directory: {}", clean_text(&app.cwd_display))),
-        cwd,
-    );
-    frame.render_widget(
-        Paragraph::new(format!("Search: {}", clean_text(&app.home_query))),
-        search,
-    );
-
-    let visible = app.home_visible_indices();
-    let items: Vec<ListItem> = visible
+    let tools = app.home_tools();
+    if tools.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No actions match this search.".dark_gray()),
+            list,
+        );
+        return;
+    }
+    let label_width = tools.iter().map(|t| t.label().chars().count()).max();
+    let label_width = label_width.unwrap_or_default() + 3;
+    let items: Vec<ListItem> = tools
         .iter()
-        .filter_map(|index| ToolId::ALL.get(*index))
-        .map(|tool| ListItem::new(tool.label()))
+        .enumerate()
+        .map(|(index, tool)| {
+            let key = if app.searching {
+                format!("{:<9}", tool.category().label())
+            } else {
+                format!("{}", index + 1)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {key}  "), Style::new().fg(ACCENT)),
+                Span::raw(format!("{:<label_width$}", tool.label())),
+                tool.description().dark_gray(),
+            ]))
+        })
         .collect();
+    render_list(frame, list, items, app.home_selected);
+}
+
+fn tabs_line(active: Category) -> Line<'static> {
+    let mut spans = Vec::new();
+    for category in Category::ALL {
+        let key = format!(" {} ", category.hotkey());
+        let label = format!("{} ", category.label());
+        if category == active {
+            let style = Style::new().fg(Color::Black).bg(ACCENT);
+            spans.push(Span::styled(key, style));
+            spans.push(Span::styled(label, style.bold()));
+        } else {
+            spans.push(Span::styled(key, Style::new().fg(ACCENT)));
+            spans.push(Span::raw(label));
+        }
+        spans.push(Span::raw("  "));
+    }
+    Line::from(spans)
+}
+
+fn search_line(prompt: &str, query: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{prompt} "), Style::new().fg(ACCENT).bold()),
+        Span::raw(clean_text(query)),
+        Span::styled("▏", Style::new().fg(ACCENT)),
+    ])
+}
+
+fn render_list(frame: &mut Frame<'_>, area: Rect, items: Vec<ListItem<'_>>, selected: usize) {
     let mut state = ListState::default();
     if !items.is_empty() {
-        state.select(Some(app.home_selected.min(items.len() - 1)));
+        state.select(Some(selected.min(items.len() - 1)));
     }
-    let list_widget = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Actions"))
-        .highlight_symbol("> ")
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(list_widget, list, &mut state);
-
-    let description_text = app
-        .selected_tool()
-        .map(ToolId::description)
-        .unwrap_or_else(|| {
-            if app.home_query.is_empty() {
-                "No actions match the current selection."
-            } else {
-                "No actions match this search."
-            }
-        });
-    frame.render_widget(
-        Paragraph::new(clean_text(description_text)).wrap(Wrap { trim: true }),
-        description,
+    let widget = List::new(items).highlight_symbol("▌").highlight_style(
+        Style::new()
+            .bg(Color::DarkGray)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(
-        Paragraph::new(HELP_HOME).style(Style::default().fg(Color::DarkGray)),
-        help,
-    );
+    frame.render_stateful_widget(widget, area, &mut state);
 }
 
 fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
     let area = frame.area();
-    let block = Block::bordered().title(picker.tool.picker_title());
+    let visible = picker.visible_indices();
+    let count = if app.loading.is_some() {
+        "loading…".to_string()
+    } else {
+        format!("{}/{}", visible.len(), picker.resources.len())
+    };
+    let help = if picker.tool == ToolId::AgentWorktrees {
+        HELP_WORKTREES
+    } else {
+        HELP_PICKER
+    };
+    let block = panel(
+        breadcrumb(picker.tool.category(), picker.tool.picker_title()),
+        count,
+        help,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [search, list, message, help] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    frame.render_widget(
-        Paragraph::new(format!("Search: {}", clean_text(&picker.query))),
-        search,
-    );
-
-    let visible = picker.visible_indices();
-    let items: Vec<ListItem> = visible
-        .iter()
-        .filter_map(|index| picker.resources.get(*index))
-        .map(|resource| ListItem::new(clean_text(&resource.label())))
-        .collect();
-    let mut state = ListState::default();
-    if !items.is_empty() {
-        state.select(Some(picker.selected.min(items.len() - 1)));
-    }
-    let widget = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Select"))
-        .highlight_symbol("> ")
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(widget, list, &mut state);
-
-    let message_text = if let Some(error) = &picker.error {
-        format!("Error: {}", clean_text(error))
+    let message = if let Some(error) = &picker.error {
+        Some(format!("Error: {}", clean_text(error)))
+    } else if app.loading.is_some() {
+        Some(format!(
+            "Reading {}…",
+            picker.tool.picker_title().to_ascii_lowercase()
+        ))
+    } else if picker.resources.is_empty() && picker.tool == ToolId::AgentWorktrees {
+        Some("No agent worktrees yet. Press Ctrl-A to create one.".to_string())
     } else if picker.resources.is_empty() {
-        format!(
+        Some(format!(
             "No {} found. Press F5 to refresh or Esc to go back.",
             picker.tool.picker_title().to_ascii_lowercase()
-        )
+        ))
     } else if visible.is_empty() {
-        "No matches. Press Backspace or Ctrl-U to change the search.".to_string()
+        Some("No matches. Press Backspace or Ctrl-U to change the search.".to_string())
     } else {
-        String::new()
+        None
     };
-    frame.render_widget(
-        Paragraph::new(message_text).style(Style::default().fg(Color::Yellow)),
-        message,
-    );
-    frame.render_widget(
-        Paragraph::new(HELP_PICKER).style(Style::default().fg(Color::DarkGray)),
-        help,
-    );
+    let [search, list, message_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(u16::from(message.is_some())),
+    ])
+    .areas(inner);
+    frame.render_widget(Paragraph::new(search_line("›", &picker.query)), search);
 
-    if app.loading.is_some() {
-        draw_loading_overlay(frame, area, picker.tool.picker_title());
+    let shown: Vec<&Resource> = visible
+        .iter()
+        .filter_map(|index| picker.resources.get(*index))
+        .collect();
+    let name_width = shown
+        .iter()
+        .filter_map(|resource| match resource {
+            Resource::Worktree(worktree) => Some(clean_text(&worktree.name).chars().count()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or_default();
+    let items: Vec<ListItem> = shown
+        .into_iter()
+        .map(|resource| ListItem::new(resource_line(resource, name_width)))
+        .collect();
+    render_list(frame, list, items, picker.selected);
+
+    if let Some(message) = message {
+        let color = if picker.error.is_some() {
+            Color::Red
+        } else {
+            Color::Yellow
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::new().fg(color)),
+            message_area,
+        );
     }
 }
 
-fn draw_loading_overlay(frame: &mut Frame<'_>, area: Rect, title: &str) {
-    let popup = centered_rect(area, 60, 20);
-    let block = Block::bordered().title(format!("Loading {title}"));
-    let text = Paragraph::new("Reading resources…")
-        .block(block)
-        .style(Style::default().fg(Color::Yellow))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(text, popup);
+/// One picker row. Worktrees are aligned columns: name, branch, dimmed path.
+fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
+    match resource {
+        Resource::Worktree(worktree) => Line::from(vec![
+            Span::raw(format!(" {:<name_width$}  ", clean_text(&worktree.name))),
+            Span::styled(
+                format!("[{}]  ", clean_text(branch_label(worktree))),
+                Style::new().fg(ACCENT),
+            ),
+            clean_text(&worktree.path.display().to_string()).dark_gray(),
+        ]),
+        _ => Line::from(format!(" {}", clean_text(&resource.label()))),
+    }
 }
 
-fn draw_details(frame: &mut Frame<'_>, details: &DetailsState) {
+fn draw_details(frame: &mut Frame<'_>, app: &App, details: &DetailsState) {
     let area = frame.area();
-    let block = Block::bordered().title("Worktree details");
+    let block = panel(
+        breadcrumb(ToolId::AgentWorktrees.category(), "Worktree"),
+        String::new(),
+        details_help(app),
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [body, help] = details_layout(inner);
     let paragraph = details_paragraph(details);
-    let scroll = details.scroll.min(max_scroll(&paragraph, body));
-    frame.render_widget(paragraph.scroll((scroll, 0)), body);
-    frame.render_widget(
-        Paragraph::new(HELP_RESULT).style(Style::default().fg(Color::DarkGray)),
-        help,
-    );
+    let scroll = details.scroll.min(max_scroll(&paragraph, inner));
+    frame.render_widget(paragraph.scroll((scroll, 0)), inner);
 }
 
 fn details_paragraph(details: &DetailsState) -> Paragraph<'static> {
-    let branch = if details.worktree.branch.is_empty() {
-        "(no branch)"
-    } else {
-        &details.worktree.branch
-    };
     let content = vec![
-        Line::from(vec![
-            Span::styled("Name: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(clean_text(&details.worktree.name)),
-        ]),
-        Line::from(vec![
-            Span::styled("Path: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(clean_text(&details.worktree.path.display().to_string())),
-        ]),
-        Line::from(vec![
-            Span::styled("Branch: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(clean_text(branch)),
-        ]),
+        field("Name", &details.worktree.name),
+        field("Path", &details.worktree.path.display().to_string()),
+        field("Branch", branch_label(&details.worktree)),
     ];
     Paragraph::new(Text::from(content)).wrap(Wrap { trim: true })
 }
 
+fn field(name: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{name:<8}"), Style::new().fg(ACCENT)),
+        Span::raw(clean_text(value)),
+    ])
+}
+
 fn draw_confirmation(frame: &mut Frame<'_>, confirm: &ConfirmState) {
     let area = frame.area();
-    let block = Block::bordered().title("Confirm cleanup");
+    let block = panel(
+        breadcrumb(ToolId::AgentWorktrees.category(), "Confirm cleanup"),
+        String::new(),
+        HELP_CONFIRM,
+    )
+    .border_style(Style::new().fg(Color::Red));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [body, buttons, help] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
+    let [body, buttons] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+        .spacing(1)
+        .areas(inner);
     let (question, branch) = if confirm.worktree.branch.is_empty() {
         (
             "Remove this worktree?",
-            "The branch is empty; only the worktree will be removed.".to_string(),
+            field("Branch", "(none; only the worktree will be removed)"),
         )
     } else {
         (
             "Remove this worktree and branch?",
-            format!("Branch: {}", clean_text(&confirm.worktree.branch)),
+            field("Branch", &confirm.worktree.branch),
         )
     };
-    let content = format!(
-        "{question}\nPath: {}\n{}",
-        clean_text(&confirm.worktree.path.display().to_string()),
-        branch
-    );
-    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), body);
-    let cancel = if confirm.confirm {
-        "Cancel"
-    } else {
-        "[ Cancel ]"
+    let content = vec![
+        Line::from(question.bold()),
+        Line::default(),
+        field("Path", &confirm.worktree.path.display().to_string()),
+        branch,
+    ];
+    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), body);
+
+    let button = |label: &'static str, active: bool, color: Color| {
+        if active {
+            Span::styled(
+                format!(" {label} "),
+                Style::new().fg(Color::Black).bg(color).bold(),
+            )
+        } else {
+            Span::styled(format!(" {label} "), Style::new().fg(Color::DarkGray))
+        }
     };
-    let accept = if confirm.confirm {
-        "[ Remove ]"
-    } else {
-        "Remove"
-    };
-    frame.render_widget(Paragraph::new(format!("{cancel}    {accept}")), buttons);
     frame.render_widget(
-        Paragraph::new("Tab/←/→ choose • Enter accept • Esc cancel")
-            .style(Style::default().fg(Color::DarkGray)),
-        help,
+        Paragraph::new(Line::from(vec![
+            button("Cancel", !confirm.confirm, Color::White),
+            Span::raw("  "),
+            button("Remove", confirm.confirm, Color::Red),
+        ])),
+        buttons,
     );
 }
 
 fn draw_result(frame: &mut Frame<'_>, result: &ResultState) {
     let area = frame.area();
-    let block = Block::bordered().title(if result.failed { "Failed" } else { "Result" });
+    let (status, color) = if result.failed {
+        ("✗ Failed", Color::Red)
+    } else {
+        ("✓ Done", Color::Green)
+    };
+    let block = panel(
+        vec![
+            Span::styled("cli-toolbox", Style::new().fg(ACCENT).bold()),
+            " › ".dark_gray(),
+            Span::styled(status, Style::new().fg(color).bold()),
+        ],
+        String::new(),
+        HELP_RESULT,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [title, body, help] = result_layout(inner);
+    let [title, body] = result_layout(inner);
     frame.render_widget(
-        Paragraph::new(clean_text(&result.title)).style(if result.failed {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        }),
+        Paragraph::new(clean_text(&result.title))
+            .style(Style::new().fg(color).add_modifier(Modifier::BOLD)),
         title,
     );
     let paragraph = result_paragraph(result);
     let scroll = result.scroll.min(max_scroll(&paragraph, body));
     frame.render_widget(paragraph.scroll((scroll, 0)), body);
-    frame.render_widget(
-        Paragraph::new(HELP_RESULT).style(Style::default().fg(Color::DarkGray)),
-        help,
-    );
 }
 
 fn result_paragraph(result: &ResultState) -> Paragraph<'static> {
     Paragraph::new(clean_text(&result.body)).wrap(Wrap { trim: false })
-}
-
-fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
-    let vertical = Layout::vertical([
-        Constraint::Percentage((100 - height_percent) / 2),
-        Constraint::Percentage(height_percent),
-        Constraint::Percentage((100 - height_percent) / 2),
-    ])
-    .split(area);
-    let horizontal = Layout::horizontal([
-        Constraint::Percentage((100 - width_percent) / 2),
-        Constraint::Percentage(width_percent),
-        Constraint::Percentage((100 - width_percent) / 2),
-    ])
-    .split(vertical[1]);
-    horizontal[1]
 }
 
 fn clean_text(text: &str) -> String {
@@ -398,8 +603,9 @@ mod tests {
     #[test]
     fn renders_home_and_result_with_test_backend() {
         let app = App::new("/tmp/project".into());
-        let home = rendered(&app, 80, 20);
-        assert!(home.contains("AWS: select profile"));
+        let home = rendered(&app, 80, super::HEIGHT);
+        assert!(home.contains("Select profile"));
+        assert!(home.contains(" i Agents"));
         assert!(home.contains("/tmp/project"));
 
         let mut result_app = App::new("/tmp/project".into());
@@ -424,9 +630,7 @@ mod tests {
                 branch: String::new(),
             },
             confirm: false,
-            return_picker: crate::tui::app::PickerState::new(
-                crate::tui::app::ToolId::GitWorktreeCleanup,
-            ),
+            return_picker: crate::tui::app::PickerState::new(ToolId::AgentWorktrees),
         });
         let text = rendered(&app, 2, 1);
         assert_eq!(text.chars().count(), 2);
@@ -462,9 +666,45 @@ mod tests {
                 branch: "x-branch".into(),
             },
             confirm: false,
-            return_picker: crate::tui::app::PickerState::new(ToolId::GitWorktreeCleanup),
+            return_picker: crate::tui::app::PickerState::new(ToolId::AgentWorktrees),
         });
         assert!(rendered(&app, 80, 12).contains("Remove this worktree and branch?"));
+    }
+
+    #[test]
+    fn help_overlay_lists_tab_keys() {
+        let mut app = App::new("/tmp/project".into());
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let text = rendered(&app, 80, super::HEIGHT);
+        assert!(text.contains("[ ]"), "{text}");
+        assert!(text.contains("go to tab"), "{text}");
+    }
+
+    #[test]
+    fn worktrees_render_as_columns() {
+        let mut app = App::new("/tmp/project".into());
+        app.loaded(
+            ToolId::AgentWorktrees,
+            Ok(vec![Resource::Worktree(crate::git::AgentWorktree {
+                name: "project-agent-wt".into(),
+                path: PathBuf::from("/tmp/project-agent-wt"),
+                branch: "feature".into(),
+            })]),
+        );
+        let text = rendered(&app, 80, super::HEIGHT);
+        assert!(
+            text.contains("project-agent-wt  [feature]  /tmp/project-agent-wt"),
+            "{text}"
+        );
+        assert!(text.contains("^D remove"), "{text}");
+    }
+
+    #[test]
+    fn empty_worktree_list_points_to_create() {
+        let mut app = App::new("/tmp/project".into());
+        app.loaded(ToolId::AgentWorktrees, Ok(Vec::new()));
+        let text = rendered(&app, 80, super::HEIGHT);
+        assert!(text.contains("Press Ctrl-A to create one"), "{text}");
     }
 
     #[test]

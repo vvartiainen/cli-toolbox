@@ -20,17 +20,50 @@ pub(crate) struct TerminalSession {
     terminal: Terminal<CrosstermBackend<io::Stderr>>,
     state: Arc<Mutex<SessionState>>,
     panic_hook: Option<PanicHookGuard>,
+    /// An inline viewport still drawn below the shell prompt.
+    inline_pending: bool,
 }
 
 impl TerminalSession {
     pub(crate) fn new() -> io::Result<Self> {
         Self::from_parts(
             Terminal::new(CrosstermBackend::new(io::stderr()))?,
-            Box::new(CrosstermOps),
+            Box::new(CrosstermOps {
+                alternate_screen: true,
+            }),
         )
     }
 
+    /// Draw in a fixed-height area below the cursor instead of taking over
+    /// the whole screen. The area is cleared again on restore.
+    pub(crate) fn inline(height: u16) -> io::Result<Self> {
+        let terminal = Terminal::with_options(
+            CrosstermBackend::new(io::stderr()),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(height),
+            },
+        )?;
+        let mut session = Self::from_parts(
+            terminal,
+            Box::new(CrosstermOps {
+                alternate_screen: false,
+            }),
+        )?;
+        session.inline_pending = true;
+        Ok(session)
+    }
+
     pub(crate) fn restore(&mut self) -> io::Result<()> {
+        if self.inline_pending {
+            self.inline_pending = false;
+            // Leave the cursor where the launcher started so that the shell
+            // prompt or a launched command continues from there.
+            let origin = self.terminal.get_frame().area().as_position();
+            let _ = self
+                .terminal
+                .clear()
+                .and_then(|()| self.terminal.set_cursor_position(origin));
+        }
         let result = lock_unpoisoned(&self.state).restore();
         if result.is_ok()
             && let Some(hook) = self.panic_hook.as_mut()
@@ -84,6 +117,7 @@ impl TerminalSession {
             terminal,
             state,
             panic_hook,
+            inline_pending: false,
         })
     }
 
@@ -136,7 +170,9 @@ trait TerminalOps: Send {
     fn show_cursor(&mut self) -> io::Result<()>;
 }
 
-struct CrosstermOps;
+struct CrosstermOps {
+    alternate_screen: bool,
+}
 
 impl TerminalOps for CrosstermOps {
     fn enable_raw_mode(&mut self) -> io::Result<()> {
@@ -148,11 +184,17 @@ impl TerminalOps for CrosstermOps {
     }
 
     fn enter_alternate_screen(&mut self) -> io::Result<()> {
-        execute!(io::stderr(), EnterAlternateScreen)
+        if self.alternate_screen {
+            execute!(io::stderr(), EnterAlternateScreen)?;
+        }
+        Ok(())
     }
 
     fn leave_alternate_screen(&mut self) -> io::Result<()> {
-        execute!(io::stderr(), LeaveAlternateScreen)
+        if self.alternate_screen {
+            execute!(io::stderr(), LeaveAlternateScreen)?;
+        }
+        Ok(())
     }
 
     fn hide_cursor(&mut self) -> io::Result<()> {

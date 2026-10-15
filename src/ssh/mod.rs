@@ -207,7 +207,9 @@ pub(crate) fn connect(
 ) -> Result<(), Error> {
     let (cmd_name, args) = kitten_ssh_command(&host.name)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    exec::run_inherited(cmd_name, &arg_refs).map_err(|err| {
+    // Route the session's stdout to the stderr terminal, so it stays
+    // interactive when stdout is captured (`tui --print-shell`).
+    exec::run_on_stderr(cmd_name, &arg_refs).map_err(|err| {
         Error::msg(format!(
             "connect to ssh host \"{}\" with kitten ssh: {err}",
             host.name

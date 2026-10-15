@@ -103,20 +103,6 @@ pub fn run_on_stderr(name: &str, args: &[&str]) -> Result<(), Error> {
     }
 }
 
-pub fn run_inherited(name: &str, args: &[&str]) -> Result<(), Error> {
-    let mut cmd = Command::new(name);
-    cmd.args(args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    let status = cmd.status().map_err(|err| command_error(name, args, err))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::msg(format!("{name} {}: {status}", args.join(" "))))
-    }
-}
-
 fn output(name: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output, Error> {
     let mut cmd = Command::new(name);
     cmd.args(args);

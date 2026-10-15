@@ -12,6 +12,20 @@ pub(super) struct Outcome {
     pub title: String,
     pub body: String,
     pub failed: bool,
+    /// A command for the parent shell, such as an export or `cd`.
+    pub shell: Option<String>,
+}
+
+/// What a successful action reports back.
+struct Done {
+    body: String,
+    shell: Option<String>,
+}
+
+impl Done {
+    fn body(body: String) -> Self {
+        Self { body, shell: None }
+    }
 }
 
 impl Context {
@@ -23,7 +37,11 @@ impl Context {
 
     pub fn cwd_display(&self) -> String {
         match &self.cwd {
-            Ok(path) => path.display().to_string(),
+            Ok(path) => match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok()) {
+                Some(relative) if relative.as_os_str().is_empty() => "~".into(),
+                Some(relative) => format!("~/{}", relative.display()),
+                None => path.display().to_string(),
+            },
             Err(err) => err.clone(),
         }
     }
@@ -34,13 +52,10 @@ impl Context {
 
     pub fn load(&self, tool: ToolId) -> Result<Vec<Resource>, Error> {
         match tool {
-            ToolId::GitWorktreeList | ToolId::GitWorktreeCleanup => {
-                Ok(git::agent_worktrees(self.working_dir()?)?
-                    .into_iter()
-                    .map(Resource::Worktree)
-                    .collect())
-            }
-            ToolId::GitWorktreeCreate => Ok(Vec::new()),
+            ToolId::AgentWorktrees => Ok(git::agent_worktrees(self.working_dir()?)?
+                .into_iter()
+                .map(Resource::Worktree)
+                .collect()),
             _ => {
                 let home = dirs::home_dir().ok_or_else(|| {
                     Error::msg("resolve home directory: home directory not found")
@@ -55,9 +70,9 @@ impl Context {
         let mut stderr = Vec::new();
         let result = self.execute_inner(action, &mut stdout, &mut stderr);
         let failed = result.is_err();
-        let mut body = match result {
-            Ok(body) => body,
-            Err(err) => err.to_string(),
+        let (mut body, shell) = match result {
+            Ok(done) => (done.body, done.shell),
+            Err(err) => (err.to_string(), None),
         };
         for bytes in [&stdout, &stderr] {
             if !bytes.is_empty() {
@@ -74,6 +89,7 @@ impl Context {
             .into(),
             body,
             failed,
+            shell,
         }
     }
 
@@ -82,38 +98,55 @@ impl Context {
         action: &Action,
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
-    ) -> Result<String, Error> {
+    ) -> Result<Done, Error> {
         match action {
             Action::Aws(profile) => {
                 let export = aws::export_profile(profile, stderr)?;
-                Ok(format!(
-                    "Profile ready: {}\n\nRun this in your shell after exiting (bash/zsh):\n{export}\n\nFor direct shell selection, use:\neval \"$(cli-toolbox aws profile)\"\n\nThe launcher's parent shell has not been changed.",
-                    profile.name
-                ))
+                Ok(Done {
+                    body: format!(
+                        "Profile ready: {}\n\nRun this in your shell after exiting (bash/zsh):\n{export}\n\nTo apply it automatically, start the launcher with `tui --print-shell` (see README).\n\nThe launcher's parent shell has not been changed.",
+                        profile.name
+                    ),
+                    shell: Some(export),
+                })
             }
             Action::Kitty(path) => {
                 kitty::launch_session(path, stdout, stderr)?;
-                Ok(format!("Switched Kitty session to {}", path.display()))
+                Ok(Done::body(format!(
+                    "Switched Kitty session to {}",
+                    path.display()
+                )))
             }
             Action::Ssh(host) => {
                 ssh::connect(host, stdout, stderr)?;
-                Ok(format!("SSH session for {} ended.", host.name))
+                Ok(Done::body(format!("SSH session for {} ended.", host.name)))
             }
             Action::CreateWorktree => {
                 let worktree = git::create_agent_worktree_record(self.working_dir()?, stderr)?;
-                Ok(format!(
-                    "Created worktree: {}\nBranch: {}\n\n{}",
-                    worktree.path.display(),
-                    worktree.branch,
-                    directory_instructions(&worktree.path)
-                ))
+                Ok(Done {
+                    body: format!(
+                        "Created worktree: {}\nBranch: {}\n\n{}",
+                        worktree.path.display(),
+                        worktree.branch,
+                        directory_instructions(&worktree.path)
+                    ),
+                    shell: cd_command(&worktree.path),
+                })
             }
+            Action::EnterWorktree(worktree) => Ok(Done {
+                body: format!(
+                    "Worktree: {}\n\n{}",
+                    worktree.path.display(),
+                    directory_instructions(&worktree.path)
+                ),
+                shell: cd_command(&worktree.path),
+            }),
             Action::Cleanup(worktree) => {
                 let target = worktree.path.to_str().ok_or_else(|| {
                     Error::msg("cannot clean up a worktree whose path is not valid UTF-8")
                 })?;
                 git::cleanup_agent_worktree(self.working_dir()?, target, false, stdout, stderr)?;
-                Ok(if worktree.branch.is_empty() {
+                Ok(Done::body(if worktree.branch.is_empty() {
                     format!("Removed worktree {}", worktree.path.display())
                 } else {
                     format!(
@@ -121,7 +154,7 @@ impl Context {
                         worktree.path.display(),
                         worktree.branch
                     )
-                })
+                }))
             }
         }
     }
@@ -153,11 +186,16 @@ fn load_home(tool: ToolId, home: &Path) -> Result<Vec<Resource>, Error> {
     }
 }
 
+/// A `cd` for bash/zsh, or nothing when the path cannot be quoted safely.
+fn cd_command(path: &Path) -> Option<String> {
+    path.to_str()
+        .map(|path| format!("cd {}", aws::shell_quote(path)))
+}
+
 fn directory_instructions(path: &Path) -> String {
-    match path.to_str() {
-        Some(path) => format!(
-            "Run this in your shell after exiting (bash/zsh):\ncd {}\n\nThe launcher's parent directory has not been changed.",
-            aws::shell_quote(path)
+    match cd_command(path) {
+        Some(cd) => format!(
+            "Run this in your shell after exiting (bash/zsh):\n{cd}\n\nThe launcher's parent directory has not been changed."
         ),
         None => "This path is not valid UTF-8; no shell command can be displayed safely.".into(),
     }
@@ -184,6 +222,24 @@ mod tests {
                 .contains("export AWS_PROFILE='dev'\\''s profile'")
         );
         assert!(outcome.body.contains("after exiting"));
+        assert_eq!(
+            outcome.shell.as_deref(),
+            Some("export AWS_PROFILE='dev'\\''s profile'")
+        );
+    }
+
+    #[test]
+    fn entering_a_worktree_returns_a_quoted_cd() {
+        let context = Context {
+            cwd: Err("not needed".into()),
+        };
+        let outcome = context.execute(&Action::EnterWorktree(git::AgentWorktree {
+            name: "agent's tree".into(),
+            path: PathBuf::from("/tmp/agent's tree"),
+            branch: String::new(),
+        }));
+        assert!(!outcome.failed, "{}", outcome.body);
+        assert_eq!(outcome.shell.as_deref(), Some("cd '/tmp/agent'\\''s tree'"));
     }
 
     #[test]
@@ -202,6 +258,7 @@ mod tests {
         };
         let outcome = context.execute(&Action::CreateWorktree);
         assert!(outcome.failed);
+        assert!(outcome.shell.is_none());
         assert!(outcome.body.contains("directory no longer exists"));
     }
 
@@ -219,5 +276,6 @@ mod tests {
         let text = directory_instructions(&path);
         assert!(!text.contains("cd "));
         assert!(text.contains("not valid UTF-8"));
+        assert!(cd_command(&path).is_none());
     }
 }
