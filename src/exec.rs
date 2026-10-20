@@ -118,6 +118,36 @@ pub fn run_on_stderr_in(
     }
 }
 
+/// Run `name` in `cwd` with extra environment variables and return its
+/// stdout. Its stderr streams to ours, so progress stays visible.
+pub fn stdout_of_in(
+    name: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    envs: &[(&str, &OsStr)],
+) -> Result<String, Error> {
+    let (_, stderr) = stderr_pair()?;
+    let mut cmd = Command::new(name);
+    cmd.args(args)
+        .envs(envs.iter().copied())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(stderr);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    let output = cmd.output().map_err(|err| command_error(name, args, err))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(Error::msg(format!(
+            "{name} {}: {}",
+            args.join(" "),
+            output.status
+        )))
+    }
+}
+
 fn output(name: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output, Error> {
     let mut cmd = Command::new(name);
     cmd.args(args);
