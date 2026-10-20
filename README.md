@@ -12,6 +12,7 @@ Command parsing and help output are handled with [clap](https://github.com/clap-
 - `aws` for AWS helpers
 - `git` for git helpers
 - `herdr` (optional) to open agent worktrees as Herdr workspaces
+- `nix` and an [agent-sandbox](https://github.com/vvartiainen/agent-sandbox-setup) flake for sandboxed agents (`agent start`)
 - `just` for development, and optionally to run a project's `worktree-init` recipe
 
 AWS profile, Kitty session, and SSH host selection run an interactive terminal UI. Those commands need a TTY.
@@ -53,6 +54,10 @@ edits the query and Ctrl-U clears it. F5 refreshes the list and Esc goes back.
   workspace.
 - Removal asks for confirmation: `y` removes and `n` or Esc cancels. Tab or
   Left/Right with Enter also works.
+- Ctrl-V starts a sandboxed agent ([`agent start`](#sandboxed-agents)). In a
+  worktree's details, `s` syncs the agent's commits, `u` and `x` boot and stop
+  its VM, and `D` runs `agent done`. The agent kind comes from
+  `CLI_TOOLBOX_AGENT`.
 
 The launcher always uses ratatui, whether or not `fzf` is installed. It draws on
 stderr and requires stdin, stdout, and stderr to be terminals. SSH and AWS SSO
@@ -91,6 +96,41 @@ eval "$(cli-toolbox aws profile)"
 ### `agent`
 
 AI agent helpers.
+
+#### Sandboxed agents
+
+Each sandboxed agent gets its own agent worktree, and the worktree runs its own
+[agent-sandbox](https://github.com/vvartiainen/agent-sandbox-setup) microVM.
+herdr runs in the VM, and your herdr adds the VM as a machine named after the
+worktree, so the host herdr is the control plane for every agent. The agent's
+commits come back as the worktree's branch, which you review and merge
+yourself.
+
+```sh
+cli-toolbox agent sandbox init --template rust --ai   # once per project
+cli-toolbox agent start --agent claude                # worktree + VM + herdr workspace
+cli-toolbox agent sync                                # guest commits -> worktree branch
+cli-toolbox agent done                                # stop VM, remove worktree, keep branch
+```
+
+| Command | What it does |
+| --- | --- |
+| `agent sandbox init` | Creates `sandbox/flake.nix` from an agent-sandbox template (`--template nodejs\|rust\|go`), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), names the VM after the project, authorizes your SSH public key, ignores `.agent-sandbox/` and marks the flake for git. `--ai [KIND]` then starts a coding agent with agent-sandbox's `SETUP-AGENT.md` to tailor the toolchain. Commit the flake when it builds. |
+| `agent start` | Creates the next agent worktree, starts its VM in the background on a free SSH port (2300–2399), runs `herdr-add` and opens a herdr workspace at `/workspace/app` in the guest with the agent (`--agent KIND` or `CLI_TOOLBOX_AGENT`). The guest home is fresh; `--home-from main` (or a path) starts from an APFS clone of the main checkout's `.agent-sandbox/home.img`, with its logins. Prints the worktree path. |
+| `agent up [name]` / `agent stop [name]` | Boot or stop the VM of an existing worktree. |
+| `agent sync [name]` | Runs the flake's `git-pull`: the guest's commits are fetched into `sandbox/*` and the worktree branch is fast-forwarded. Prints the branch's commits beyond the main checkout's `HEAD`. |
+| `agent list` | Agent worktrees with branch, VM state and SSH port. |
+| `agent done [name]` | Syncs, stops the VM, removes the herdr machine and the worktree, and keeps the branch. It refuses when guest commits have diverged from the branch, when the VM is stopped but has a home image (so it cannot sync), or when the worktree has uncommitted changes; `--force` removes anyway. |
+
+The sandbox flake is `sandbox/flake.nix` (or a root `flake.nix` that uses
+agent-sandbox) in the worktree, else in the main checkout; `--flake DIR`
+overrides it. VM state comes from agent-sandbox's `runner.json` files under
+`~/.local/state/agent-sandbox/vms/`. For herdr to reuse each VM's host key, add
+this once at the top of `~/.ssh/config`:
+
+```sshconfig
+Include ~/.local/state/agent-sandbox/vms/*/ssh_config
+```
 
 #### `agent worktree`
 
