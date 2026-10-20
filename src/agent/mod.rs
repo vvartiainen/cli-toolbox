@@ -52,14 +52,15 @@ pub(crate) struct Created {
     pub(crate) steps: Vec<Step>,
 }
 
-/// Create the next agent worktree of `cwd`, initialize it and open it in
-/// Herdr. Init output streams to `stderr`.
+/// Create the next agent worktree of `cwd` under `root`, initialize it and
+/// open it in Herdr. Init output streams to `stderr`.
 pub(crate) fn create_worktree(
     cwd: &Path,
+    root: &Path,
     options: Options,
     stderr: &mut dyn Write,
 ) -> Result<Created, Error> {
-    let worktree = git::create_agent_worktree_record(cwd, stderr)?;
+    let worktree = git::create_agent_worktree_record(cwd, root, stderr)?;
     let mut steps = Vec::new();
     if options.init {
         steps.push(init_step(cwd, &worktree.path, stderr)?);
@@ -127,11 +128,12 @@ pub(crate) fn remove_worktree(
 /// the steps on stderr. The path is printed even when a step fails.
 pub(crate) fn create(
     cwd: &Path,
+    root: &Path,
     options: Options,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), Error> {
-    let created = create_worktree(cwd, options, stderr)?;
+    let created = create_worktree(cwd, root, options, stderr)?;
     report(&created.steps, stderr)?;
     writeln!(stdout, "{}", created.worktree.path.display())?;
     check_steps(&created.steps, "worktree created")
@@ -196,7 +198,13 @@ mod tests {
         .unwrap();
         crate::git::tests::commit_all(&repo);
 
-        let created = create_worktree(&repo, NO_HERDR, &mut Vec::new()).unwrap();
+        let created = create_worktree(
+            &repo,
+            &root.path().join("worktrees"),
+            NO_HERDR,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(
             created.steps,
             vec![Step::Done("init: just worktree-init".into())]
@@ -217,7 +225,14 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        create(&repo, NO_HERDR, &mut stdout, &mut stderr).unwrap();
+        create(
+            &repo,
+            &root.path().join("worktrees"),
+            NO_HERDR,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
         let path = String::from_utf8(stdout).unwrap();
         assert!(path.trim().ends_with("demo-agent-wt"), "{path}");
         let stderr = String::from_utf8(stderr).unwrap();

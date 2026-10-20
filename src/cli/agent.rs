@@ -77,7 +77,13 @@ pub(super) fn run_worktree(
                 init: !no_init,
                 herdr: !no_herdr,
             };
-            agent::create(&working_dir()?, options, stdout, stderr)
+            agent::create(
+                &working_dir()?,
+                &git::worktrees_root()?,
+                options,
+                stdout,
+                stderr,
+            )
         }
         WorktreeCommands::List => git::list_agent_worktrees(&working_dir()?, stdout, stderr),
         WorktreeCommands::Cleanup {

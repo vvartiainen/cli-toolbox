@@ -130,6 +130,7 @@ impl Context {
                 // command stream their progress to it directly.
                 let created = agent::create_worktree(
                     self.working_dir()?,
+                    &git::worktrees_root()?,
                     agent::Options::default(),
                     &mut std::io::stderr(),
                 )?;

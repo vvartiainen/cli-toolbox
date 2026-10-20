@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -9,16 +10,14 @@ use crate::{Error, exec};
 
 const AGENT_WORKTREE_SUFFIX: &str = "-agent-wt";
 
+/// Overrides the directory that holds agent worktrees.
+pub const WORKTREES_DIR_ENV: &str = "CLI_TOOLBOX_WORKTREES_DIR";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorktree {
     pub name: String,
     pub path: PathBuf,
     pub branch: String,
-}
-
-struct CwdLayout {
-    parent: PathBuf,
-    base: String,
 }
 
 #[derive(Clone)]
@@ -27,15 +26,37 @@ struct GitWorktree {
     branch: String,
 }
 
+/// The directory that holds agent worktrees, grouped by repository:
+/// `$CLI_TOOLBOX_WORKTREES_DIR`, or `~/.agent-sandbox/worktrees`.
+pub fn worktrees_root() -> Result<PathBuf, Error> {
+    resolve_worktrees_root(std::env::var_os(WORKTREES_DIR_ENV), dirs::home_dir())
+}
+
+fn resolve_worktrees_root(dir: Option<OsString>, home: Option<PathBuf>) -> Result<PathBuf, Error> {
+    if let Some(dir) = dir.filter(|dir| !dir.is_empty()) {
+        return std::path::absolute(&dir)
+            .map_err(|err| Error::msg(format!("resolve {WORKTREES_DIR_ENV}: {err}")));
+    }
+    let home =
+        home.ok_or_else(|| Error::msg("resolve home directory: home directory not found"))?;
+    Ok(home.join(".agent-sandbox").join("worktrees"))
+}
+
+/// Create the next agent worktree of the repository at `cwd` as
+/// `<root>/<repo>/<repo>-agent-wt[-N]`, on a branch of the same name.
 pub(crate) fn create_agent_worktree_record(
     cwd: &Path,
+    root: &Path,
     stderr: &mut dyn Write,
 ) -> Result<AgentWorktree, Error> {
     require_git()?;
-    let layout = resolve_cwd(cwd)?;
-    let used = used_agent_worktree_names(cwd, &layout)?;
-    let name = next_agent_worktree_name(&layout.base, &used);
-    let path = layout.parent.join(&name);
+    let base = repo_name(cwd)?;
+    let dir = root.join(&base);
+    let used = used_agent_worktree_names(cwd, &base, &dir)?;
+    let name = next_agent_worktree_name(&base, &used);
+    let path = dir.join(&name);
+    fs::create_dir_all(&dir)
+        .map_err(|err| Error::msg(format!("create {}: {err}", dir.display())))?;
     run_git(
         cwd,
         stderr,
@@ -93,13 +114,13 @@ pub(crate) fn select_agent_worktrees(
 
 pub fn agent_worktrees(cwd: &Path) -> Result<Vec<AgentWorktree>, Error> {
     require_git()?;
-    let layout = resolve_cwd(cwd)?;
+    let base = repo_name(cwd)?;
     let listed = list_git_worktrees(cwd)?;
     let mut worktrees: Vec<AgentWorktree> = listed
         .into_iter()
         .filter_map(|worktree| {
             let name = worktree.path.file_name()?.to_string_lossy().into_owned();
-            if !is_agent_worktree_name(&layout.base, &name) {
+            if !is_agent_worktree_name(&base, &name) {
                 return None;
             }
             Some(AgentWorktree {
@@ -123,18 +144,15 @@ pub fn agent_worktrees(cwd: &Path) -> Result<Vec<AgentWorktree>, Error> {
 
 /// Agent worktrees are named after the main checkout, which git lists first,
 /// so commands behave the same from the repository and from its worktrees.
-fn resolve_cwd(cwd: &Path) -> Result<CwdLayout, Error> {
+fn repo_name(cwd: &Path) -> Result<String, Error> {
     let main = list_git_worktrees(cwd)?
         .into_iter()
         .next()
         .map(|worktree| worktree.path)
         .ok_or_else(|| Error::msg("git worktree list: no main worktree"))?;
-    let base = main
-        .file_name()
+    main.file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let parent = main.parent().unwrap_or(Path::new("/")).to_path_buf();
-    Ok(CwdLayout { parent, base })
+        .ok_or_else(|| Error::msg(format!("no repository name in {}", main.display())))
 }
 
 fn next_agent_worktree_name(base: &str, used: &HashSet<String>) -> String {
@@ -190,26 +208,31 @@ fn agent_worktree_index(name: &str) -> Option<usize> {
         .filter(|n| *n >= 1)
 }
 
-fn used_agent_worktree_names(cwd: &Path, layout: &CwdLayout) -> Result<HashSet<String>, Error> {
+/// Names taken by this repository's worktrees and branches, and by entries of
+/// `dir`, which another repository with the same name may share.
+fn used_agent_worktree_names(cwd: &Path, base: &str, dir: &Path) -> Result<HashSet<String>, Error> {
     let mut used = HashSet::new();
-    let entries = fs::read_dir(&layout.parent)
-        .map_err(|err| Error::msg(format!("read {}: {err}", layout.parent.display())))?;
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_agent_worktree_name(&layout.base, &name) {
-            used.insert(name);
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let name = entry?.file_name().to_string_lossy().into_owned();
+                if is_agent_worktree_name(base, &name) {
+                    used.insert(name);
+                }
+            }
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(Error::msg(format!("read {}: {err}", dir.display()))),
     }
 
     for worktree in list_git_worktrees(cwd)? {
         if let Some(name) = worktree.path.file_name() {
             let name = name.to_string_lossy().into_owned();
-            if is_agent_worktree_name(&layout.base, &name) {
+            if is_agent_worktree_name(base, &name) {
                 used.insert(name);
             }
         }
-        if !worktree.branch.is_empty() && is_agent_worktree_name(&layout.base, &worktree.branch) {
+        if !worktree.branch.is_empty() && is_agent_worktree_name(base, &worktree.branch) {
             used.insert(worktree.branch);
         }
     }
@@ -220,7 +243,7 @@ fn used_agent_worktree_names(cwd: &Path, layout: &CwdLayout) -> Result<HashSet<S
     )?;
     for branch in branches.lines() {
         let branch = branch.trim();
-        if is_agent_worktree_name(&layout.base, branch) {
+        if is_agent_worktree_name(base, branch) {
             used.insert(branch.to_string());
         }
     }
@@ -347,7 +370,7 @@ pub(crate) mod tests {
     use super::{
         agent_worktrees, create_agent_worktree_record, is_agent_worktree_name,
         list_agent_worktrees, next_agent_worktree_name, remove_agent_worktree,
-        select_agent_worktrees,
+        resolve_worktrees_root, select_agent_worktrees,
     };
     use crate::exec;
     use std::collections::HashSet;
@@ -355,6 +378,23 @@ pub(crate) mod tests {
     use std::io;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    #[test]
+    fn worktrees_root_defaults_under_home_and_honors_override() {
+        let home = Some(PathBuf::from("/home/me"));
+        assert_eq!(
+            resolve_worktrees_root(None, home.clone()).unwrap(),
+            Path::new("/home/me/.agent-sandbox/worktrees")
+        );
+        assert_eq!(
+            resolve_worktrees_root(Some("".into()), home.clone()).unwrap(),
+            Path::new("/home/me/.agent-sandbox/worktrees")
+        );
+        assert_eq!(
+            resolve_worktrees_root(Some("/srv/wt".into()), home).unwrap(),
+            Path::new("/srv/wt")
+        );
+    }
 
     #[test]
     fn next_agent_worktree_name_fills_gaps() {
@@ -397,24 +437,25 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn create_agent_worktree_creates_sibling_worktree_and_branch() {
+    fn create_agent_worktree_creates_worktree_and_branch_under_root() {
         if skip_without_git() {
             return;
         }
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut stdout, &mut stderr).unwrap_or_else(|err| {
+        create_agent_worktree(&repo, &wt_root, &mut stdout, &mut stderr).unwrap_or_else(|err| {
             panic!(
                 "create: {err}\nstderr: {}",
                 String::from_utf8_lossy(&stderr)
             );
         });
 
-        let want_path = root.path().join("demo-agent-wt");
+        let want_path = wt_root.join("demo").join("demo-agent-wt");
         assert_same_path(String::from_utf8(stdout).unwrap().trim(), &want_path);
         assert!(want_path.exists());
         assert_eq!(
@@ -432,14 +473,15 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        let worktree = create_agent_worktree_record(&repo, &mut stderr).unwrap();
+        let worktree = create_agent_worktree_record(&repo, &wt_root, &mut stderr).unwrap();
 
         assert_eq!(worktree.name, "demo-agent-wt");
         assert_same_path(
             worktree.path.to_string_lossy(),
-            &root.path().join("demo-agent-wt"),
+            &wt_root.join("demo").join("demo-agent-wt"),
         );
         assert_eq!(worktree.branch, "demo-agent-wt");
         assert!(worktree.path.exists());
@@ -453,13 +495,14 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
         let mut stdout = Vec::new();
-        create_agent_worktree(&repo, &mut stdout, &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut stdout, &mut stderr).unwrap();
 
-        let want_path = root.path().join("demo-agent-wt-2");
+        let want_path = wt_root.join("demo").join("demo-agent-wt-2");
         assert_same_path(String::from_utf8(stdout).unwrap().trim(), &want_path);
         assert_eq!(
             must_git_output(&want_path, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -475,10 +518,11 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        let first = create_agent_worktree_record(&repo, &mut stderr).unwrap();
-        let second = create_agent_worktree_record(&first.path, &mut stderr).unwrap();
+        let first = create_agent_worktree_record(&repo, &wt_root, &mut stderr).unwrap();
+        let second = create_agent_worktree_record(&first.path, &wt_root, &mut stderr).unwrap();
 
         assert_eq!(second.name, "demo-agent-wt-2");
         let names: Vec<_> = agent_worktrees(&first.path)
@@ -490,6 +534,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn same_named_repos_share_a_group_without_clashing() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let one = root.path().join("one").join("demo");
+        let two = root.path().join("two").join("demo");
+        init_git_repo(&one);
+        init_git_repo(&two);
+        let wt_root = root.path().join("worktrees");
+
+        let mut stderr = Vec::new();
+        create_agent_worktree_record(&one, &wt_root, &mut stderr).unwrap();
+        let other = create_agent_worktree_record(&two, &wt_root, &mut stderr).unwrap();
+
+        assert_eq!(other.name, "demo-agent-wt-2");
+        assert_eq!(agent_worktrees(&one).unwrap()[0].name, "demo-agent-wt");
+        assert_eq!(agent_worktrees(&two).unwrap()[0].name, "demo-agent-wt-2");
+    }
+
+    #[test]
     fn list_agent_worktrees_prints_sorted_paths() {
         if skip_without_git() {
             return;
@@ -497,10 +562,11 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
 
         let worktrees = agent_worktrees(&repo).unwrap();
         let names: Vec<_> = worktrees.iter().map(|wt| wt.name.as_str()).collect();
@@ -517,8 +583,8 @@ pub(crate) mod tests {
             .map(str::to_string)
             .collect();
         let want = [
-            root.path().join("demo-agent-wt"),
-            root.path().join("demo-agent-wt-2"),
+            wt_root.join("demo").join("demo-agent-wt"),
+            wt_root.join("demo").join("demo-agent-wt-2"),
         ];
         assert_eq!(got.len(), want.len());
         for (got, want) in got.iter().zip(want.iter()) {
@@ -534,15 +600,16 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
 
         let mut stdout = Vec::new();
         cleanup_agent_worktree(&repo, "demo-agent-wt", false, &mut stdout, &mut stderr).unwrap();
 
-        let want_path = root.path().join("demo-agent-wt");
+        let want_path = wt_root.join("demo").join("demo-agent-wt");
         assert_same_path(String::from_utf8(stdout).unwrap().trim(), &want_path);
         assert!(!want_path.exists());
 
@@ -567,10 +634,11 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
-        let worktree_path = root.path().join("demo-agent-wt");
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
+        let worktree_path = wt_root.join("demo").join("demo-agent-wt");
         fs::write(worktree_path.join("README.md"), "uncommitted change\n").unwrap();
 
         let mut cleanup_stderr = Vec::new();
@@ -596,11 +664,12 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
-        let worktree_path = root.path().join("demo-agent-wt");
-        let held_path = root.path().join("demo-agent-wt-held");
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
+        let worktree_path = wt_root.join("demo").join("demo-agent-wt");
+        let held_path = wt_root.join("demo").join("demo-agent-wt-held");
         must_run_git(
             &repo,
             &[
@@ -650,9 +719,10 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
         cleanup_agent_worktree(&repo, "", false, &mut io::sink(), &mut stderr).unwrap();
         assert!(agent_worktrees(&repo).unwrap().is_empty());
     }
@@ -665,10 +735,11 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stderr = Vec::new();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
-        create_agent_worktree(&repo, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
         cleanup_agent_worktree(&repo, "", true, &mut io::sink(), &mut stderr).unwrap();
         assert!(agent_worktrees(&repo).unwrap().is_empty());
     }
@@ -677,10 +748,11 @@ pub(crate) mod tests {
     /// without the init and Herdr steps.
     fn create_agent_worktree(
         cwd: &Path,
+        root: &Path,
         stdout: &mut dyn io::Write,
         stderr: &mut dyn io::Write,
     ) -> Result<(), crate::Error> {
-        let worktree = create_agent_worktree_record(cwd, stderr)?;
+        let worktree = create_agent_worktree_record(cwd, root, stderr)?;
         writeln!(stdout, "{}", worktree.path.display())?;
         Ok(())
     }
