@@ -145,11 +145,7 @@ pub fn agent_worktrees(cwd: &Path) -> Result<Vec<AgentWorktree>, Error> {
 /// Agent worktrees are named after the main checkout, which git lists first,
 /// so commands behave the same from the repository and from its worktrees.
 fn repo_name(cwd: &Path) -> Result<String, Error> {
-    let main = list_git_worktrees(cwd)?
-        .into_iter()
-        .next()
-        .map(|worktree| worktree.path)
-        .ok_or_else(|| Error::msg("git worktree list: no main worktree"))?;
+    let main = main_checkout(cwd)?;
     main.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .ok_or_else(|| Error::msg(format!("no repository name in {}", main.display())))
@@ -324,24 +320,35 @@ fn worktree_matches(worktree: &AgentWorktree, query: &str) -> bool {
     fs::canonicalize(&abs).is_ok_and(|resolved| resolved == worktree.path)
 }
 
+/// How [`remove_agent_worktree`] treats the branch and local changes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RemoveOptions {
+    /// Keep the worktree's branch, for example for review after the removal.
+    pub(crate) keep_branch: bool,
+    /// Remove the worktree even with uncommitted or untracked files.
+    pub(crate) force: bool,
+}
+
 pub(crate) fn remove_agent_worktree(
     cwd: &Path,
     worktree: &AgentWorktree,
+    options: RemoveOptions,
     stderr: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_git(
-        cwd,
-        stderr,
-        &["worktree", "remove", &worktree.path.to_string_lossy()],
-    )
-    .map_err(|err| {
+    let path = worktree.path.to_string_lossy();
+    let mut args = vec!["worktree", "remove"];
+    if options.force {
+        args.push("--force");
+    }
+    args.push(&path);
+    run_git(cwd, stderr, &args).map_err(|err| {
         Error::msg(format!(
             "remove git worktree \"{}\": {err}",
             worktree.path.display()
         ))
     })?;
     remove_empty_group_dir(worktree);
-    if worktree.branch.is_empty() {
+    if options.keep_branch || worktree.branch.is_empty() {
         return Ok(());
     }
     run_git(cwd, stderr, &["branch", "-D", "--", &worktree.branch]).map_err(|err| {
@@ -371,6 +378,49 @@ fn remove_empty_group_dir(worktree: &AgentWorktree) {
     }
 }
 
+/// The main checkout of the repository at `cwd`, which git lists first.
+pub(crate) fn main_checkout(cwd: &Path) -> Result<PathBuf, Error> {
+    list_git_worktrees(cwd)?
+        .into_iter()
+        .next()
+        .map(|worktree| worktree.path)
+        .ok_or_else(|| Error::msg("git worktree list: no main worktree"))
+}
+
+/// Whether git ignores `path` (relative to `dir`).
+pub(crate) fn is_ignored(dir: &Path, path: &str) -> bool {
+    exec::combined_output("git", &["check-ignore", "-q", path], Some(dir)).is_ok()
+}
+
+/// The commit `rev` names in `dir`, if any.
+pub(crate) fn resolve_commit(dir: &Path, rev: &str) -> Option<String> {
+    let spec = format!("{rev}^{{commit}}");
+    git_output(dir, &["rev-parse", "-q", "--verify", &spec]).ok()
+}
+
+/// Whether `ancestor` is `descendant` or one of its ancestors.
+pub(crate) fn is_ancestor(dir: &Path, ancestor: &str, descendant: &str) -> bool {
+    exec::combined_output(
+        "git",
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+        Some(dir),
+    )
+    .is_ok()
+}
+
+/// `git status --porcelain` lines: uncommitted and untracked files.
+pub(crate) fn status_lines(dir: &Path) -> Result<Vec<String>, Error> {
+    Ok(git_output(dir, &["status", "--porcelain"])?
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+/// One line per commit in `range`, newest first.
+pub(crate) fn log_oneline(dir: &Path, range: &str) -> Result<String, Error> {
+    git_output(dir, &["log", "--oneline", range])
+}
+
 fn require_git() -> Result<(), Error> {
     exec::require("git").map(|_| ())
 }
@@ -387,7 +437,7 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, Error> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        agent_worktrees, create_agent_worktree_record, is_agent_worktree_name,
+        RemoveOptions, agent_worktrees, create_agent_worktree_record, is_agent_worktree_name,
         list_agent_worktrees, next_agent_worktree_name, remove_agent_worktree,
         resolve_worktrees_root, select_agent_worktrees,
     };
@@ -748,6 +798,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn remove_can_keep_the_branch_for_review() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("demo");
+        init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
+        create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut io::sink()).unwrap();
+        let worktree = &agent_worktrees(&repo).unwrap()[0];
+        fs::write(worktree.path.join("scratch"), "untracked\n").unwrap();
+
+        let options = RemoveOptions {
+            keep_branch: true,
+            force: true,
+        };
+        remove_agent_worktree(&repo, worktree, options, &mut io::sink()).unwrap();
+
+        assert!(!worktree.path.exists());
+        let branches = must_git_output(
+            &repo,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        );
+        assert!(branches.lines().any(|branch| branch == "demo-agent-wt"));
+    }
+
+    #[test]
     fn cleanup_all_agent_worktrees() {
         if skip_without_git() {
             return;
@@ -788,7 +865,7 @@ pub(crate) mod tests {
         stderr: &mut dyn io::Write,
     ) -> Result<(), crate::Error> {
         for worktree in select_agent_worktrees(cwd, name, all)? {
-            remove_agent_worktree(cwd, &worktree, stderr)?;
+            remove_agent_worktree(cwd, &worktree, RemoveOptions::default(), stderr)?;
             writeln!(stdout, "{}", worktree.path.display())?;
         }
         Ok(())

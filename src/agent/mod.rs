@@ -108,7 +108,7 @@ pub(crate) fn remove_worktree(
     let lookup = options
         .herdr
         .then(|| herdr::available().then(|| herdr::worktree_workspace(cwd, &worktree.path)));
-    git::remove_agent_worktree(cwd, worktree, stderr)?;
+    git::remove_agent_worktree(cwd, worktree, git::RemoveOptions::default(), stderr)?;
     let Some(lookup) = lookup else {
         return Ok(Vec::new());
     };
