@@ -94,9 +94,20 @@ AI agent helpers.
 
 #### `agent worktree`
 
-Manage sibling git worktrees for AI agents. Running the command without a subcommand prints help.
+Manage git worktrees for AI agents. Running the command without a subcommand prints help.
 
-Worktrees are created next to the current directory as `<cwd>-agent-wt`, `<cwd>-agent-wt-2`, and so on.
+Worktrees live in one place, grouped by repository, so they are easy to find and
+to run in [agent-sandbox](https://github.com/vvartiainen/agent-sandbox-setup):
+
+```text
+~/.agent-sandbox/worktrees/<repo>/<repo>-agent-wt
+~/.agent-sandbox/worktrees/<repo>/<repo>-agent-wt-2
+```
+
+`<repo>` is the name of the main checkout, so the commands work the same from the
+repository and from any of its worktrees. Set `CLI_TOOLBOX_WORKTREES_DIR` to use
+another directory. Worktrees made by older versions next to the repository are
+still listed and cleaned up.
 
 The previous `git agent-worktree …` commands still work as a hidden alias.
 
@@ -108,7 +119,7 @@ Create a new worktree and branch, set it up, then print the worktree path.
 cd "$(cli-toolbox agent worktree create)"
 ```
 
-If the current directory is `/path/to/cli-toolbox`, the first call creates `/path/to/cli-toolbox-agent-wt` on branch `cli-toolbox-agent-wt`. Later calls allocate the next free numbered name.
+In `/path/to/cli-toolbox`, the first call creates `~/.agent-sandbox/worktrees/cli-toolbox/cli-toolbox-agent-wt` on branch `cli-toolbox-agent-wt`. Later calls allocate the next free numbered name.
 
 The new worktree is then made ready to work in:
 
@@ -142,7 +153,7 @@ cli-toolbox agent worktree list
 
 ##### `agent worktree cleanup`
 
-Remove an agent worktree and its branch. Pass a worktree name or path to remove one of several, omit the name when only one exists, or use `--all` to remove every agent worktree for this directory.
+Remove an agent worktree and its branch. Pass a worktree name or path to remove one of several, omit the name when only one exists, or use `--all` to remove every agent worktree for this directory. The repository's directory under the worktrees root is removed once it is empty.
 
 If a Herdr workspace has the worktree open, it is closed once the removal succeeds. Git refuses to remove a worktree with uncommitted changes, and the workspace then stays open. Use `--no-herdr` to leave Herdr alone.
 
