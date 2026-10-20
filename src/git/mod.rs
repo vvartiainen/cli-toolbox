@@ -340,6 +340,7 @@ pub(crate) fn remove_agent_worktree(
             worktree.path.display()
         ))
     })?;
+    remove_empty_group_dir(worktree);
     if worktree.branch.is_empty() {
         return Ok(());
     }
@@ -350,6 +351,24 @@ pub(crate) fn remove_agent_worktree(
             worktree.branch
         ))
     })
+}
+
+/// Drop `<root>/<repo>` once its last worktree is gone. Worktrees outside a
+/// group directory, like older sibling ones, leave their parent alone.
+fn remove_empty_group_dir(worktree: &AgentWorktree) {
+    let Some(parent) = worktree.path.parent() else {
+        return;
+    };
+    let in_group = parent.file_name().is_some_and(|group| {
+        worktree.name.starts_with(&format!(
+            "{}{AGENT_WORKTREE_SUFFIX}",
+            group.to_string_lossy()
+        ))
+    });
+    if in_group {
+        // Fails while the directory still has entries, which is fine.
+        let _ = fs::remove_dir(parent);
+    }
 }
 
 fn require_git() -> Result<(), Error> {
@@ -615,6 +634,7 @@ pub(crate) mod tests {
 
         let remaining = agent_worktrees(&repo).unwrap();
         assert_eq!(remaining.len(), 1);
+        assert!(wt_root.join("demo").exists());
         assert_eq!(remaining[0].name, "demo-agent-wt-2");
 
         let branches = must_git_output(
@@ -742,6 +762,7 @@ pub(crate) mod tests {
         create_agent_worktree(&repo, &wt_root, &mut io::sink(), &mut stderr).unwrap();
         cleanup_agent_worktree(&repo, "", true, &mut io::sink(), &mut stderr).unwrap();
         assert!(agent_worktrees(&repo).unwrap().is_empty());
+        assert!(!wt_root.join("demo").exists());
     }
 
     /// Create a worktree and print its path, like `agent worktree create`
