@@ -7,6 +7,7 @@ mod git;
 mod herdr;
 mod kitty;
 mod project;
+mod sandbox;
 mod select;
 mod ssh;
 mod terminal;
