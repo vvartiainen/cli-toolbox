@@ -1,9 +1,11 @@
-# Run from the repository root so /workspace is this project:
+# Run from the repository root (or an agent worktree) so /workspace/app is
+# that checkout:
 #
 #   nix run ./sandbox
 #   nix run ./sandbox#ssh
 #
-# Or: just sandbox / just sandbox-ssh
+# Or: just sandbox / just sandbox-ssh. One VM per agent worktree, in the
+# background with herdr: cli-toolbox agent start / sync / done.
 #
 # Exit the vfkit console with Ctrl-a x. Guest home persists in:
 #
@@ -19,12 +21,39 @@
     agent-sandbox.lib.mkFlake {
       name = "cli-toolbox";
       modules = [
+        # Rust environment for this crate.
+        (
+          { pkgs, ... }:
+          {
+            environment.systemPackages = with pkgs; [
+              cargo
+              clippy
+              just
+              rust-analyzer
+              rustc
+              rustfmt
+            ];
+            environment.variables.CARGO_HOME = "/home/agent/.cargo";
+
+            # Keep Linux build output out of the host's target/.
+            agentSandbox.guestPaths = [ "app/target" ];
+
+            agentSandbox.init.steps.cargo-fetch = {
+              runtimeInputs = [ pkgs.cargo ];
+              inputs = [
+                "Cargo.toml"
+                "Cargo.lock"
+              ];
+              script = "cargo fetch";
+            };
+          }
+        )
         {
           agentSandbox = {
             vcpu = 4;
             memoryMB = 4096;
-            workspace = "."; # Shared with the guest at /workspace.
-            rust.enable = true;
+            # This checkout, at /workspace/app in the guest.
+            workspaces.app = ".";
 
             # nix run ./sandbox#ssh
             ssh = {
@@ -34,6 +63,9 @@
                 ""
               ];
             };
+
+            # cli-toolbox agent start adds the VM as a herdr machine.
+            herdr.enable = true;
 
             ai = {
               codex.enable = true;
@@ -49,12 +81,6 @@
             };
           };
         }
-        (
-          { pkgs, ... }:
-          {
-            environment.systemPackages = [ pkgs.just ];
-          }
-        )
       ];
     };
 }
