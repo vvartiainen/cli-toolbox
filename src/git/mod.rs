@@ -121,19 +121,19 @@ pub fn agent_worktrees(cwd: &Path) -> Result<Vec<AgentWorktree>, Error> {
     Ok(worktrees)
 }
 
+/// Agent worktrees are named after the main checkout, which git lists first,
+/// so commands behave the same from the repository and from its worktrees.
 fn resolve_cwd(cwd: &Path) -> Result<CwdLayout, Error> {
-    let mut abs = cwd
-        .canonicalize()
-        .or_else(|_| std::path::absolute(cwd))
-        .map_err(|err| Error::msg(format!("resolve working directory: {err}")))?;
-    if let Ok(resolved) = fs::canonicalize(&abs) {
-        abs = resolved;
-    }
-    let base = abs
+    let main = list_git_worktrees(cwd)?
+        .into_iter()
+        .next()
+        .map(|worktree| worktree.path)
+        .ok_or_else(|| Error::msg("git worktree list: no main worktree"))?;
+    let base = main
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let parent = abs.parent().unwrap_or(Path::new("/")).to_path_buf();
+    let parent = main.parent().unwrap_or(Path::new("/")).to_path_buf();
     Ok(CwdLayout { parent, base })
 }
 
@@ -465,6 +465,28 @@ pub(crate) mod tests {
             must_git_output(&want_path, &["rev-parse", "--abbrev-ref", "HEAD"]),
             "demo-agent-wt-2"
         );
+    }
+
+    #[test]
+    fn create_agent_worktree_from_a_worktree_names_after_main_checkout() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("demo");
+        init_git_repo(&repo);
+
+        let mut stderr = Vec::new();
+        let first = create_agent_worktree_record(&repo, &mut stderr).unwrap();
+        let second = create_agent_worktree_record(&first.path, &mut stderr).unwrap();
+
+        assert_eq!(second.name, "demo-agent-wt-2");
+        let names: Vec<_> = agent_worktrees(&first.path)
+            .unwrap()
+            .into_iter()
+            .map(|wt| wt.name)
+            .collect();
+        assert_eq!(names, ["demo-agent-wt", "demo-agent-wt-2"]);
     }
 
     #[test]
