@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::agent::vm::{self, VmOptions};
 use crate::{Error, agent, aws, git, kitty, ssh};
 
 use super::app::{Action, Resource, ToolId};
@@ -147,6 +148,63 @@ impl Context {
                     incomplete: created.steps.iter().any(agent::Step::failed),
                 })
             }
+            Action::StartAgent => {
+                let created = vm::start_worktree(
+                    self.working_dir()?,
+                    &git::worktrees_root()?,
+                    &vm_options(),
+                    &mut std::io::stderr(),
+                )?;
+                let path = &created.worktree.path;
+                Ok(Done {
+                    body: format!(
+                        "Sandboxed agent worktree: {}\nBranch: {}\n\n{}\n\n{}",
+                        path.display(),
+                        created.worktree.branch,
+                        steps_text(&created.steps),
+                        directory_instructions(path)
+                    ),
+                    shell: cd_command(path),
+                    incomplete: created.steps.iter().any(agent::Step::failed),
+                })
+            }
+            Action::SyncAgent(worktree) => {
+                vm::sync(
+                    self.working_dir()?,
+                    &worktree.name,
+                    &vm_options(),
+                    stdout,
+                    stderr,
+                )?;
+                Ok(Done::body(format!("Synced {}", worktree.branch)))
+            }
+            Action::UpAgent(worktree) => {
+                let steps = vm::up(
+                    self.working_dir()?,
+                    &worktree.name,
+                    &vm_options(),
+                    &mut std::io::stderr(),
+                )?;
+                Ok(steps_done(format!("VM of {}", worktree.name), &steps))
+            }
+            Action::StopAgent(worktree) => {
+                let steps = vm::stop(self.working_dir()?, &worktree.name, &vm_options())?;
+                Ok(steps_done(format!("VM of {}", worktree.name), &steps))
+            }
+            Action::DoneAgent(worktree) => {
+                vm::done(
+                    self.working_dir()?,
+                    &worktree.name,
+                    &vm_options(),
+                    stdout,
+                    stderr,
+                )?;
+                Ok(Done::body(format!(
+                    "Removed {}; branch {} kept for review",
+                    worktree.path.display(),
+                    worktree.branch
+                )))
+            }
             Action::EnterWorktree(worktree) => Ok(Done {
                 body: format!(
                     "Worktree: {}\n\n{}",
@@ -205,6 +263,25 @@ fn load_home(tool: ToolId, home: &Path) -> Result<Vec<Resource>, Error> {
         _ => Err(Error::msg(
             "this tool does not load resources from the home directory",
         )),
+    }
+}
+
+/// VM options for the launcher: herdr on, the agent from `CLI_TOOLBOX_AGENT`.
+fn vm_options() -> VmOptions {
+    VmOptions {
+        agent: std::env::var("CLI_TOOLBOX_AGENT")
+            .ok()
+            .filter(|kind| !kind.is_empty()),
+        herdr: true,
+        ..VmOptions::default()
+    }
+}
+
+fn steps_done(title: String, steps: &[agent::Step]) -> Done {
+    Done {
+        body: format!("{title}\n\n{}", steps_text(steps)),
+        shell: None,
+        incomplete: steps.iter().any(agent::Step::failed),
     }
 }
 

@@ -102,7 +102,9 @@ impl ToolId {
             Self::AwsProfile => "SSO login when needed, then AWS_PROFILE export",
             Self::KittySession => "Switch to a .kitty-session file from your home directory",
             Self::SshConnect => "Connect to a configured host with Kitty's SSH kitten",
-            Self::AgentWorktrees => "Create, inspect, cd into or remove agent worktrees",
+            Self::AgentWorktrees => {
+                "Create, inspect, cd into or remove agent worktrees and their sandbox VMs"
+            }
         }
     }
 
@@ -164,6 +166,13 @@ pub(crate) enum Action {
     CreateWorktree,
     EnterWorktree(AgentWorktree),
     Cleanup(AgentWorktree),
+    /// A new worktree with its own sandbox VM and herdr agent.
+    StartAgent,
+    SyncAgent(AgentWorktree),
+    StopAgent(AgentWorktree),
+    UpAgent(AgentWorktree),
+    /// Sync, stop the VM and remove the worktree, keeping its branch.
+    DoneAgent(AgentWorktree),
 }
 
 impl Action {
@@ -171,9 +180,14 @@ impl Action {
     /// return to the home screen.
     pub(crate) fn return_tool(&self) -> Option<ToolId> {
         match self {
-            Self::CreateWorktree | Self::EnterWorktree(_) | Self::Cleanup(_) => {
-                Some(ToolId::AgentWorktrees)
-            }
+            Self::CreateWorktree
+            | Self::EnterWorktree(_)
+            | Self::Cleanup(_)
+            | Self::StartAgent
+            | Self::SyncAgent(_)
+            | Self::StopAgent(_)
+            | Self::UpAgent(_)
+            | Self::DoneAgent(_) => Some(ToolId::AgentWorktrees),
             Self::Aws(_) | Self::Kitty(_) | Self::Ssh(_) => None,
         }
     }
@@ -570,6 +584,10 @@ impl App {
                 self.loading = None;
                 Some(Effect::Execute(Action::CreateWorktree))
             }
+            KeyCode::Char('v') => {
+                self.loading = None;
+                Some(Effect::Execute(Action::StartAgent))
+            }
             KeyCode::Char('d') => {
                 let Some(worktree) = picker.selected_worktree() else {
                     return Some(Effect::None);
@@ -598,6 +616,18 @@ impl App {
             KeyCode::PageDown => details.scroll = details.scroll.saturating_add(10),
             KeyCode::Enter | KeyCode::Char('c') => {
                 return Effect::Execute(Action::EnterWorktree(details.worktree.clone()));
+            }
+            KeyCode::Char('s') => {
+                return Effect::Execute(Action::SyncAgent(details.worktree.clone()));
+            }
+            KeyCode::Char('u') => {
+                return Effect::Execute(Action::UpAgent(details.worktree.clone()));
+            }
+            KeyCode::Char('x') => {
+                return Effect::Execute(Action::StopAgent(details.worktree.clone()));
+            }
+            KeyCode::Char('D') => {
+                return Effect::Execute(Action::DoneAgent(details.worktree.clone()));
             }
             KeyCode::Char('d') => {
                 self.screen = Screen::ConfirmCleanup(ConfirmState {
@@ -941,6 +971,29 @@ mod tests {
     }
 
     #[test]
+    fn worktree_details_drive_the_sandbox_vm() {
+        let tree = worktree("repo-agent-wt");
+        let mut app = worktree_manager(std::slice::from_ref(&tree));
+        assert_eq!(
+            app.handle_key(ctrl('v')),
+            Effect::Execute(Action::StartAgent)
+        );
+        let mut app = worktree_manager(std::slice::from_ref(&tree));
+        app.handle_key(key(KeyCode::Enter));
+        for (ch, action) in [
+            ('s', Action::SyncAgent(tree.clone())),
+            ('u', Action::UpAgent(tree.clone())),
+            ('x', Action::StopAgent(tree.clone())),
+            ('D', Action::DoneAgent(tree.clone())),
+        ] {
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT)),
+                Effect::Execute(action)
+            );
+        }
+    }
+
+    #[test]
     fn manager_shortcuts_create_and_remove_with_cancel() {
         let tree = worktree("repo-agent-wt");
         let mut app = worktree_manager(std::slice::from_ref(&tree));
@@ -979,6 +1032,9 @@ mod tests {
             Action::CreateWorktree,
             Action::EnterWorktree(worktree("a")),
             Action::Cleanup(worktree("a")),
+            Action::StartAgent,
+            Action::SyncAgent(worktree("a")),
+            Action::DoneAgent(worktree("a")),
         ] {
             app.finished(&action, "Done".into(), "done".into(), false);
             assert_eq!(

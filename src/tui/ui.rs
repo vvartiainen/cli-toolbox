@@ -111,9 +111,9 @@ fn home_help() -> String {
 
 fn details_help(app: &App) -> &'static str {
     if app.print_shell {
-        "⏎ cd & exit · d remove · ? help · esc back"
+        "⏎ cd & exit · s sync · D done · d remove · ? help · esc back"
     } else {
-        "⏎ cd here · d remove · ? help · esc back"
+        "⏎ cd here · s sync · D done · d remove · ? help · esc back"
     }
 }
 
@@ -154,6 +154,7 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entries.extend([
                     entry("⏎", "worktree details"),
                     entry("^A", "new worktree (init + Herdr)"),
+                    entry("^V", "new sandboxed agent (VM + herdr machine)"),
                     entry("^D", "remove worktree"),
                 ]);
             } else {
@@ -171,6 +172,9 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 },
             ),
             entry("d", "remove worktree"),
+            entry("s", "sync the agent's commits to the branch"),
+            entry("u x", "boot / stop the sandbox VM"),
+            entry("D", "done: sync, stop the VM, remove; keep the branch"),
             entry("↑↓ PgUp PgDn", "scroll"),
             entry("esc", "back to the list"),
         ],
