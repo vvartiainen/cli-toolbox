@@ -47,6 +47,106 @@ pub(crate) fn close_workspace(id: &str) -> Result<(), Error> {
     exec::combined_output("herdr", &["workspace", "close", id], None).map(drop)
 }
 
+/// Remove the saved SSH machine labelled `label`. Returns false when there
+/// is none. Its remote session keeps running until the VM stops.
+pub(crate) fn remove_machine(label: &str) -> Result<bool, Error> {
+    let json = exec::combined_output("herdr", &["machine", "list", "--json"], None)?;
+    let Some(id) = machine_id(&json, label)? else {
+        return Ok(false);
+    };
+    exec::combined_output("herdr", &["machine", "remove", &id], None).map(|_| true)
+}
+
+#[derive(Deserialize)]
+struct Machine {
+    #[serde(alias = "profile_id")]
+    id: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+fn machine_id(json: &str, label: &str) -> Result<Option<String>, Error> {
+    let machines: Vec<Machine> = serde_json::from_str(json)
+        .map_err(|err| Error::msg(format!("parse herdr machine list: {err}")))?;
+    Ok(machines
+        .into_iter()
+        .find(|machine| machine.label.as_deref() == Some(label))
+        .map(|machine| machine.id))
+}
+
+/// Open a workspace in `cwd` on the saved machine `machine`, labelled
+/// `label`. With `agent`, start that agent kind in its first pane. Returns
+/// the workspace id.
+pub(crate) fn open_machine_workspace(
+    machine: &str,
+    cwd: &str,
+    label: &str,
+    agent: Option<&str>,
+) -> Result<String, Error> {
+    let json = exec::combined_output(
+        "herdr",
+        &[
+            "--machine",
+            machine,
+            "workspace",
+            "create",
+            "--cwd",
+            cwd,
+            "--label",
+            label,
+            "--no-focus",
+        ],
+        None,
+    )?;
+    let created = workspace_created(&json)?;
+    if let Some(kind) = agent {
+        // Agent names must be unique per server; one VM runs one task.
+        exec::combined_output(
+            "herdr",
+            &[
+                "--machine",
+                machine,
+                "agent",
+                "start",
+                kind,
+                "--kind",
+                kind,
+                "--pane",
+                &created.root_pane.pane_id,
+            ],
+            None,
+        )?;
+    }
+    Ok(created.workspace.workspace_id)
+}
+
+#[derive(Deserialize)]
+struct CreateResponse {
+    result: Created,
+}
+
+#[derive(Deserialize)]
+struct Created {
+    workspace: CreatedWorkspace,
+    root_pane: CreatedPane,
+}
+
+#[derive(Deserialize)]
+struct CreatedWorkspace {
+    workspace_id: String,
+}
+
+#[derive(Deserialize)]
+struct CreatedPane {
+    pane_id: String,
+}
+
+fn workspace_created(json: &str) -> Result<Created, Error> {
+    serde_json::from_str::<CreateResponse>(json)
+        .map(|response| response.result)
+        .map_err(|err| Error::msg(format!("parse herdr workspace create: {err}\n{json}")))
+}
+
 #[derive(Deserialize)]
 struct ListResponse {
     result: ListResult,
@@ -104,6 +204,26 @@ mod tests {
             workspace_for(LIST, Path::new("/repo-agent-wt")).unwrap(),
             Some("wK".into())
         );
+    }
+
+    #[test]
+    fn finds_a_machine_by_label() {
+        let json =
+            r#"[{"id":"m1","label":"demo-agent-wt"},{"id":"m2","label":"other"},{"id":"m3"}]"#;
+        assert_eq!(machine_id(json, "other").unwrap(), Some("m2".into()));
+        assert_eq!(machine_id(json, "missing").unwrap(), None);
+        assert_eq!(machine_id("[]", "other").unwrap(), None);
+    }
+
+    #[test]
+    fn reads_the_created_workspace_and_root_pane() {
+        let json = r#"{"id":"cli:workspace:create","result":{"type":"workspace_created",
+            "workspace":{"workspace_id":"w2","number":2,"label":"demo"},
+            "tab":{"tab_id":"w2:t1"},
+            "root_pane":{"pane_id":"w2:p1","workspace_id":"w2"}}}"#;
+        let created = workspace_created(json).unwrap();
+        assert_eq!(created.workspace.workspace_id, "w2");
+        assert_eq!(created.root_pane.pane_id, "w2:p1");
     }
 
     #[test]
