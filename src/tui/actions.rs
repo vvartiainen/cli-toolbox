@@ -108,7 +108,7 @@ impl Context {
                 let export = aws::export_profile(profile, stderr)?;
                 Ok(Done {
                     body: format!(
-                        "Profile ready: {}\n\nRun this in your shell after exiting (bash/zsh):\n{export}\n\nTo apply it automatically, start the launcher with `tui --print-shell` (see README).\n\nThe launcher's parent shell has not been changed.",
+                        "Profile ready: {}\n\nRun this in your shell after exiting (bash/zsh):\n{export}\n\nTo apply it automatically, start the launcher with `tui --print-shell` (see docs/tui.md).\n\nThe launcher's parent shell has not been changed.",
                         profile.name
                     ),
                     shell: Some(export),

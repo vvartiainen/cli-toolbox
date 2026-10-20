@@ -33,8 +33,8 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 - `src/select.rs`: shared interactive picker (`fzf` when available, ratatui otherwise)
 - `src/exec.rs`: PATH lookup and process helpers
 - Tests live next to the module they cover
-- `README.md`: end-user usage and development commands
-- `NIX-INSTRUCTIONS.md`: consuming the package from Nix flakes / `nix-darwin`
+- `README.md`: overview, command list and development commands
+- `docs/`: detailed user docs (`tui.md`, `agents.md`, `nix.md`) and `todo.md`
 - `justfile`: common local development commands
 - `flake.nix`: Nix packaging for the CLI
 

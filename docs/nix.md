@@ -1,6 +1,4 @@
-# NIX-INSTRUCTIONS
-
-## Consuming `cli-toolbox` from a `nix-darwin` repo
+# Consuming `cli-toolbox` from a `nix-darwin` repo
 
 This repository exposes a flake package at:
 
@@ -8,13 +6,13 @@ This repository exposes a flake package at:
 
 You can consume it from another flake, such as a `nix-darwin` + Home Manager config.
 
-### 1. Add it as a flake input
+## 1. Add it as a flake input
 
 ```nix
 inputs.cli-toolbox.url = "github:vvartiainen/cli-toolbox";
 ```
 
-### 2. Add the package to Home Manager
+## 2. Add the package to Home Manager
 
 In a Home Manager module:
 
@@ -30,17 +28,17 @@ In a Home Manager module:
 
 This makes the `cli-toolbox` binary available in your user profile. The package also installs bash, zsh, and fish completions.
 
-### 3. Rebuild your system
+## 3. Rebuild your system
 
 ```sh
 darwin-rebuild switch --flake .#YOUR_HOSTNAME
 ```
 
-### 4. About `Cargo.lock`
+## 4. About `Cargo.lock`
 
 The flake builds with `rustPlatform.buildRustPackage` and pins crate versions from `Cargo.lock`. Commit lockfile changes when you add, remove, or update Rust dependencies.
 
-### Runtime dependencies
+## Runtime dependencies
 
 This package only installs the `cli-toolbox` binary itself. Runtime tools used by some commands are expected to be installed separately in your environment, for example:
 
@@ -48,10 +46,11 @@ This package only installs the `cli-toolbox` binary itself. Runtime tools used b
 - `kitty`
 - `aws`
 - `git`
+- `herdr` and `nix` for agent worktrees and sandboxed agents
 
 That matches setups where those tools are already provided via Homebrew, Home Manager, or some other package source.
 
-### Optional local usage
+## Optional local usage
 
 You can also run the package directly from this repo:
 
