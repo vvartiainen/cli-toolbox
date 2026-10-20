@@ -5,6 +5,8 @@ use std::path::Path;
 use crate::git::{self, AgentWorktree};
 use crate::{Error, herdr, project};
 
+pub(crate) mod vm;
+
 /// Optional steps around creating and removing agent worktrees.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Options {
