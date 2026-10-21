@@ -10,3 +10,5 @@
 - Mass repo operation tool
 - Skills management
 - Sandboxed agents: verify end to end (see [agents.md](agents.md#known-gaps))
+- Sandboxed agents: reuse the guest's restored herdr workspaces on start (see
+  [plans/herdr-session-reconcile.md](plans/herdr-session-reconcile.md))
