@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 
-use crate::agent::vm::{self, HomeFrom, VmOptions};
-use crate::sandbox::init::{self, InitOptions, SshKey};
+use crate::agent::vm::{self, VmOptions};
+use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
 use crate::{Error, agent, git};
 
 /// The default agent kind for `--agent`.
 const AGENT_ENV: &str = "CLI_TOOLBOX_AGENT";
 
-const VM_HELP: &str = "Each sandboxed agent worktree runs its own agent-sandbox microVM from the project's sandbox flake (sandbox/flake.nix). The VM is added to herdr as a machine named after the worktree, and the agent runs in a herdr workspace inside the guest.\n\nWorkflow:\n\n  cli-toolbox agent sandbox init --ai   # once per project\n  cli-toolbox agent start --agent claude\n  cli-toolbox agent sync                # the agent's commits land on the worktree branch\n  cli-toolbox agent done                # stop the VM, remove the worktree, keep the branch";
+const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # the agents' commits land on the worktree branches\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
 
 #[derive(Debug, Args)]
 #[command(subcommand_required = true, subcommand_value_name = "command")]
@@ -21,69 +21,21 @@ pub struct AgentCmd {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommands {
-    /// Create an agent worktree, boot its sandbox VM and open the agent in herdr.
-    #[command(after_help = VM_HELP)]
-    Start {
-        #[command(flatten)]
-        vm: VmArgs,
-        #[command(flatten)]
-        boot: BootArgs,
-    },
-    /// Boot the VM of an existing agent worktree again.
-    Up {
-        /// Worktree name or path; may be omitted when there is only one.
-        name: Option<String>,
-        #[command(flatten)]
-        vm: VmArgs,
-        #[command(flatten)]
-        boot: BootArgs,
-    },
-    /// Stop the VM of an agent worktree, keeping the worktree.
-    Stop {
-        /// Worktree name or path; may be omitted when there is only one.
-        name: Option<String>,
-        #[command(flatten)]
-        vm: VmArgs,
-    },
-    /// Bring the agent's commits to the worktree branch on the host.
-    #[command(
-        after_help = "Fetches the guest's commits into sandbox/* and fast-forwards the worktree branch, which then exists in the main repository for review and merge. Files are already shared live; only git history moves."
-    )]
-    Sync {
-        /// Worktree name or path; may be omitted when there is only one.
-        name: Option<String>,
-        #[command(flatten)]
-        vm: VmArgs,
-    },
-    /// List agent worktrees and their VMs.
-    List,
-    /// Sync, stop the VM, remove the herdr machine and the worktree; keep the branch.
-    #[command(
-        after_help = "Refuses when guest commits could not be synced, when the VM is stopped but has a home image, or when the worktree has uncommitted changes. --force removes anyway."
-    )]
-    Done {
-        /// Worktree name or path; may be omitted when there is only one.
-        name: Option<String>,
-        /// Remove even if commits or changes would be lost.
-        #[arg(long)]
-        force: bool,
-        /// Keep the herdr machine.
-        #[arg(long)]
-        no_herdr: bool,
-        #[command(flatten)]
-        vm: VmArgs,
-    },
-    /// Set up the project's agent-sandbox flake.
-    #[command(subcommand_required = true, subcommand_value_name = "command")]
-    Sandbox {
-        #[command(subcommand)]
-        command: SandboxCommands,
-    },
-    /// Manage sibling git worktrees for AI agents.
+    /// Sandbox projects: one agent-sandbox VM per project, with its worktrees.
     #[command(
         subcommand_required = true,
         subcommand_value_name = "command",
-        after_help = "Worktrees are created next to the current directory as <cwd>-agent-wt, <cwd>-agent-wt-2, and so on."
+        after_help = PROJECT_HELP
+    )]
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
+    /// Manage git worktrees for AI agents.
+    #[command(
+        subcommand_required = true,
+        subcommand_value_name = "command",
+        after_help = "Worktrees are created in ~/.agent-sandbox/worktrees/<repo>/ as <repo>-agent-wt, <repo>-agent-wt-2, and so on."
     )]
     Worktree {
         #[command(subcommand)]
@@ -91,39 +43,21 @@ enum AgentCommands {
     },
 }
 
-#[derive(Debug, Args)]
-struct VmArgs {
-    /// Sandbox flake directory (default: sandbox/flake.nix in the worktree or main checkout).
-    #[arg(long, value_name = "DIR")]
-    flake: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-struct BootArgs {
-    /// Start from a copy of a home image ("main" for the main checkout's) instead of a fresh home.
-    #[arg(long, value_name = "main|PATH")]
-    home_from: Option<String>,
-    /// Agent kind herdr starts in the guest, e.g. claude or codex (default: $CLI_TOOLBOX_AGENT).
-    #[arg(long, value_name = "KIND")]
-    agent: Option<String>,
-    /// Do not add the VM to herdr.
-    #[arg(long)]
-    no_herdr: bool,
-}
-
 #[derive(Debug, Subcommand)]
-enum SandboxCommands {
-    /// Create sandbox/flake.nix from an agent-sandbox template.
+enum ProjectCommands {
+    /// List sandbox projects, their VMs and worktrees.
+    List,
+    /// Create a sandbox project for the current repository and its first worktree.
     #[command(
-        after_help = "Creates the flake from `nix flake init -t <agent-sandbox>#<template>`, points its agent-sandbox input at the same flake, names the VM after the project, authorizes your SSH public key, adds .agent-sandbox/ to .gitignore and marks the flake for git (Nix only sees tracked files).\n\nWith --ai, a coding agent then tailors the toolchain to the repository following agent-sandbox's SETUP-AGENT.md.\n\nThe agent-sandbox flake defaults to $CLI_TOOLBOX_AGENT_SANDBOX_FLAKE, then the upstream repository."
+        after_help = "Creates <sandbox dir>/projects/<name>/flake.nix from `nix flake init -t <agent-sandbox>#<template>`, points its agent-sandbox input at the same flake, keeps the guest home in <sandbox dir>/state/<name>, picks a free SSH port (2300-2399), authorizes your SSH public key and mounts the generated worktrees.nix. Then creates the repository's first agent worktree.\n\nWith --ai, a coding agent then tailors the toolchain to the repository following agent-sandbox's docs/setup-agent.md.\n\nThe agent-sandbox flake defaults to $CLI_TOOLBOX_AGENT_SANDBOX_FLAKE, then the upstream repository."
     )]
-    Init {
-        /// Template: nodejs, rust or go.
-        #[arg(long, default_value = "nodejs")]
-        template: String,
-        /// Directory for flake.nix, relative to the main checkout.
-        #[arg(long, default_value = "sandbox")]
-        dir: PathBuf,
+    Create {
+        /// Project name (default: the repository's directory name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Template: nodejs, rust or go (default: from the repository's files).
+        #[arg(long)]
+        template: Option<String>,
         /// agent-sandbox flake reference to use.
         #[arg(long, value_name = "FLAKE")]
         from: Option<String>,
@@ -137,13 +71,69 @@ enum SandboxCommands {
         #[arg(long, value_name = "KIND", num_args = 0..=1, default_missing_value = "")]
         ai: Option<String>,
     },
+    /// Start the project's VM and open its worktrees in herdr.
+    Start {
+        project: Option<String>,
+        #[command(flatten)]
+        boot: BootArgs,
+    },
+    /// Stop the project's VM, keeping its worktrees and guest home.
+    Stop { project: Option<String> },
+    /// Restart the project's VM, so it mounts the current worktrees.
+    Restart {
+        project: Option<String>,
+        #[command(flatten)]
+        boot: BootArgs,
+    },
+    /// Create another agent worktree for the project; prints its path.
+    Add {
+        project: Option<String>,
+        /// Restart a running VM right away to mount it.
+        #[arg(long)]
+        restart: bool,
+        #[command(flatten)]
+        boot: BootArgs,
+    },
+    /// Bring the agents' commits to the worktree branches on the host.
+    #[command(
+        after_help = "Fetches the guest's commits into sandbox/* and fast-forwards each worktree branch, which then exists in the main repository for review and merge. Files are already shared live; only git history moves."
+    )]
+    Sync {
+        project: Option<String>,
+        /// Only this worktree.
+        #[arg(long)]
+        worktree: Option<String>,
+    },
+    /// Sync a worktree, then remove it and keep its branch.
+    #[command(
+        after_help = "Refuses when guest commits could not be synced, when the VM is stopped but has a guest home, or when the worktree has uncommitted changes. --force removes anyway. The VM stops when its last worktree is done."
+    )]
+    Done {
+        /// Worktree name or path; may be omitted when the project has only one.
+        worktree: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        /// Remove even if commits or changes would be lost.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+struct BootArgs {
+    /// Agent kind herdr starts in each guest workspace, e.g. claude or codex (default: $CLI_TOOLBOX_AGENT).
+    #[arg(long, value_name = "KIND")]
+    agent: Option<String>,
+    /// Do not add the VM to herdr.
+    #[arg(long)]
+    no_herdr: bool,
 }
 
 #[derive(Debug, Subcommand)]
 pub(super) enum WorktreeCommands {
-    /// Create a sibling git worktree and branch for AI agents, initialize it and open it in Herdr.
+    /// Create a git worktree and branch for AI agents, initialize it and open it in Herdr.
     #[command(
-        after_help = "Creates a new worktree and branch next to the current directory and prints the path.\n\nThe worktree is then initialized: a `worktree-init` recipe in the project's justfile runs if there is one (with CLI_TOOLBOX_WORKTREE_SOURCE set to the source checkout), otherwise the install of the package manager whose lockfile is present (npm ci, pnpm install, yarn install, bun install). If herdr is installed, the worktree opens as a focused Herdr workspace.\n\nShell usage:\n\n  cd \"$(cli-toolbox agent worktree create)\""
+        after_help = "Creates a new worktree and branch and prints the path.\n\nThe worktree is then initialized: a `worktree-init` recipe in the project's justfile runs if there is one (with CLI_TOOLBOX_WORKTREE_SOURCE set to the source checkout), otherwise the install of the package manager whose lockfile is present (npm ci, pnpm install, yarn install, bun install). If herdr is installed, the worktree opens as a focused Herdr workspace.\n\nShell usage:\n\n  cd \"$(cli-toolbox agent worktree create)\""
     )]
     Create {
         /// Skip the worktree-init recipe or package install.
@@ -175,85 +165,112 @@ impl AgentCmd {
     pub fn run(self, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<(), Error> {
         match self.command {
             AgentCommands::Worktree { command } => run_worktree(command, stdout, stderr),
-            AgentCommands::Start { vm: args, boot } => vm::start(
-                &working_dir()?,
-                &git::worktrees_root()?,
-                &vm_options(args, Some(boot), false)?,
-                stdout,
-                stderr,
-            ),
-            AgentCommands::Up {
-                name,
-                vm: args,
-                boot,
-            } => {
-                let options = vm_options(args, Some(boot), false)?;
-                let steps = vm::up(&working_dir()?, &name.unwrap_or_default(), &options, stderr)?;
-                finish(&steps, stderr)
-            }
-            AgentCommands::Stop { name, vm: args } => {
-                let options = vm_options(args, None, false)?;
-                let steps = vm::stop(&working_dir()?, &name.unwrap_or_default(), &options)?;
-                finish(&steps, stderr)
-            }
-            AgentCommands::Sync { name, vm: args } => vm::sync(
-                &working_dir()?,
-                &name.unwrap_or_default(),
-                &vm_options(args, None, false)?,
-                stdout,
-                stderr,
-            ),
-            AgentCommands::List => vm::list(&working_dir()?, stdout),
-            AgentCommands::Done {
-                name,
-                force,
-                no_herdr,
-                vm: args,
-            } => {
-                let mut options = vm_options(args, None, force)?;
-                options.herdr = !no_herdr;
-                vm::done(
-                    &working_dir()?,
-                    &name.unwrap_or_default(),
-                    &options,
-                    stdout,
-                    stderr,
-                )
-            }
-            AgentCommands::Sandbox {
-                command:
-                    SandboxCommands::Init {
-                        template,
-                        dir,
-                        from,
-                        ssh_key,
-                        no_ssh_key,
-                        ai,
-                    },
-            } => {
-                let options = InitOptions {
-                    template,
-                    dir,
-                    source: from,
-                    ssh_key: match (ssh_key, no_ssh_key) {
-                        (Some(path), _) => SshKey::File(path),
-                        (None, true) => SshKey::None,
-                        (None, false) => SshKey::Auto,
-                    },
-                    ai: ai.map(|kind| {
-                        if kind.is_empty() {
-                            default_agent().unwrap_or_else(|| "claude".into())
-                        } else {
-                            kind
-                        }
-                    }),
-                };
-                let flake = init::init(&working_dir()?, &options, stderr)?;
-                writeln!(stdout, "{}", flake.display())?;
-                Ok(())
-            }
+            AgentCommands::Project { command } => run_project(command, stdout, stderr),
         }
     }
+}
+
+fn run_project(
+    command: ProjectCommands,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Error> {
+    let root = project::sandbox_dir()?;
+    match command {
+        ProjectCommands::List => vm::list(&root, stdout),
+        ProjectCommands::Create {
+            name,
+            template,
+            from,
+            ssh_key,
+            no_ssh_key,
+            ai,
+        } => {
+            let options = CreateOptions {
+                name,
+                repo: git::main_checkout(&working_dir()?)?,
+                template,
+                source: from,
+                ssh_key: match (ssh_key, no_ssh_key) {
+                    (Some(path), _) => SshKey::File(path),
+                    (None, true) => SshKey::None,
+                    (None, false) => SshKey::Auto,
+                },
+            };
+            let ai = ai.map(|kind| {
+                if kind.is_empty() {
+                    default_agent().unwrap_or_else(|| "claude".into())
+                } else {
+                    kind
+                }
+            });
+            let (project, created) = vm::create(
+                &root,
+                &git::worktrees_root()?,
+                &options,
+                ai.as_deref(),
+                stderr,
+            )?;
+            finish(&created.steps, stderr)?;
+            writeln!(stdout, "{}", project.dir.display())?;
+            Ok(())
+        }
+        ProjectCommands::Start { project, boot } => {
+            let steps = vm::start(&resolve(&root, project)?, &boot_options(boot), stderr)?;
+            finish(&steps, stderr)
+        }
+        ProjectCommands::Stop { project } => finish(&vm::stop(&resolve(&root, project)?)?, stderr),
+        ProjectCommands::Restart { project, boot } => {
+            let steps = vm::restart(&resolve(&root, project)?, &boot_options(boot), stderr)?;
+            finish(&steps, stderr)
+        }
+        ProjectCommands::Add {
+            project,
+            restart,
+            boot,
+        } => {
+            let created = vm::add_worktree(
+                &resolve(&root, project)?,
+                &git::worktrees_root()?,
+                restart,
+                &boot_options(boot),
+                stderr,
+            )?;
+            writeln!(stdout, "{}", created.worktree.path.display())?;
+            finish(&created.steps, stderr)
+        }
+        ProjectCommands::Sync { project, worktree } => {
+            let project = resolve(&root, project)?;
+            let worktree = worktree
+                .map(|name| vm::select_worktree(&project, &name))
+                .transpose()?;
+            let synced = vm::sync(&project, worktree.as_ref())?;
+            vm::write_synced(&synced, stdout)
+        }
+        ProjectCommands::Done {
+            worktree,
+            project,
+            force,
+        } => {
+            let project = resolve(&root, project)?;
+            let worktree = vm::select_worktree(&project, &worktree.unwrap_or_default())?;
+            let options = VmOptions {
+                force,
+                ..VmOptions::default()
+            };
+            let steps = vm::done(&project, &worktree, &options, stderr)?;
+            writeln!(stdout, "{}", worktree.branch)?;
+            finish(&steps, stderr)
+        }
+    }
+}
+
+/// The named project, else the current repository's, else the only one.
+fn resolve(root: &Path, name: Option<String>) -> Result<Project, Error> {
+    let repo = working_dir()
+        .ok()
+        .and_then(|cwd| git::main_checkout(&cwd).ok());
+    project::resolve(root, name.as_deref(), repo.as_deref())
 }
 
 pub(super) fn run_worktree(
@@ -297,30 +314,15 @@ pub(super) fn run_worktree(
     }
 }
 
-fn vm_options(args: VmArgs, boot: Option<BootArgs>, force: bool) -> Result<VmOptions, Error> {
-    let mut options = VmOptions {
-        flake: args.flake,
-        herdr: true,
-        force,
-        ..VmOptions::default()
-    };
-    if let Some(boot) = boot {
-        options.home_from = boot.home_from.as_deref().map(home_from);
-        options.agent = boot.agent.or_else(default_agent);
-        options.herdr = !boot.no_herdr;
-    }
-    Ok(options)
-}
-
-fn home_from(value: &str) -> HomeFrom {
-    if value == "main" {
-        HomeFrom::Main
-    } else {
-        HomeFrom::Image(Path::new(value).to_path_buf())
+fn boot_options(boot: BootArgs) -> VmOptions {
+    VmOptions {
+        agent: boot.agent.or_else(default_agent),
+        herdr: !boot.no_herdr,
+        force: false,
     }
 }
 
-fn default_agent() -> Option<String> {
+pub(crate) fn default_agent() -> Option<String> {
     std::env::var(AGENT_ENV)
         .ok()
         .filter(|kind| !kind.is_empty())

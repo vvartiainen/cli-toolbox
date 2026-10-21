@@ -1,170 +1,255 @@
-//! Sandboxed agent worktrees: each worktree runs its own agent-sandbox
-//! microVM, added to the host herdr as a machine whose guest herdr hosts the
-//! agent. The agent's commits come back as the worktree's branch.
+//! Sandbox projects: one agent-sandbox microVM per project, defined in the
+//! central sandbox directory and mounting every agent worktree of the
+//! project's repository at `/workspace/<worktree>`. The VM is added to the
+//! host herdr as a machine, with a guest workspace per worktree. The agents'
+//! commits come back as the worktrees' branches.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::{Created, Step, check_steps, report};
+use super::{Created, Step};
 use crate::git::{self, AgentWorktree};
-use crate::sandbox::{self, RunnerState, StartOptions};
+use crate::sandbox::project::{self, CreateOptions, Project};
+use crate::sandbox::{self, RunnerState};
 use crate::{Error, herdr};
 
-/// Where the worktree is mounted in the guest (`agentSandbox.workspaces.app`).
-pub(crate) const GUEST_DIR: &str = "/workspace/app";
-
-/// The guest home of a new VM.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum HomeFrom {
-    /// Clone the main checkout's `.agent-sandbox/home.img`.
-    Main,
-    /// Clone this image.
-    Image(PathBuf),
-}
-
-/// Choices shared by the VM commands.
+/// Choices shared by the project commands.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct VmOptions {
-    /// The sandbox flake directory. Found in the checkout when not set.
-    pub(crate) flake: Option<PathBuf>,
-    /// Start from a copy of another home image instead of a fresh home.
-    pub(crate) home_from: Option<HomeFrom>,
-    /// The agent kind herdr starts in the guest workspace, if any.
+    /// The agent kind herdr starts in each guest workspace, if any.
     pub(crate) agent: Option<String>,
-    /// Add the VM to herdr and open a guest workspace (or remove it on done).
+    /// Add the VM to herdr and open a guest workspace per worktree.
     pub(crate) herdr: bool,
     /// `done`: remove even with unsynced commits or local changes.
     pub(crate) force: bool,
 }
 
-const HOME_IMAGE: &str = ".agent-sandbox/home.img";
+/// A project with its worktrees and VM, for lists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProjectStatus {
+    pub(crate) project: Project,
+    pub(crate) worktrees: Vec<AgentWorktree>,
+    pub(crate) vm: Option<RunnerState>,
+    /// The running VM does not mount the current worktrees.
+    pub(crate) restart_needed: bool,
+    /// Why the worktrees could not be read, for example a moved repository.
+    pub(crate) error: Option<String>,
+}
 
-/// Create the next agent worktree of `cwd` and boot its VM.
-pub(crate) fn start_worktree(
-    cwd: &Path,
+impl ProjectStatus {
+    pub(crate) fn vm_text(&self) -> String {
+        match &self.vm {
+            Some(vm) if self.restart_needed => {
+                format!(
+                    "running{}, restart to mount worktree changes",
+                    port_text(vm)
+                )
+            }
+            Some(vm) => format!("running{}", port_text(vm)),
+            None => "stopped".into(),
+        }
+    }
+}
+
+/// Every project in `root` with its state.
+pub(crate) fn statuses(root: &Path) -> Result<Vec<ProjectStatus>, Error> {
+    let running = running_vms();
+    Ok(project::projects(root)?
+        .into_iter()
+        .map(|project| status_with(project, &running))
+        .collect())
+}
+
+pub(crate) fn status(project: Project) -> ProjectStatus {
+    status_with(project, &running_vms())
+}
+
+fn status_with(project: Project, running: &[RunnerState]) -> ProjectStatus {
+    let vm = sandbox::vm_for(running, &project.dir);
+    let (worktrees, error) = match project.repo.as_deref().map(git::agent_worktrees) {
+        None => (Vec::new(), None),
+        Some(Ok(worktrees)) => (worktrees, None),
+        Some(Err(err)) => (Vec::new(), Some(err.to_string())),
+    };
+    let restart_needed = vm.is_some() && project.restart_needed();
+    ProjectStatus {
+        project,
+        worktrees,
+        vm,
+        restart_needed,
+        error,
+    }
+}
+
+/// Create a project for the repository and its first worktree. With `ai`,
+/// that agent kind then tailors the flake to the repository.
+pub(crate) fn create(
     root: &Path,
+    worktrees_root: &Path,
+    options: &CreateOptions,
+    ai: Option<&str>,
+    stderr: &mut dyn Write,
+) -> Result<(Project, Created), Error> {
+    let project = project::create(root, options, stderr)?;
+    let worktree = git::create_agent_worktree_record(&options.repo, worktrees_root, stderr)?;
+    write_worktrees(&project)?;
+    let mut steps = vec![Step::Done(format!(
+        "project: {} with worktree {}",
+        project.dir.display(),
+        worktree.name
+    ))];
+    if let Some(agent) = ai {
+        steps.push(
+            match project::run_setup_agent(&project, options.source.as_deref(), agent, stderr) {
+                Ok(()) => Step::Done(format!("setup: {agent} tailored the flake")),
+                Err(err) => Step::Failed(format!("setup: {err}")),
+            },
+        );
+    }
+    Ok((project, Created { worktree, steps }))
+}
+
+/// Create the next agent worktree of the project's repository. A running VM
+/// mounts it after a restart, which `restart` does right away.
+pub(crate) fn add_worktree(
+    project: &Project,
+    worktrees_root: &Path,
+    restart: bool,
     options: &VmOptions,
     stderr: &mut dyn Write,
 ) -> Result<Created, Error> {
-    let main = git::main_checkout(cwd)?;
-    let flake = resolve_flake(&main, None, options.flake.as_deref())?;
-    if !git::is_ignored(&main, ".agent-sandbox/") {
-        return Err(Error::msg(format!(
-            "add `.agent-sandbox/` to {}/.gitignore first: it holds the VM's home image, and git would refuse to remove the worktree",
-            main.display()
-        )));
-    }
-    let seed = home_seed(&main, options.home_from.as_ref())?;
-    let worktree = git::create_agent_worktree_record(cwd, root, stderr)?;
-    // A sandbox flake committed in the branch wins over the main checkout's.
-    let flake =
-        resolve_flake(&main, Some(&worktree.path), options.flake.as_deref()).unwrap_or(flake);
-    let steps = boot(&worktree, &flake, seed, options, stderr)?;
+    let worktree = git::create_agent_worktree_record(project.repo()?, worktrees_root, stderr)?;
+    write_worktrees(project)?;
+    let running = sandbox::vm_for(&running_vms(), &project.dir).is_some();
+    let steps = match (running, restart) {
+        (true, true) => self::restart(project, options, stderr)?,
+        (true, false) => vec![Step::Skipped(format!(
+            "vm: running; restart it to mount {}",
+            worktree.name
+        ))],
+        (false, _) => vec![Step::Skipped(format!(
+            "vm: stopped; starting it mounts {}",
+            worktree.name
+        ))],
+    };
     Ok(Created { worktree, steps })
 }
 
-/// `agent start`: print the worktree path on stdout and the steps on stderr.
+/// Start the project's VM with its current worktrees and open them in herdr.
 pub(crate) fn start(
-    cwd: &Path,
-    root: &Path,
-    options: &VmOptions,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> Result<(), Error> {
-    let created = start_worktree(cwd, root, options, stderr)?;
-    report(&created.steps, stderr)?;
-    writeln!(stdout, "{}", created.worktree.path.display())?;
-    check_steps(&created.steps, "agent worktree created")
-}
-
-/// `agent up`: boot the VM of an existing worktree again.
-pub(crate) fn up(
-    cwd: &Path,
-    name: &str,
+    project: &Project,
     options: &VmOptions,
     stderr: &mut dyn Write,
 ) -> Result<Vec<Step>, Error> {
-    let worktree = select(cwd, name)?;
-    let flake = worktree_flake(cwd, &worktree, options)?;
-    if let Some(vm) = sandbox::vm_for(&runtime_root()?, &worktree.path) {
-        return Ok(vec![Step::Skipped(format!(
-            "vm: already running{}",
-            port_text(&vm)
-        ))]);
-    }
-    let main = git::main_checkout(cwd)?;
-    let seed = home_seed(&main, options.home_from.as_ref())?;
-    boot(&worktree, &flake, seed, options, stderr)
-}
-
-/// `agent stop`: stop the VM of a worktree and keep everything else.
-pub(crate) fn stop(cwd: &Path, name: &str, options: &VmOptions) -> Result<Vec<Step>, Error> {
-    let worktree = select(cwd, name)?;
-    let flake = worktree_flake(cwd, &worktree, options)?;
-    if sandbox::vm_for(&runtime_root()?, &worktree.path).is_none() {
-        return Ok(vec![Step::Skipped("vm: not running".into())]);
-    }
-    sandbox::stop(&worktree.path, &flake)?;
-    Ok(vec![Step::Done(format!("vm: stopped {}", worktree.name))])
-}
-
-/// The result of bringing the agent's commits to the host.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Synced {
-    pub(crate) worktree: AgentWorktree,
-    /// What git-pull reported, one line per workspace.
-    pub(crate) report: String,
-    /// Guest commits that the host branch does not have, one per line.
-    pub(crate) unsynced: Option<String>,
-}
-
-/// Fetch the guest's commits and fast-forward the worktree's branch.
-pub(crate) fn sync_worktree(cwd: &Path, name: &str, options: &VmOptions) -> Result<Synced, Error> {
-    let worktree = select(cwd, name)?;
-    let flake = worktree_flake(cwd, &worktree, options)?;
-    if sandbox::vm_for(&runtime_root()?, &worktree.path).is_none() {
+    let worktrees = write_worktrees(project)?;
+    if project.repo.is_some() && worktrees.is_empty() {
         return Err(Error::msg(format!(
-            "the VM of {} is not running; start it with `cli-toolbox agent up {}`",
-            worktree.name, worktree.name
+            "project {} has no agent worktrees to mount; add one with `cli-toolbox agent project add {}`",
+            project.name, project.name
         )));
     }
-    let report = sandbox::git_pull(&worktree.path, &flake)?;
-    let unsynced = unsynced_commits(&worktree.path, &worktree.branch)?;
-    Ok(Synced {
-        worktree,
-        report,
-        unsynced,
-    })
+    if let Some(vm) = sandbox::vm_for(&running_vms(), &project.dir) {
+        let status = status(project.clone());
+        let mut steps = vec![Step::Skipped(format!("vm: already {}", status.vm_text()))];
+        if options.herdr && herdr::available() {
+            steps.push(match sandbox::herdr_add(&project.dir) {
+                Ok(()) => Step::Done(format!("herdr: machine {}", vm.name)),
+                Err(err) => Step::Failed(format!("herdr: reconnect {}: {err}", vm.name)),
+            });
+        }
+        return Ok(steps);
+    }
+    writeln!(
+        stderr,
+        "Starting the VM of {} from {}",
+        project.name,
+        project.dir.display()
+    )?;
+    let vm = match sandbox::start(&project.dir) {
+        Ok(vm) => vm,
+        Err(err) => return Ok(vec![Step::Failed(format!("vm: {err}"))]),
+    };
+    project.record_mounted()?;
+    let mut steps = vec![Step::Done(format!(
+        "vm: running{} with {} worktree(s)",
+        port_text(&vm),
+        worktrees.len()
+    ))];
+    if options.herdr {
+        steps.extend(herdr_steps(
+            project,
+            &vm.name,
+            &worktrees,
+            options.agent.as_deref(),
+        ));
+    }
+    Ok(steps)
 }
 
-/// `agent sync`: report what moved and the branch's commits over main.
-pub(crate) fn sync(
-    cwd: &Path,
-    name: &str,
-    options: &VmOptions,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> Result<(), Error> {
-    let synced = sync_worktree(cwd, name, options)?;
-    write!(stderr, "{}", synced.report)?;
-    let main = git::main_checkout(cwd)?;
-    let branch = &synced.worktree.branch;
-    let log = git::log_oneline(&main, &format!("HEAD..{branch}"))?;
-    if log.is_empty() {
-        writeln!(
-            stdout,
-            "{branch}: no commits beyond the main checkout's HEAD"
-        )?;
-    } else {
-        writeln!(
-            stdout,
-            "{branch}: commits beyond the main checkout's HEAD:\n{log}"
-        )?;
+/// Stop the project's VM; worktrees and the guest home stay.
+pub(crate) fn stop(project: &Project) -> Result<Vec<Step>, Error> {
+    if sandbox::vm_for(&running_vms(), &project.dir).is_none() {
+        return Ok(vec![Step::Skipped("vm: not running".into())]);
     }
-    if let Some(unsynced) = &synced.unsynced {
+    sandbox::stop(&project.dir)?;
+    Ok(vec![Step::Done(format!("vm: stopped {}", project.name))])
+}
+
+/// Stop and start the VM, so it mounts the current worktrees.
+pub(crate) fn restart(
+    project: &Project,
+    options: &VmOptions,
+    stderr: &mut dyn Write,
+) -> Result<Vec<Step>, Error> {
+    let mut steps = stop(project)?;
+    steps.retain(|step| !matches!(step, Step::Skipped(_)));
+    steps.extend(start(project, options, stderr)?);
+    Ok(steps)
+}
+
+/// The result of bringing the agents' commits to the host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Synced {
+    /// What git-pull reported, one line per worktree.
+    pub(crate) report: String,
+    /// Per branch, guest commits that the host branch does not have.
+    pub(crate) unsynced: Vec<(String, String)>,
+}
+
+/// Fetch the guest's commits and fast-forward the worktrees' branches: the
+/// one given, or all of them.
+pub(crate) fn sync(project: &Project, worktree: Option<&AgentWorktree>) -> Result<Synced, Error> {
+    if sandbox::vm_for(&running_vms(), &project.dir).is_none() {
+        return Err(Error::msg(format!(
+            "the VM of {} is not running; start it with `cli-toolbox agent project start {}`",
+            project.name, project.name
+        )));
+    }
+    let worktrees = match worktree {
+        Some(worktree) => vec![worktree.clone()],
+        None => git::agent_worktrees(project.repo()?)?,
+    };
+    let names: Vec<&str> = match worktree {
+        Some(worktree) => vec![worktree.name.as_str()],
+        None => Vec::new(),
+    };
+    let report = sandbox::git_pull(&project.dir, &names)?;
+    let mut unsynced = Vec::new();
+    for worktree in &worktrees {
+        if let Some(log) = unsynced_commits(&worktree.path, &worktree.branch)? {
+            unsynced.push((worktree.branch.clone(), log));
+        }
+    }
+    Ok(Synced { report, unsynced })
+}
+
+/// Write `synced` for people: the report, then diverged branches.
+pub(crate) fn write_synced(synced: &Synced, out: &mut dyn Write) -> Result<(), Error> {
+    write!(out, "{}", synced.report)?;
+    for (branch, log) in &synced.unsynced {
         writeln!(
-            stderr,
-            "{branch} has diverged from the guest; its commits are in sandbox/{branch}:\n{unsynced}"
+            out,
+            "{branch} has diverged from the guest; its commits are in sandbox/{branch}:\n{log}"
         )?;
     }
     Ok(())
@@ -180,80 +265,72 @@ pub(crate) fn unsynced_commits(dir: &Path, branch: &str) -> Result<Option<String
     git::log_oneline(dir, &format!("{branch}..{guest}")).map(Some)
 }
 
-/// `agent done`: sync, then stop the VM, remove the herdr machine and the
-/// worktree. The branch stays for review. Refuses to lose work unless forced.
+/// The project's agent worktree named `name` (or its only one).
+pub(crate) fn select_worktree(project: &Project, name: &str) -> Result<AgentWorktree, Error> {
+    let mut selected = git::select_agent_worktrees(project.repo()?, name, false)?;
+    Ok(selected.remove(0))
+}
+
+/// Sync a worktree, then remove it and keep its branch for review. Refuses
+/// to lose work unless forced. Stops the VM when it was the last worktree.
 pub(crate) fn done(
-    cwd: &Path,
-    name: &str,
+    project: &Project,
+    worktree: &AgentWorktree,
     options: &VmOptions,
-    stdout: &mut dyn Write,
     stderr: &mut dyn Write,
-) -> Result<(), Error> {
-    let worktree = select(cwd, name)?;
-    let flake = worktree_flake(cwd, &worktree, options)?;
-    let vm = sandbox::vm_for(&runtime_root()?, &worktree.path);
-    if let Some(problem) = done_blocker(cwd, &worktree, vm.as_ref(), options)? {
+) -> Result<Vec<Step>, Error> {
+    let vm = sandbox::vm_for(&running_vms(), &project.dir);
+    if let Some(problem) = done_blocker(project, worktree, vm.is_some(), options.force)? {
         return Err(Error::msg(format!(
             "{problem}\nPass --force to remove {} anyway; its branch {} stays.",
             worktree.name, worktree.branch
         )));
-    }
-
-    let mut steps = Vec::new();
-    if let Some(vm) = &vm {
-        steps.push(match sandbox::stop(&worktree.path, &flake) {
-            Ok(()) => {
-                // Only the runtime dir's ssh_config and known_hosts remain.
-                let _ = std::fs::remove_dir_all(&vm.runtime_dir);
-                Step::Done(format!("vm: stopped {}", worktree.name))
-            }
-            Err(err) => Step::Failed(format!("vm: {err}")),
-        });
-        if steps.iter().any(Step::failed) {
-            report(&steps, stderr)?;
-            return check_steps(&steps, "nothing removed");
-        }
-    }
-    if options.herdr {
-        steps.push(remove_machine_step(&worktree.name));
     }
     let remove = git::RemoveOptions {
         keep_branch: true,
         // Uncommitted and untracked files were checked above.
         force: true,
     };
-    git::remove_agent_worktree(cwd, &worktree, remove, stderr)?;
-    steps.push(Step::Done(format!(
-        "worktree: removed; branch {} kept for review",
-        worktree.branch
-    )));
-    report(&steps, stderr)?;
-    writeln!(stdout, "{}", worktree.branch)?;
-    check_steps(&steps, "agent worktree removed")
+    git::remove_agent_worktree(project.repo()?, worktree, remove, stderr)?;
+    let mut steps = vec![Step::Done(format!(
+        "worktree: removed {}; branch {} kept for review",
+        worktree.name, worktree.branch
+    ))];
+    let remaining = write_worktrees(project)?;
+    if vm.is_some() {
+        if remaining.is_empty() {
+            steps.extend(stop(project)?);
+        } else {
+            steps.push(Step::Skipped(
+                "vm: still mounts it until the next restart".into(),
+            ));
+        }
+    }
+    Ok(steps)
 }
 
 /// Why `done` would lose work, if it would.
 fn done_blocker(
-    cwd: &Path,
+    project: &Project,
     worktree: &AgentWorktree,
-    vm: Option<&RunnerState>,
-    options: &VmOptions,
+    running: bool,
+    force: bool,
 ) -> Result<Option<String>, Error> {
-    if options.force {
+    if force {
         return Ok(None);
     }
-    if vm.is_some() {
-        let synced = sync_worktree(cwd, &worktree.name, options)?;
-        if let Some(unsynced) = synced.unsynced {
+    if running {
+        sandbox::git_pull(&project.dir, &[&worktree.name])?;
+        if let Some(unsynced) = unsynced_commits(&worktree.path, &worktree.branch)? {
             return Ok(Some(format!(
                 "{} has diverged from the guest; these guest commits would be lost:\n{unsynced}",
                 worktree.branch
             )));
         }
-    } else if worktree.path.join(HOME_IMAGE).exists() {
+    } else if project.state_dir.join("home.img").exists() {
         return Ok(Some(format!(
-            "the VM of {} is stopped, so its latest commits cannot be synced; run `cli-toolbox agent up {}` first",
-            worktree.name, worktree.name
+            "the VM of {} is stopped, so the latest commits of {} cannot be synced; run `cli-toolbox agent project start {}` first",
+            project.name, worktree.name, project.name
         )));
     }
     let changes = git::status_lines(&worktree.path)?;
@@ -267,105 +344,77 @@ fn done_blocker(
     Ok(None)
 }
 
-/// `agent list`: one line per agent worktree with its VM.
-pub(crate) fn list(cwd: &Path, stdout: &mut dyn Write) -> Result<(), Error> {
-    let running = runtime_root()
-        .map(|root| sandbox::running_vms(&root))
-        .unwrap_or_default();
-    for worktree in git::agent_worktrees(cwd)? {
-        writeln!(stdout, "{}", list_line(&worktree, &running))?;
+/// `agent project list`: one line per project, then its worktrees.
+pub(crate) fn list(root: &Path, stdout: &mut dyn Write) -> Result<(), Error> {
+    for status in statuses(root)? {
+        write!(stdout, "{}", list_lines(&status))?;
     }
     Ok(())
 }
 
-fn list_line(worktree: &AgentWorktree, running: &[RunnerState]) -> String {
-    let path = worktree
-        .path
-        .canonicalize()
-        .unwrap_or_else(|_| worktree.path.clone());
-    let vm = running
-        .iter()
-        .find(|vm| vm.dir == path)
-        .map(|vm| format!("running{}", port_text(vm)))
-        .unwrap_or_else(|| "stopped".into());
-    format!(
-        "{}\t{}\t{vm}\t{}",
-        worktree.name,
-        worktree.branch,
-        worktree.path.display()
-    )
+fn list_lines(status: &ProjectStatus) -> String {
+    let repo = status
+        .project
+        .repo
+        .as_ref()
+        .map(|repo| repo.display().to_string())
+        .unwrap_or_else(|| "(no repository)".into());
+    let mut text = format!("{}\t{}\t{repo}\n", status.project.name, status.vm_text());
+    if let Some(error) = &status.error {
+        text.push_str(&format!("  error: {error}\n"));
+    }
+    for worktree in &status.worktrees {
+        text.push_str(&format!(
+            "  {}\t{}\t{}\n",
+            worktree.name,
+            worktree.branch,
+            worktree.path.display()
+        ));
+    }
+    text
 }
 
-fn boot(
-    worktree: &AgentWorktree,
-    flake: &Path,
-    home_seed: Option<PathBuf>,
-    options: &VmOptions,
-    stderr: &mut dyn Write,
-) -> Result<Vec<Step>, Error> {
-    let running = sandbox::running_vms(&runtime_root()?);
-    let port = sandbox::free_port(sandbox::SSH_PORTS, &running).ok_or_else(|| {
-        Error::msg(format!(
-            "no free SSH port in {}-{}",
-            sandbox::SSH_PORTS.start(),
-            sandbox::SSH_PORTS.end()
-        ))
-    })?;
-    writeln!(
-        stderr,
-        "Starting the VM of {} (SSH port {port}) from {}",
-        worktree.name,
-        flake.display()
-    )?;
-    let start = StartOptions {
-        ssh_port: Some(port),
-        name: Some(worktree.name.clone()),
-        home_seed,
+/// Write `worktrees.nix` from the repository's agent worktrees.
+fn write_worktrees(project: &Project) -> Result<Vec<AgentWorktree>, Error> {
+    let Some(repo) = project.repo.as_deref() else {
+        return Ok(Vec::new());
     };
-    let mut steps = Vec::new();
-    match sandbox::start(&worktree.path, flake, &start) {
-        Ok(vm) => steps.push(Step::Done(format!("vm: running{}", port_text(&vm)))),
-        Err(err) => {
-            steps.push(Step::Failed(format!("vm: {err}")));
-            return Ok(steps);
-        }
-    }
-    if options.herdr {
-        steps.extend(herdr_steps(worktree, flake, options.agent.as_deref()));
-    }
-    Ok(steps)
+    let worktrees = git::agent_worktrees(repo)?;
+    project.write_worktrees(&worktrees)?;
+    Ok(worktrees)
 }
 
-fn herdr_steps(worktree: &AgentWorktree, flake: &Path, agent: Option<&str>) -> Vec<Step> {
+fn herdr_steps(
+    project: &Project,
+    machine: &str,
+    worktrees: &[AgentWorktree],
+    agent: Option<&str>,
+) -> Vec<Step> {
     if !herdr::available() {
         return vec![Step::Skipped("herdr: not installed".into())];
     }
-    let label = &worktree.name;
-    if let Err(err) = sandbox::herdr_add(&worktree.path, flake, label) {
-        return vec![Step::Failed(format!("herdr: add machine {label}: {err}"))];
+    if let Err(err) = sandbox::herdr_add(&project.dir) {
+        return vec![Step::Failed(format!("herdr: add machine {machine}: {err}"))];
     }
-    let added = Step::Done(format!("herdr: machine {label}"));
-    let opened = match herdr::open_machine_workspace(label, GUEST_DIR, label, agent) {
-        Ok(id) => Step::Done(match agent {
-            Some(kind) => format!("herdr: workspace {id} running {kind}"),
-            None => {
-                format!("herdr: workspace {id} (no agent; pass --agent or set CLI_TOOLBOX_AGENT)")
-            }
-        }),
-        Err(err) => Step::Failed(format!("herdr: open workspace on {label}: {err}")),
-    };
-    vec![added, opened]
+    let mut steps = vec![Step::Done(format!("herdr: machine {machine}"))];
+    for worktree in worktrees {
+        let cwd = guest_dir(&worktree.name);
+        steps.push(
+            match herdr::open_machine_workspace(machine, &cwd, &worktree.name, agent) {
+                Ok(id) => Step::Done(match agent {
+                    Some(kind) => format!("herdr: workspace {id} at {cwd} running {kind}"),
+                    None => format!("herdr: workspace {id} at {cwd}"),
+                }),
+                Err(err) => Step::Failed(format!("herdr: open workspace {cwd}: {err}")),
+            },
+        );
+    }
+    steps
 }
 
-fn remove_machine_step(label: &str) -> Step {
-    if !herdr::available() {
-        return Step::Skipped("herdr: not installed".into());
-    }
-    match herdr::remove_machine(label) {
-        Ok(true) => Step::Done(format!("herdr: removed machine {label}")),
-        Ok(false) => Step::Skipped(format!("herdr: no machine {label}")),
-        Err(err) => Step::Failed(format!("herdr: remove machine {label}: {err}")),
-    }
+/// Where a worktree is mounted in the guest.
+pub(crate) fn guest_dir(worktree: &str) -> String {
+    format!("/workspace/{worktree}")
 }
 
 fn port_text(vm: &RunnerState) -> String {
@@ -374,62 +423,10 @@ fn port_text(vm: &RunnerState) -> String {
         .unwrap_or_default()
 }
 
-fn select(cwd: &Path, name: &str) -> Result<AgentWorktree, Error> {
-    let mut selected = git::select_agent_worktrees(cwd, name, false)?;
-    Ok(selected.remove(0))
-}
-
-fn worktree_flake(
-    cwd: &Path,
-    worktree: &AgentWorktree,
-    options: &VmOptions,
-) -> Result<PathBuf, Error> {
-    let main = git::main_checkout(cwd)?;
-    resolve_flake(&main, Some(&worktree.path), options.flake.as_deref())
-}
-
-/// The sandbox flake: the one given, the worktree's, then the main checkout's.
-fn resolve_flake(
-    main: &Path,
-    worktree: Option<&Path>,
-    given: Option<&Path>,
-) -> Result<PathBuf, Error> {
-    if let Some(flake) = given {
-        return std::path::absolute(flake)
-            .map_err(|err| Error::msg(format!("resolve {}: {err}", flake.display())));
-    }
-    worktree
-        .and_then(sandbox::find_flake)
-        .or_else(|| sandbox::find_flake(main))
-        .ok_or_else(|| {
-            Error::msg(format!(
-                "no agent-sandbox flake in {} (sandbox/flake.nix); create one with `cli-toolbox agent sandbox init`",
-                main.display()
-            ))
-        })
-}
-
-fn home_seed(main: &Path, from: Option<&HomeFrom>) -> Result<Option<PathBuf>, Error> {
-    let image = match from {
-        None => return Ok(None),
-        Some(HomeFrom::Main) => main.join(HOME_IMAGE),
-        Some(HomeFrom::Image(path)) => std::path::absolute(path)
-            .map_err(|err| Error::msg(format!("resolve {}: {err}", path.display())))?,
-    };
-    if image.is_file() {
-        Ok(Some(image))
-    } else {
-        Err(Error::msg(format!(
-            "no home image to copy at {}; run the sandbox there once first",
-            image.display()
-        )))
-    }
-}
-
-fn runtime_root() -> Result<PathBuf, Error> {
-    sandbox::runtime_root().ok_or_else(|| {
-        Error::msg("resolve agent-sandbox runtime directory: home directory not found")
-    })
+fn running_vms() -> Vec<RunnerState> {
+    sandbox::runtime_root()
+        .map(|root| sandbox::running_vms(&root))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -446,6 +443,19 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {output:?}");
         String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// A project for `repo` in `root`, as `project create` leaves it.
+    fn project(root: &Path, repo: &Path) -> Project {
+        let dir = root.join("projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("flake.nix"), "{ }").unwrap();
+        std::fs::write(
+            dir.join("project.json"),
+            format!("{{\"repo\": \"{}\"}}", repo.display()),
+        )
+        .unwrap();
+        project::load(root, "demo").unwrap()
     }
 
     #[test]
@@ -500,35 +510,45 @@ mod tests {
     }
 
     #[test]
-    fn home_seed_needs_an_existing_image() {
-        let main = tempfile::tempdir().unwrap();
-        assert_eq!(home_seed(main.path(), None).unwrap(), None);
-        assert!(home_seed(main.path(), Some(&HomeFrom::Main)).is_err());
-        std::fs::create_dir(main.path().join(".agent-sandbox")).unwrap();
-        std::fs::write(main.path().join(HOME_IMAGE), "home").unwrap();
-        assert_eq!(
-            home_seed(main.path(), Some(&HomeFrom::Main)).unwrap(),
-            Some(main.path().join(HOME_IMAGE))
-        );
+    fn added_worktrees_are_mounted_by_the_project() {
+        if skip_without_git() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("demo");
+        init_git_repo(&repo);
+        let project = project(&temp.path().join("sandbox"), &repo);
+        let worktrees_root = temp.path().join("worktrees");
+        let options = VmOptions::default();
+
+        let first =
+            add_worktree(&project, &worktrees_root, false, &options, &mut Vec::new()).unwrap();
+        let second =
+            add_worktree(&project, &worktrees_root, false, &options, &mut Vec::new()).unwrap();
+        assert_eq!(second.worktree.name, "demo-agent-wt-2");
+        assert!(matches!(&first.steps[..], [Step::Skipped(text)] if text.contains("stopped")));
+
+        let mounted = std::fs::read_to_string(project.dir.join("worktrees.nix")).unwrap();
+        assert!(mounted.contains("\"demo-agent-wt\" = "), "{mounted}");
+        assert!(mounted.contains("\"demo-agent-wt-2\" = "), "{mounted}");
+
+        let status = status(project.clone());
+        assert_eq!(status.worktrees.len(), 2);
+        assert_eq!(status.vm, None);
+        assert_eq!(status.vm_text(), "stopped");
     }
 
     #[test]
-    fn flake_in_the_worktree_wins_over_main() {
-        let main = tempfile::tempdir().unwrap();
-        let worktree = tempfile::tempdir().unwrap();
-        assert!(resolve_flake(main.path(), Some(worktree.path()), None).is_err());
-        for dir in [main.path(), worktree.path()] {
-            std::fs::create_dir(dir.join("sandbox")).unwrap();
-            std::fs::write(dir.join("sandbox/flake.nix"), "agent-sandbox").unwrap();
+    fn starting_needs_a_worktree() {
+        if skip_without_git() {
+            return;
         }
-        assert_eq!(
-            resolve_flake(main.path(), Some(worktree.path()), None).unwrap(),
-            worktree.path().join("sandbox")
-        );
-        assert_eq!(
-            resolve_flake(main.path(), None, None).unwrap(),
-            main.path().join("sandbox")
-        );
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("demo");
+        init_git_repo(&repo);
+        let project = project(&temp.path().join("sandbox"), &repo);
+        let err = start(&project, &VmOptions::default(), &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("no agent worktrees"), "{err}");
     }
 
     #[test]
@@ -539,62 +559,81 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("demo");
         init_git_repo(&repo);
-        std::fs::write(repo.join(".gitignore"), ".agent-sandbox/\n").unwrap();
-        commit_all(&repo);
-        let worktree = git::create_agent_worktree_record(
-            &repo,
+        let project = project(&temp.path().join("sandbox"), &repo);
+        let created = add_worktree(
+            &project,
             &temp.path().join("worktrees"),
+            false,
+            &VmOptions::default(),
             &mut Vec::new(),
         )
         .unwrap();
-        let options = VmOptions::default();
+        let worktree = created.worktree;
         assert_eq!(
-            done_blocker(&repo, &worktree, None, &options).unwrap(),
+            done_blocker(&project, &worktree, false, false).unwrap(),
             None
         );
 
         std::fs::write(worktree.path.join("wip.txt"), "wip\n").unwrap();
-        let blocker = done_blocker(&repo, &worktree, None, &options)
+        let blocker = done_blocker(&project, &worktree, false, false)
             .unwrap()
             .unwrap();
         assert!(blocker.contains("?? wip.txt"), "{blocker}");
 
-        std::fs::create_dir(worktree.path.join(".agent-sandbox")).unwrap();
-        std::fs::write(worktree.path.join(HOME_IMAGE), "home").unwrap();
-        let blocker = done_blocker(&repo, &worktree, None, &options)
+        std::fs::create_dir_all(&project.state_dir).unwrap();
+        std::fs::write(project.state_dir.join("home.img"), "home").unwrap();
+        let blocker = done_blocker(&project, &worktree, false, false)
             .unwrap()
             .unwrap();
         assert!(blocker.contains("is stopped"), "{blocker}");
+        assert_eq!(
+            done_blocker(&project, &worktree, false, true).unwrap(),
+            None
+        );
 
         let forced = VmOptions {
             force: true,
             ..VmOptions::default()
         };
-        assert_eq!(done_blocker(&repo, &worktree, None, &forced).unwrap(), None);
+        done(&project, &worktree, &forced, &mut Vec::new()).unwrap();
+        assert!(git::agent_worktrees(&repo).unwrap().is_empty());
+        let mounted = std::fs::read_to_string(project.dir.join("worktrees.nix")).unwrap();
+        assert!(!mounted.contains("demo-agent-wt"), "{mounted}");
     }
 
     #[test]
-    fn list_shows_the_vm_of_each_worktree() {
-        let worktree = AgentWorktree {
-            name: "demo-agent-wt".into(),
-            path: "/wt/demo-agent-wt".into(),
-            branch: "demo-agent-wt".into(),
-        };
-        let vm = RunnerState {
-            pid: 1,
-            ssh_port: Some(2301),
-            name: "demo-agent-wt".into(),
-            dir: "/wt/demo-agent-wt".into(),
-            runtime_dir: "/state".into(),
-            console_log: None,
+    fn list_shows_the_vm_and_worktrees_of_each_project() {
+        let status = ProjectStatus {
+            project: Project {
+                name: "demo".into(),
+                dir: "/sandbox/projects/demo".into(),
+                repo: Some("/p/demo".into()),
+                state_dir: "/sandbox/state/demo".into(),
+            },
+            worktrees: vec![AgentWorktree {
+                name: "demo-agent-wt".into(),
+                path: "/wt/demo-agent-wt".into(),
+                branch: "demo-agent-wt".into(),
+            }],
+            vm: Some(RunnerState {
+                pid: 1,
+                ssh_port: Some(2301),
+                name: "agent-demo".into(),
+                dir: "/sandbox/projects/demo".into(),
+                runtime_dir: "/state".into(),
+                console_log: None,
+            }),
+            restart_needed: false,
+            error: None,
         };
         assert_eq!(
-            list_line(&worktree, &[vm]),
-            "demo-agent-wt\tdemo-agent-wt\trunning on SSH port 2301\t/wt/demo-agent-wt"
+            list_lines(&status),
+            "demo\trunning on SSH port 2301\t/p/demo\n  demo-agent-wt\tdemo-agent-wt\t/wt/demo-agent-wt\n"
         );
-        assert_eq!(
-            list_line(&worktree, &[]),
-            "demo-agent-wt\tdemo-agent-wt\tstopped\t/wt/demo-agent-wt"
-        );
+        let stale = ProjectStatus {
+            restart_needed: true,
+            ..status
+        };
+        assert!(stale.vm_text().contains("restart"));
     }
 }

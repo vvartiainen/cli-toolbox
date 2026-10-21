@@ -387,11 +387,6 @@ pub(crate) fn main_checkout(cwd: &Path) -> Result<PathBuf, Error> {
         .ok_or_else(|| Error::msg("git worktree list: no main worktree"))
 }
 
-/// Whether git ignores `path` (relative to `dir`).
-pub(crate) fn is_ignored(dir: &Path, path: &str) -> bool {
-    exec::combined_output("git", &["check-ignore", "-q", path], Some(dir)).is_ok()
-}
-
 /// The commit `rev` names in `dir`, if any.
 pub(crate) fn resolve_commit(dir: &Path, rev: &str) -> Option<String> {
     let spec = format!("{rev}^{{commit}}");

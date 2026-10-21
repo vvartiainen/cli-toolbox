@@ -196,47 +196,26 @@ mod tests {
     }
 
     #[test]
-    fn prints_sandboxed_agent_help() {
-        for (args, usage) in [
-            (
-                vec!["agent", "start", "--help"],
-                "Usage: cli-toolbox agent start",
-            ),
-            (vec!["agent", "up", "--help"], "Usage: cli-toolbox agent up"),
-            (
-                vec!["agent", "stop", "--help"],
-                "Usage: cli-toolbox agent stop",
-            ),
-            (
-                vec!["agent", "sync", "--help"],
-                "Usage: cli-toolbox agent sync",
-            ),
-            (
-                vec!["agent", "list", "--help"],
-                "Usage: cli-toolbox agent list",
-            ),
-            (
-                vec!["agent", "done", "--help"],
-                "Usage: cli-toolbox agent done",
-            ),
-            (
-                vec!["agent", "sandbox", "init", "--help"],
-                "Usage: cli-toolbox agent sandbox init",
-            ),
+    fn prints_sandbox_project_help() {
+        for command in [
+            "list", "create", "start", "stop", "restart", "add", "sync", "done",
         ] {
-            let (result, stdout, stderr) = run_args(&args);
+            let (result, stdout, stderr) = run_args(&["agent", "project", command, "--help"]);
             result.unwrap();
-            assert!(stdout.contains(usage), "{stdout}");
+            let usage = format!("Usage: cli-toolbox agent project {command}");
+            assert!(stdout.contains(&usage), "{stdout}");
             assert!(stderr.is_empty(), "{stderr}");
         }
-        let (_, stdout, _) = run_args(&["agent", "start", "--help"]);
+        let (_, stdout, _) = run_args(&["agent", "project", "--help"]);
         for text in [
-            "--home-from",
-            "--agent",
-            "--no-herdr",
-            "--flake",
-            "agent done",
+            "~/.agent-sandbox/projects/",
+            "worktrees.nix",
+            "project done",
         ] {
+            assert!(stdout.contains(text), "missing {text}: {stdout}");
+        }
+        let (_, stdout, _) = run_args(&["agent", "project", "start", "--help"]);
+        for text in ["--agent", "--no-herdr"] {
             assert!(stdout.contains(text), "missing {text}: {stdout}");
         }
     }
@@ -438,7 +417,8 @@ mod tests {
     fn generated_completion_includes_agent_worktree_subcommands() {
         let stdout = generate_to_string("bash").unwrap();
         for command in [
-            "worktree", "create", "list", "cleanup", "start", "sync", "done", "sandbox",
+            "worktree", "create", "list", "cleanup", "project", "start", "restart", "add", "sync",
+            "done",
         ] {
             assert!(stdout.contains(command), "missing {command}: {stdout}");
         }

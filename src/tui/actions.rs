@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::vm::{self, VmOptions};
+use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
 use crate::{Error, agent, aws, git, kitty, ssh};
 
 use super::app::{Action, Resource, ToolId};
@@ -62,6 +63,10 @@ impl Context {
             ToolId::AgentWorktrees => Ok(git::agent_worktrees(self.working_dir()?)?
                 .into_iter()
                 .map(Resource::Worktree)
+                .collect()),
+            ToolId::SandboxProjects => Ok(vm::statuses(&project::sandbox_dir()?)?
+                .into_iter()
+                .map(Resource::Project)
                 .collect()),
             _ => {
                 let home = dirs::home_dir().ok_or_else(|| {
@@ -148,64 +153,84 @@ impl Context {
                     incomplete: created.steps.iter().any(agent::Step::failed),
                 })
             }
-            Action::StartAgent => {
-                let created = vm::start_worktree(
-                    self.working_dir()?,
+            Action::CreateProject => {
+                let options = CreateOptions {
+                    name: None,
+                    repo: git::main_checkout(self.working_dir()?)?,
+                    template: None,
+                    source: None,
+                    ssh_key: SshKey::Auto,
+                };
+                let (project, created) = vm::create(
+                    &project::sandbox_dir()?,
                     &git::worktrees_root()?,
-                    &vm_options(),
+                    &options,
+                    None,
                     &mut std::io::stderr(),
                 )?;
-                let path = &created.worktree.path;
                 Ok(Done {
                     body: format!(
-                        "Sandboxed agent worktree: {}\nBranch: {}\n\n{}\n\n{}",
-                        path.display(),
-                        created.worktree.branch,
-                        steps_text(&created.steps),
-                        directory_instructions(path)
+                        "Sandbox project {}: {}\nFirst worktree: {}\n\n{}\n\nTailor the flake's toolchain to the repository (or run `cli-toolbox agent project create --ai` next time), then start the VM from the project's details.",
+                        project.name,
+                        project.dir.display(),
+                        created.worktree.path.display(),
+                        steps_text(&created.steps)
                     ),
-                    shell: cd_command(path),
+                    shell: None,
                     incomplete: created.steps.iter().any(agent::Step::failed),
                 })
             }
-            Action::SyncAgent(worktree) => {
-                vm::sync(
-                    self.working_dir()?,
-                    &worktree.name,
-                    &vm_options(),
-                    stdout,
-                    stderr,
-                )?;
-                Ok(Done::body(format!("Synced {}", worktree.branch)))
+            Action::StartProject(name) => {
+                let project = load_project(name)?;
+                // Nix and the VM stream progress to the released terminal.
+                let steps = vm::start(&project, &vm_options(), &mut std::io::stderr())?;
+                Ok(steps_done(format!("VM of {name}"), &steps))
             }
-            Action::UpAgent(worktree) => {
-                let steps = vm::up(
-                    self.working_dir()?,
-                    &worktree.name,
+            Action::StopProject(name) => {
+                let steps = vm::stop(&load_project(name)?)?;
+                Ok(steps_done(format!("VM of {name}"), &steps))
+            }
+            Action::RestartProject(name) => {
+                let project = load_project(name)?;
+                let steps = vm::restart(&project, &vm_options(), &mut std::io::stderr())?;
+                Ok(steps_done(format!("VM of {name}"), &steps))
+            }
+            Action::SyncProject(name) => {
+                let synced = vm::sync(&load_project(name)?, None)?;
+                vm::write_synced(&synced, stdout)?;
+                Ok(Done::body(format!("Synced the worktrees of {name}")))
+            }
+            Action::AddProjectWorktree(name) => {
+                let created = vm::add_worktree(
+                    &load_project(name)?,
+                    &git::worktrees_root()?,
+                    false,
                     &vm_options(),
                     &mut std::io::stderr(),
                 )?;
-                Ok(steps_done(format!("VM of {}", worktree.name), &steps))
+                Ok(Done {
+                    body: format!(
+                        "Created worktree: {}\nBranch: {}\n\n{}",
+                        created.worktree.path.display(),
+                        created.worktree.branch,
+                        steps_text(&created.steps)
+                    ),
+                    shell: None,
+                    incomplete: created.steps.iter().any(agent::Step::failed),
+                })
             }
-            Action::StopAgent(worktree) => {
-                let steps = vm::stop(self.working_dir()?, &worktree.name, &vm_options())?;
-                Ok(steps_done(format!("VM of {}", worktree.name), &steps))
+            Action::DoneProjectWorktree(name, worktree) => {
+                let steps = vm::done(&load_project(name)?, worktree, &vm_options(), stderr)?;
+                Ok(steps_done(
+                    format!(
+                        "Removed {}; branch {} kept for review",
+                        worktree.path.display(),
+                        worktree.branch
+                    ),
+                    &steps,
+                ))
             }
-            Action::DoneAgent(worktree) => {
-                vm::done(
-                    self.working_dir()?,
-                    &worktree.name,
-                    &vm_options(),
-                    stdout,
-                    stderr,
-                )?;
-                Ok(Done::body(format!(
-                    "Removed {}; branch {} kept for review",
-                    worktree.path.display(),
-                    worktree.branch
-                )))
-            }
-            Action::EnterWorktree(worktree) => Ok(Done {
+            Action::EnterWorktree(worktree) | Action::EnterProjectWorktree(worktree) => Ok(Done {
                 body: format!(
                     "Worktree: {}\n\n{}",
                     worktree.path.display(),
@@ -275,6 +300,10 @@ fn vm_options() -> VmOptions {
         herdr: true,
         ..VmOptions::default()
     }
+}
+
+fn load_project(name: &str) -> Result<Project, Error> {
+    project::load(&project::sandbox_dir()?, name)
 }
 
 fn steps_done(title: String, steps: &[agent::Step]) -> Done {

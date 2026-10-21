@@ -5,8 +5,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
 use super::app::{
-    App, Category, ConfirmState, DetailsState, PickerState, Resource, ResultState, Screen, ToolId,
-    branch_label,
+    App, Category, ConfirmState, DetailsState, PickerState, ProjectState, Resource, ResultState,
+    Screen, ToolId, branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -16,6 +16,7 @@ const ACCENT: Color = Color::Cyan;
 const HELP_SEARCH: &str = "↑↓ move · ⏎ run · F1 help · esc back";
 const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help · esc back";
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
+const HELP_PROJECTS: &str = "type to filter · ⏎ open · ^A new for this repo · F1 help · esc back";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
 const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
 const HELP_OVERLAY: &str = "any key closes help";
@@ -61,6 +62,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         Screen::Home => draw_home(frame, app),
         Screen::Picker(picker) => draw_picker(frame, app, picker),
         Screen::WorktreeDetails(details) => draw_details(frame, app, details),
+        Screen::ProjectDetails(project) => draw_project(frame, app, project),
         Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, app, confirm),
         Screen::Result(result) => draw_result(frame, result),
     }
@@ -111,9 +113,17 @@ fn home_help() -> String {
 
 fn details_help(app: &App) -> &'static str {
     if app.print_shell {
-        "⏎ cd & exit · s sync · D done · d remove · ? help · esc back"
+        "⏎ cd & exit · d remove · ? help · esc back"
     } else {
-        "⏎ cd here · s sync · D done · d remove · ? help · esc back"
+        "⏎ cd here · d remove · ? help · esc back"
+    }
+}
+
+fn project_help(state: &ProjectState) -> &'static str {
+    if state.status.vm.is_some() {
+        "x stop · r restart · s sync · a add · ⏎ cd · D done · ? help · esc back"
+    } else {
+        "u start · a add · ⏎ cd · D done · ? help · esc back"
     }
 }
 
@@ -154,8 +164,12 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entries.extend([
                     entry("⏎", "worktree details"),
                     entry("^A", "new worktree (init + Herdr)"),
-                    entry("^V", "new sandboxed agent (VM + herdr machine)"),
                     entry("^D", "remove worktree"),
+                ]);
+            } else if picker.tool == ToolId::SandboxProjects {
+                entries.extend([
+                    entry("⏎", "project details"),
+                    entry("^A", "new project for the launch directory's repository"),
                 ]);
             } else {
                 entries.push(entry("⏎", "select"));
@@ -172,10 +186,24 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 },
             ),
             entry("d", "remove worktree"),
-            entry("s", "sync the agent's commits to the branch"),
-            entry("u x", "boot / stop the sandbox VM"),
-            entry("D", "done: sync, stop the VM, remove; keep the branch"),
             entry("↑↓ PgUp PgDn", "scroll"),
+            entry("esc", "back to the list"),
+        ],
+        Screen::ProjectDetails(_) => vec![
+            entry("↑↓ j k", "select a worktree"),
+            entry("u", "start the VM and open the worktrees in herdr"),
+            entry("x r", "stop / restart the VM"),
+            entry("s", "sync the agents' commits to the branches"),
+            entry("a", "add a worktree (mounted on the next start)"),
+            entry(
+                "⏎ c",
+                if app.print_shell {
+                    "cd into the worktree and exit"
+                } else {
+                    "show the cd command"
+                },
+            ),
+            entry("D", "done: sync and remove the worktree; keep its branch"),
             entry("esc", "back to the list"),
         ],
         Screen::ConfirmCleanup(_) => vec![
@@ -338,10 +366,10 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
     } else {
         format!("{}/{}", visible.len(), picker.resources.len())
     };
-    let help = if picker.tool == ToolId::AgentWorktrees {
-        HELP_WORKTREES
-    } else {
-        HELP_PICKER
+    let help = match picker.tool {
+        ToolId::AgentWorktrees => HELP_WORKTREES,
+        ToolId::SandboxProjects => HELP_PROJECTS,
+        _ => HELP_PICKER,
     };
     let block = panel(
         breadcrumb(picker.tool.category(), picker.tool.picker_title()),
@@ -360,6 +388,8 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
         ))
     } else if picker.resources.is_empty() && picker.tool == ToolId::AgentWorktrees {
         Some("No agent worktrees yet. Press Ctrl-A to create one.".to_string())
+    } else if picker.resources.is_empty() && picker.tool == ToolId::SandboxProjects {
+        Some("No sandbox projects yet. Press Ctrl-A to create one for this repository.".to_string())
     } else if picker.resources.is_empty() {
         Some(format!(
             "No {} found. Press F5 to refresh or Esc to go back.",
@@ -386,6 +416,7 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
         .iter()
         .filter_map(|resource| match resource {
             Resource::Worktree(worktree) => Some(clean_text(&worktree.name).chars().count()),
+            Resource::Project(status) => Some(clean_text(&status.project.name).chars().count()),
             _ => None,
         })
         .max()
@@ -420,6 +451,30 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
             ),
             clean_text(&worktree.path.display().to_string()).dark_gray(),
         ]),
+        Resource::Project(status) => {
+            let vm = match &status.vm {
+                Some(vm) => vm
+                    .ssh_port
+                    .map(|port| format!("[running :{port}]  "))
+                    .unwrap_or_else(|| "[running]  ".into()),
+                None => "[stopped]  ".into(),
+            };
+            let repo = status
+                .project
+                .repo
+                .as_ref()
+                .map(|repo| repo.display().to_string())
+                .unwrap_or_default();
+            Line::from(vec![
+                Span::raw(format!(
+                    " {:<name_width$}  ",
+                    clean_text(&status.project.name)
+                )),
+                Span::styled(vm, Style::new().fg(ACCENT)),
+                Span::raw(format!("{} worktree(s)  ", status.worktrees.len())),
+                clean_text(&repo).dark_gray(),
+            ])
+        }
         _ => Line::from(format!(" {}", clean_text(&resource.label()))),
     }
 }
@@ -445,6 +500,56 @@ fn details_paragraph(details: &DetailsState) -> Paragraph<'static> {
         field("Branch", branch_label(&details.worktree)),
     ];
     Paragraph::new(Text::from(content)).wrap(Wrap { trim: true })
+}
+
+fn draw_project(frame: &mut Frame<'_>, app: &App, state: &ProjectState) {
+    let area = frame.area();
+    let status = &state.status;
+    let block = panel(
+        breadcrumb(Category::Sandbox, &status.project.name),
+        status.project.dir.display().to_string(),
+        project_help(state),
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let repo = status
+        .project
+        .repo
+        .as_ref()
+        .map(|repo| repo.display().to_string())
+        .unwrap_or_else(|| "(none: a hand-written flake)".into());
+    let mut fields = vec![field("Repo", &repo), field("VM", &status.vm_text())];
+    if let Some(error) = &status.error {
+        fields.push(Line::from(clean_text(error)).style(Style::new().fg(Color::Red)));
+    }
+    let [top, list] = Layout::vertical([
+        Constraint::Length(fields.len() as u16 + 1),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
+    fields.push(Line::from("Worktrees".bold()));
+    frame.render_widget(Paragraph::new(fields), top);
+    if status.worktrees.is_empty() {
+        let hint = if app.loading.is_some() {
+            "Reading…"
+        } else {
+            "No worktrees. Press a to add one."
+        };
+        frame.render_widget(Paragraph::new(hint.yellow()), list);
+        return;
+    }
+    let width = status
+        .worktrees
+        .iter()
+        .map(|worktree| clean_text(&worktree.name).chars().count())
+        .max()
+        .unwrap_or_default();
+    let items: Vec<ListItem> = status
+        .worktrees
+        .iter()
+        .map(|worktree| ListItem::new(resource_line(&Resource::Worktree(worktree.clone()), width)))
+        .collect();
+    render_list(frame, list, items, state.selected);
 }
 
 fn field(name: &str, value: &str) -> Line<'static> {
@@ -714,6 +819,50 @@ mod tests {
         app.loaded(ToolId::AgentWorktrees, Ok(Vec::new()));
         let text = rendered(&app, 80, super::HEIGHT);
         assert!(text.contains("Press Ctrl-A to create one"), "{text}");
+    }
+
+    #[test]
+    fn renders_projects_and_their_worktrees() {
+        let worktree = crate::git::AgentWorktree {
+            name: "demo-agent-wt".into(),
+            path: PathBuf::from("/wt/demo-agent-wt"),
+            branch: "demo-agent-wt".into(),
+        };
+        let status = crate::agent::vm::ProjectStatus {
+            project: crate::sandbox::project::Project {
+                name: "demo".into(),
+                dir: PathBuf::from("/sandbox/projects/demo"),
+                repo: Some(PathBuf::from("/p/demo")),
+                state_dir: PathBuf::from("/sandbox/state/demo"),
+            },
+            worktrees: vec![worktree],
+            vm: None,
+            restart_needed: false,
+            error: None,
+        };
+        let mut app = App::new("/tmp/project".into());
+        app.loaded(ToolId::SandboxProjects, Ok(vec![Resource::Project(status)]));
+        let list = rendered(&app, 100, super::HEIGHT);
+        assert!(
+            list.contains("demo  [stopped]  1 worktree(s)  /p/demo"),
+            "{list}"
+        );
+        assert!(list.contains("^A new for this repo"), "{list}");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let details = rendered(&app, 100, super::HEIGHT);
+        for want in [
+            "Repo    /p/demo",
+            "VM      stopped",
+            "demo-agent-wt",
+            "u start",
+        ] {
+            assert!(details.contains(want), "missing {want}: {details}");
+        }
+
+        let mut empty = App::new("/tmp/project".into());
+        empty.loaded(ToolId::SandboxProjects, Ok(Vec::new()));
+        assert!(rendered(&empty, 100, super::HEIGHT).contains("No sandbox projects yet"));
     }
 
     #[test]

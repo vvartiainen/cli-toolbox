@@ -4,9 +4,9 @@
 cli-toolbox tui
 ```
 
-Select AWS profiles, switch Kitty sessions, connect to SSH hosts, or create, inspect,
-enter, and remove agent worktrees. Worktree operations use the directory from which
-you launched the toolbox.
+Select AWS profiles, switch Kitty sessions, connect to SSH hosts, create, inspect,
+enter, and remove agent worktrees, or run sandbox project VMs. Worktree operations use
+the directory from which you launched the toolbox.
 
 The launcher opens in a compact panel below your prompt instead of taking over the
 whole screen. It always uses ratatui, whether or not `fzf` is installed. It draws on
@@ -15,12 +15,12 @@ temporarily take over the terminal; the launcher resumes when they finish.
 
 ## Keys
 
-Actions are grouped into tabs: **AWS** (`a`), **Agents** (`i`, agent worktrees) and
-**Terminal** (`t`, Kitty sessions and SSH).
+Actions are grouped into tabs: **AWS** (`a`), **Agents** (`i`, agent worktrees),
+**Sandbox** (`s`, sandbox projects) and **Terminal** (`t`, Kitty sessions and SSH).
 
 | Key | Action |
 | --- | --- |
-| `a` / `i` / `t` | Switch to a tab |
+| `a` / `i` / `s` / `t` | Switch to a tab |
 | `[` / `]`, Left/Right, Tab, `h`/`l` | Previous / next tab |
 | `1`–`9` | Run that action directly, e.g. `i` `1` |
 | Up/Down, `j`/`k`, Ctrl-P/Ctrl-N | Move |
@@ -43,9 +43,19 @@ Manages the agent worktrees of the current directory (see [agents.md](agents.md)
   closes its Herdr workspace.
 - Removal asks for confirmation: `y` removes and `n` or Esc cancels. Tab or
   Left/Right with Enter also works.
-- Ctrl-V starts a sandboxed agent (`agent start`). In a worktree's details, `s`
-  syncs the agent's commits, `u` and `x` boot and stop its VM, and `D` runs
-  `agent done`. The agent kind comes from `CLI_TOOLBOX_AGENT`.
+
+## Sandbox › Projects
+
+Lists the sandbox projects in `~/.agent-sandbox/projects/` with their VM state and
+worktree count (see [agents.md](agents.md#sandbox-projects)):
+
+- Ctrl-A creates a project for the launch directory's repository, with its first
+  worktree (`agent project create`).
+- Enter opens a project: its repository, VM state and worktrees. There, `u` starts
+  the VM and opens every worktree in herdr, `x` stops it, `r` restarts it to mount
+  worktree changes, `s` syncs the agents' commits, and `a` adds a worktree. Up/Down
+  select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
+  `agent project done` on it. The agent kind comes from `CLI_TOOLBOX_AGENT`.
 
 ## Applying exports and directory changes
 

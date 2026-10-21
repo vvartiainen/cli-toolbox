@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::agent::vm::ProjectStatus;
 use crate::aws::Profile;
 use crate::git::AgentWorktree;
 use crate::kitty::Choice;
@@ -17,16 +18,18 @@ const PAGE: isize = 8;
 pub(crate) enum Category {
     Aws,
     Agents,
+    Sandbox,
     Terminal,
 }
 
 impl Category {
-    pub(crate) const ALL: [Self; 3] = [Self::Aws, Self::Agents, Self::Terminal];
+    pub(crate) const ALL: [Self; 4] = [Self::Aws, Self::Agents, Self::Sandbox, Self::Terminal];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Aws => "AWS",
             Self::Agents => "Agents",
+            Self::Sandbox => "Sandbox",
             Self::Terminal => "Terminal",
         }
     }
@@ -36,6 +39,7 @@ impl Category {
         match self {
             Self::Aws => 'a',
             Self::Agents => 'i',
+            Self::Sandbox => 's',
             Self::Terminal => 't',
         }
     }
@@ -68,14 +72,16 @@ impl Category {
 pub(crate) enum ToolId {
     AwsProfile,
     AgentWorktrees,
+    SandboxProjects,
     KittySession,
     SshConnect,
 }
 
 impl ToolId {
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::AwsProfile,
         Self::AgentWorktrees,
+        Self::SandboxProjects,
         Self::KittySession,
         Self::SshConnect,
     ];
@@ -84,6 +90,7 @@ impl ToolId {
         match self {
             Self::AwsProfile => Category::Aws,
             Self::AgentWorktrees => Category::Agents,
+            Self::SandboxProjects => Category::Sandbox,
             Self::KittySession | Self::SshConnect => Category::Terminal,
         }
     }
@@ -94,6 +101,7 @@ impl ToolId {
             Self::KittySession => "Switch Kitty session",
             Self::SshConnect => "SSH connect",
             Self::AgentWorktrees => "Worktrees",
+            Self::SandboxProjects => "Projects",
         }
     }
 
@@ -102,8 +110,9 @@ impl ToolId {
             Self::AwsProfile => "SSO login when needed, then AWS_PROFILE export",
             Self::KittySession => "Switch to a .kitty-session file from your home directory",
             Self::SshConnect => "Connect to a configured host with Kitty's SSH kitten",
-            Self::AgentWorktrees => {
-                "Create, inspect, cd into or remove agent worktrees and their sandbox VMs"
+            Self::AgentWorktrees => "Create, inspect, cd into or remove agent worktrees",
+            Self::SandboxProjects => {
+                "Project VMs in ~/.agent-sandbox: create, start, add worktrees, sync"
             }
         }
     }
@@ -114,6 +123,7 @@ impl ToolId {
             Self::KittySession => "Kitty sessions",
             Self::SshConnect => "SSH hosts",
             Self::AgentWorktrees => "Agent worktrees",
+            Self::SandboxProjects => "Sandbox projects",
         }
     }
 }
@@ -125,6 +135,7 @@ pub(crate) enum Resource {
     Kitty(Choice),
     Ssh(Host),
     Worktree(AgentWorktree),
+    Project(ProjectStatus),
 }
 
 impl Resource {
@@ -134,6 +145,7 @@ impl Resource {
             Self::Kitty(choice) => choice.label.clone(),
             Self::Ssh(host) => host.name.clone(),
             Self::Worktree(worktree) => worktree_label(worktree),
+            Self::Project(status) => status.project.name.clone(),
         }
     }
 
@@ -143,6 +155,7 @@ impl Resource {
             Self::Kitty(choice) => ResourceIdentity::Path(choice.path.clone()),
             Self::Ssh(host) => ResourceIdentity::String(host.name.clone()),
             Self::Worktree(worktree) => ResourceIdentity::Path(worktree.path.clone()),
+            Self::Project(status) => ResourceIdentity::Path(status.project.dir.clone()),
         }
     }
 
@@ -153,6 +166,7 @@ impl Resource {
                 | (ToolId::KittySession, Self::Kitty(_))
                 | (ToolId::SshConnect, Self::Ssh(_))
                 | (ToolId::AgentWorktrees, Self::Worktree(_))
+                | (ToolId::SandboxProjects, Self::Project(_))
         )
     }
 }
@@ -166,13 +180,17 @@ pub(crate) enum Action {
     CreateWorktree,
     EnterWorktree(AgentWorktree),
     Cleanup(AgentWorktree),
-    /// A new worktree with its own sandbox VM and herdr agent.
-    StartAgent,
-    SyncAgent(AgentWorktree),
-    StopAgent(AgentWorktree),
-    UpAgent(AgentWorktree),
-    /// Sync, stop the VM and remove the worktree, keeping its branch.
-    DoneAgent(AgentWorktree),
+    /// A sandbox project for the launch directory's repository.
+    CreateProject,
+    /// The following name a sandbox project.
+    StartProject(String),
+    StopProject(String),
+    RestartProject(String),
+    SyncProject(String),
+    AddProjectWorktree(String),
+    /// Sync and remove a project's worktree, keeping its branch.
+    DoneProjectWorktree(String, AgentWorktree),
+    EnterProjectWorktree(AgentWorktree),
 }
 
 impl Action {
@@ -180,14 +198,17 @@ impl Action {
     /// return to the home screen.
     pub(crate) fn return_tool(&self) -> Option<ToolId> {
         match self {
-            Self::CreateWorktree
-            | Self::EnterWorktree(_)
-            | Self::Cleanup(_)
-            | Self::StartAgent
-            | Self::SyncAgent(_)
-            | Self::StopAgent(_)
-            | Self::UpAgent(_)
-            | Self::DoneAgent(_) => Some(ToolId::AgentWorktrees),
+            Self::CreateWorktree | Self::EnterWorktree(_) | Self::Cleanup(_) => {
+                Some(ToolId::AgentWorktrees)
+            }
+            Self::CreateProject
+            | Self::StartProject(_)
+            | Self::StopProject(_)
+            | Self::RestartProject(_)
+            | Self::SyncProject(_)
+            | Self::AddProjectWorktree(_)
+            | Self::DoneProjectWorktree(..)
+            | Self::EnterProjectWorktree(_) => Some(ToolId::SandboxProjects),
             Self::Aws(_) | Self::Kitty(_) | Self::Ssh(_) => None,
         }
     }
@@ -269,6 +290,20 @@ pub(crate) struct DetailsState {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ProjectState {
+    pub(crate) status: ProjectStatus,
+    /// The highlighted worktree.
+    pub(crate) selected: usize,
+    pub(crate) return_picker: PickerState,
+}
+
+impl ProjectState {
+    pub(crate) fn selected_worktree(&self) -> Option<&AgentWorktree> {
+        self.status.worktrees.get(self.selected)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ResultState {
     pub(crate) action: Action,
     pub(crate) title: String,
@@ -282,6 +317,7 @@ pub(crate) enum Screen {
     Home,
     Picker(PickerState),
     WorktreeDetails(DetailsState),
+    ProjectDetails(ProjectState),
     ConfirmCleanup(ConfirmState),
     Result(ResultState),
 }
@@ -406,6 +442,7 @@ impl App {
             Screen::Home => self.handle_home_key(key),
             Screen::Picker(_) => self.handle_picker_key(key),
             Screen::WorktreeDetails(_) => self.handle_details_key(key),
+            Screen::ProjectDetails(_) => self.handle_project_key(key),
             Screen::ConfirmCleanup(_) => self.handle_confirm_key(key),
             Screen::Result(_) => self.handle_result_key(key),
         }
@@ -416,7 +453,10 @@ impl App {
         match self.screen {
             Screen::Home => !self.searching,
             Screen::Picker(_) => false,
-            Screen::WorktreeDetails(_) | Screen::ConfirmCleanup(_) | Screen::Result(_) => true,
+            Screen::WorktreeDetails(_)
+            | Screen::ProjectDetails(_)
+            | Screen::ConfirmCleanup(_)
+            | Screen::Result(_) => true,
         }
     }
 
@@ -516,6 +556,9 @@ impl App {
         if let Some(effect) = self.handle_worktree_picker_key(key) {
             return effect;
         }
+        if let Some(effect) = self.handle_project_picker_key(key) {
+            return effect;
+        }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
         {
@@ -564,6 +607,18 @@ impl App {
                         });
                         Effect::None
                     }
+                    (ToolId::SandboxProjects, Resource::Project(status)) => {
+                        let return_picker = self
+                            .picker()
+                            .cloned()
+                            .unwrap_or_else(|| PickerState::new(ToolId::SandboxProjects));
+                        self.screen = Screen::ProjectDetails(ProjectState {
+                            status,
+                            selected: 0,
+                            return_picker,
+                        });
+                        Effect::None
+                    }
                     _ => Effect::None,
                 }
             }
@@ -583,10 +638,6 @@ impl App {
             KeyCode::Char('a') => {
                 self.loading = None;
                 Some(Effect::Execute(Action::CreateWorktree))
-            }
-            KeyCode::Char('v') => {
-                self.loading = None;
-                Some(Effect::Execute(Action::StartAgent))
             }
             KeyCode::Char('d') => {
                 let Some(worktree) = picker.selected_worktree() else {
@@ -617,18 +668,6 @@ impl App {
             KeyCode::Enter | KeyCode::Char('c') => {
                 return Effect::Execute(Action::EnterWorktree(details.worktree.clone()));
             }
-            KeyCode::Char('s') => {
-                return Effect::Execute(Action::SyncAgent(details.worktree.clone()));
-            }
-            KeyCode::Char('u') => {
-                return Effect::Execute(Action::UpAgent(details.worktree.clone()));
-            }
-            KeyCode::Char('x') => {
-                return Effect::Execute(Action::StopAgent(details.worktree.clone()));
-            }
-            KeyCode::Char('D') => {
-                return Effect::Execute(Action::DoneAgent(details.worktree.clone()));
-            }
             KeyCode::Char('d') => {
                 self.screen = Screen::ConfirmCleanup(ConfirmState {
                     worktree: details.worktree.clone(),
@@ -637,6 +676,56 @@ impl App {
                 });
             }
             KeyCode::Esc => self.screen = Screen::Picker(details.return_picker.clone()),
+            _ => {}
+        }
+        Effect::None
+    }
+
+    /// Ctrl shortcuts of the project list. Plain keys filter the list.
+    fn handle_project_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        self.picker()
+            .filter(|picker| picker.tool == ToolId::SandboxProjects)?;
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        match key.code {
+            KeyCode::Char('a') => {
+                self.loading = None;
+                Some(Effect::Execute(Action::CreateProject))
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_project_key(&mut self, key: KeyEvent) -> Effect {
+        let Screen::ProjectDetails(state) = &mut self.screen else {
+            return Effect::None;
+        };
+        let count = state.status.worktrees.len();
+        if list_key(key, &mut state.selected, count) {
+            return Effect::None;
+        }
+        let name = state.status.project.name.clone();
+        let worktree = state.selected_worktree().cloned();
+        match key.code {
+            KeyCode::Char('k') => move_selection(&mut state.selected, count, -1),
+            KeyCode::Char('j') => move_selection(&mut state.selected, count, 1),
+            KeyCode::Char('u') => return Effect::Execute(Action::StartProject(name)),
+            KeyCode::Char('x') => return Effect::Execute(Action::StopProject(name)),
+            KeyCode::Char('r') => return Effect::Execute(Action::RestartProject(name)),
+            KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
+            KeyCode::Char('a') => return Effect::Execute(Action::AddProjectWorktree(name)),
+            KeyCode::Enter | KeyCode::Char('c') => {
+                if let Some(worktree) = worktree {
+                    return Effect::Execute(Action::EnterProjectWorktree(worktree));
+                }
+            }
+            KeyCode::Char('D') => {
+                if let Some(worktree) = worktree {
+                    return Effect::Execute(Action::DoneProjectWorktree(name, worktree));
+                }
+            }
+            KeyCode::Esc => self.screen = Screen::Picker(state.return_picker.clone()),
             _ => {}
         }
         Effect::None
@@ -811,6 +900,7 @@ pub(crate) fn branch_label(worktree: &AgentWorktree) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Action, App, Category, Effect, Resource, Screen, ToolId};
+    use crate::agent::vm::ProjectStatus;
     use crate::aws::Profile;
     use crate::git::AgentWorktree;
     use crate::kitty::Choice;
@@ -931,7 +1021,12 @@ mod tests {
     #[test]
     fn brackets_cycle_tabs_both_ways() {
         let mut app = App::new("/repo".into());
-        for expected in [Category::Agents, Category::Terminal, Category::Aws] {
+        for expected in [
+            Category::Agents,
+            Category::Sandbox,
+            Category::Terminal,
+            Category::Aws,
+        ] {
             app.handle_key(key(KeyCode::Char(']')));
             assert_eq!(app.category, expected);
         }
@@ -970,27 +1065,69 @@ mod tests {
         );
     }
 
+    fn project(name: &str, worktrees: &[AgentWorktree]) -> ProjectStatus {
+        ProjectStatus {
+            project: crate::sandbox::project::Project {
+                name: name.into(),
+                dir: PathBuf::from(format!("/sandbox/projects/{name}")),
+                repo: Some(PathBuf::from(format!("/p/{name}"))),
+                state_dir: PathBuf::from(format!("/sandbox/state/{name}")),
+            },
+            worktrees: worktrees.to_vec(),
+            vm: None,
+            restart_needed: false,
+            error: None,
+        }
+    }
+
     #[test]
-    fn worktree_details_drive_the_sandbox_vm() {
-        let tree = worktree("repo-agent-wt");
-        let mut app = worktree_manager(std::slice::from_ref(&tree));
+    fn sandbox_tab_lists_projects_and_drives_their_vm() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.category, Category::Sandbox);
         assert_eq!(
-            app.handle_key(ctrl('v')),
-            Effect::Execute(Action::StartAgent)
+            app.handle_key(key(KeyCode::Char('1'))),
+            Effect::Load(ToolId::SandboxProjects)
         );
-        let mut app = worktree_manager(std::slice::from_ref(&tree));
+        let first = worktree("demo-agent-wt");
+        let second = worktree("demo-agent-wt-2");
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(project(
+                "demo",
+                &[first.clone(), second.clone()],
+            ))]),
+        );
+        assert_eq!(
+            app.handle_key(ctrl('a')),
+            Effect::Execute(Action::CreateProject)
+        );
+
         app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.screen, Screen::ProjectDetails(_)));
         for (ch, action) in [
-            ('s', Action::SyncAgent(tree.clone())),
-            ('u', Action::UpAgent(tree.clone())),
-            ('x', Action::StopAgent(tree.clone())),
-            ('D', Action::DoneAgent(tree.clone())),
+            ('u', Action::StartProject("demo".into())),
+            ('x', Action::StopProject("demo".into())),
+            ('r', Action::RestartProject("demo".into())),
+            ('s', Action::SyncProject("demo".into())),
+            ('a', Action::AddProjectWorktree("demo".into())),
+            ('c', Action::EnterProjectWorktree(first.clone())),
         ] {
             assert_eq!(
-                app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT)),
+                app.handle_key(key(KeyCode::Char(ch))),
                 Effect::Execute(action)
             );
         }
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)),
+            Effect::Execute(Action::DoneProjectWorktree("demo".into(), second))
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            &app.screen,
+            Screen::Picker(picker) if picker.tool == ToolId::SandboxProjects
+        ));
     }
 
     #[test]
@@ -1032,14 +1169,22 @@ mod tests {
             Action::CreateWorktree,
             Action::EnterWorktree(worktree("a")),
             Action::Cleanup(worktree("a")),
-            Action::StartAgent,
-            Action::SyncAgent(worktree("a")),
-            Action::DoneAgent(worktree("a")),
         ] {
             app.finished(&action, "Done".into(), "done".into(), false);
             assert_eq!(
                 app.handle_key(key(KeyCode::Esc)),
                 Effect::Load(ToolId::AgentWorktrees)
+            );
+        }
+        for action in [
+            Action::CreateProject,
+            Action::SyncProject("demo".into()),
+            Action::DoneProjectWorktree("demo".into(), worktree("a")),
+        ] {
+            app.finished(&action, "Done".into(), "done".into(), false);
+            assert_eq!(
+                app.handle_key(key(KeyCode::Esc)),
+                Effect::Load(ToolId::SandboxProjects)
             );
         }
         app.finished(
