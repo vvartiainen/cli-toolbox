@@ -94,6 +94,40 @@ pub(crate) fn open_machine_workspace(
     Ok(created.workspace.workspace_id)
 }
 
+/// Remove the saved machine labelled `label` from Herdr. Returns whether one
+/// was saved.
+pub(crate) fn remove_machine(label: &str) -> Result<bool, Error> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    exec::run_captured(
+        "herdr",
+        &["machine", "list", "--json"],
+        None,
+        &mut stdout,
+        &mut stderr,
+    )?;
+    let Some(id) = machine_id(&String::from_utf8_lossy(&stdout), label)? else {
+        return Ok(false);
+    };
+    exec::combined_output("herdr", &["machine", "remove", &id], None)?;
+    Ok(true)
+}
+
+#[derive(Deserialize)]
+struct SavedMachine {
+    id: String,
+    label: String,
+}
+
+fn machine_id(json: &str, label: &str) -> Result<Option<String>, Error> {
+    let machines: Vec<SavedMachine> = serde_json::from_str(json)
+        .map_err(|err| Error::msg(format!("parse herdr machine list: {err}")))?;
+    Ok(machines
+        .into_iter()
+        .find(|machine| machine.label == label)
+        .map(|machine| machine.id))
+}
+
 #[derive(Deserialize)]
 struct CreateResponse {
     result: Created,
@@ -189,6 +223,21 @@ mod tests {
         let created = workspace_created(json).unwrap();
         assert_eq!(created.workspace.workspace_id, "w2");
         assert_eq!(created.root_pane.pane_id, "w2:p1");
+    }
+
+    #[test]
+    fn finds_a_saved_machine_by_label() {
+        let json = r#"[
+            {"id":"1261f5","label":"agent-demo","target":"ssh://agent@127.0.0.1:2300","session":"default","enabled":true,"selected":false},
+            {"id":"9a0b1c","label":"build-box","target":"build","session":"default","enabled":true,"selected":true}
+        ]"#;
+        assert_eq!(
+            machine_id(json, "agent-demo").unwrap(),
+            Some("1261f5".into())
+        );
+        assert_eq!(machine_id(json, "agent-other").unwrap(), None);
+        assert_eq!(machine_id("[]", "agent-demo").unwrap(), None);
+        assert!(machine_id("not json", "agent-demo").is_err());
     }
 
     #[test]

@@ -186,13 +186,22 @@ pub(crate) fn start(
     Ok(steps)
 }
 
-/// Stop the project's VM; worktrees and the guest home stay.
+/// Stop the project's VM and remove its machine from the host herdr;
+/// worktrees and the guest home stay. The next start adds the machine again.
 pub(crate) fn stop(project: &Project) -> Result<Vec<Step>, Error> {
-    if sandbox::vm_for(&running_vms(), &project.dir).is_none() {
+    let Some(vm) = sandbox::vm_for(&running_vms(), &project.dir) else {
         return Ok(vec![Step::Skipped("vm: not running".into())]);
-    }
+    };
     sandbox::stop(&project.dir)?;
-    Ok(vec![Step::Done(format!("vm: stopped {}", project.name))])
+    let mut steps = vec![Step::Done(format!("vm: stopped {}", project.name))];
+    if herdr::available() {
+        steps.push(match herdr::remove_machine(&vm.name) {
+            Ok(true) => Step::Done(format!("herdr: removed machine {}", vm.name)),
+            Ok(false) => Step::Skipped(format!("herdr: machine {} not saved", vm.name)),
+            Err(err) => Step::Failed(format!("herdr: remove machine {}: {err}", vm.name)),
+        });
+    }
+    Ok(steps)
 }
 
 /// Stop and start the VM, so it mounts the current worktrees.
