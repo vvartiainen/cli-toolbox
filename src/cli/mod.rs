@@ -1,4 +1,5 @@
 mod agent;
+mod agents;
 mod aws;
 mod complete;
 mod git;
@@ -11,6 +12,7 @@ use std::io::Write;
 use clap::{Parser, Subcommand};
 
 use self::agent::AgentCmd;
+use self::agents::AgentsCmd;
 use self::aws::AwsCmd;
 use self::complete::CompletionCmd;
 use self::git::GitCmd;
@@ -39,6 +41,8 @@ enum Commands {
     Aws(AwsCmd),
     /// AI agent helpers.
     Agent(AgentCmd),
+    /// Project MCP and skill selections through Rulesync.
+    Agents(AgentsCmd),
     /// Git helpers (hidden alias for `agent worktree`).
     #[command(hide = true)]
     Git(GitCmd),
@@ -82,6 +86,7 @@ impl Commands {
             Self::Tui(cmd) => cmd.run(stdout, stderr),
             Self::Aws(cmd) => cmd.run(stdout, stderr),
             Self::Agent(cmd) => cmd.run(stdout, stderr),
+            Self::Agents(cmd) => cmd.run(stdout, stderr),
             Self::Git(cmd) => cmd.run(stdout, stderr),
             Self::Kitty(cmd) => cmd.run(stdout, stderr),
             Self::Ssh(cmd) => cmd.run(stdout, stderr),

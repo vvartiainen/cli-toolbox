@@ -1,4 +1,5 @@
 mod agent;
+mod agents;
 mod aws;
 mod cli;
 mod error;

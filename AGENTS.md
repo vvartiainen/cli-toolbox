@@ -20,6 +20,7 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 2. Write the implementation
 3. Keep iterating the implementation until the tests pass
 4. Run `just fmt` and fix the issues
+5. Commit the changes using short conventional commit message
 
 ## Repo structure
 

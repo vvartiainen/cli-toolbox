@@ -1,5 +1,8 @@
 # Agent worktrees and sandboxed agents
 
+For the `agents` command that manages project MCP servers and skills, see
+[Project MCP and skills](agent-tools.md).
+
 ## `agent worktree`
 
 Manage git worktrees for AI agents. Running the command without a subcommand prints
