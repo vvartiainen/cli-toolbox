@@ -540,9 +540,47 @@ pub(crate) fn run_setup_agent(
     exec::run_on_stderr_in(agent, &[&prompt], Some(repo), &[])
 }
 
+/// The editor command: `$VISUAL`, then `$EDITOR`, then `vi`, split into
+/// words so values such as `code -w` work.
+pub(crate) fn editor() -> Vec<String> {
+    editor_from(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok())
+}
+
+fn editor_from(visual: Option<String>, editor: Option<String>) -> Vec<String> {
+    [visual, editor]
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            value
+                .split_whitespace()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .find(|words| !words.is_empty())
+        .unwrap_or_else(|| vec!["vi".into()])
+}
+
+/// Open the project's flake in the editor, in the project directory.
+pub(crate) fn edit_flake(project: &Project) -> Result<(), Error> {
+    let editor = editor();
+    let flake = project.dir.join("flake.nix");
+    let mut args: Vec<&str> = editor[1..].iter().map(String::as_str).collect();
+    let flake = flake.to_string_lossy();
+    args.push(&flake);
+    exec::run_on_stderr_in(&editor[0], &args, Some(&project.dir), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_prefers_visual_then_editor_then_vi() {
+        let some = |value: &str| Some(value.to_string());
+        assert_eq!(editor_from(some("code -w"), some("nvim")), ["code", "-w"]);
+        assert_eq!(editor_from(some(" "), some("nvim")), ["nvim"]);
+        assert_eq!(editor_from(None, None), ["vi"]);
+    }
 
     const TEMPLATE: &str = r#"{
   inputs.agent-sandbox.url = "path:/Users/you/prog/agent-sandbox";

@@ -51,7 +51,11 @@ Lists the sandbox projects in `~/.agent-sandbox/projects/` with their VM state a
 worktree count (see [agents.md](agents.md#sandbox-projects)):
 
 - Ctrl-A creates a project for the launch directory's repository, with its first
-  worktree (`agent project create`).
+  worktree (`agent project create`). It then asks how to tailor `flake.nix` to the
+  repository before the first start: `a` runs a coding agent with agent-sandbox's
+  setup instructions (`CLI_TOOLBOX_AGENT`, default claude; like `--ai`), `e` opens
+  it in `$VISUAL` or `$EDITOR` (default vi), and `s` skips. Either way the
+  project's details open next, ready for `u`. The VM does not start by itself.
 - Enter opens a project: its repository, VM state and worktrees. There, `u` starts
   the VM and opens every worktree in herdr, `x` stops it, `r` restarts it to mount
   worktree changes, `s` syncs the agents' commits, and `a` adds a worktree. Up/Down

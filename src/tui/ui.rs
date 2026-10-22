@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Pa
 
 use super::app::{
     App, Category, ConfirmState, DetailsState, PickerState, ProjectState, Resource, ResultState,
-    Screen, ToolId, branch_label,
+    Screen, TailorState, ToolId, branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -18,6 +18,7 @@ const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
 const HELP_PROJECTS: &str = "type to filter · ⏎ open · ^A new for this repo · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
+const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
 const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
 const HELP_OVERLAY: &str = "any key closes help";
@@ -64,6 +65,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         Screen::Picker(picker) => draw_picker(frame, app, picker),
         Screen::WorktreeDetails(details) => draw_details(frame, app, details),
         Screen::ProjectDetails(project) => draw_project(frame, app, project),
+        Screen::TailorFlake(tailor) => draw_tailor(frame, tailor),
         Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, app, confirm),
         Screen::Result(result) => draw_result(frame, result),
     }
@@ -214,6 +216,14 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             ),
             entry("D", "done: sync and remove the worktree; keep its branch"),
             entry("esc", "back to the list"),
+        ],
+        Screen::TailorFlake(_) => vec![
+            entry(
+                "a",
+                "a coding agent tailors flake.nix (agent-sandbox setup instructions)",
+            ),
+            entry("e", "edit flake.nix in $VISUAL or $EDITOR"),
+            entry("s esc", "skip and open the project"),
         ],
         Screen::ConfirmCleanup(_) => vec![
             entry("y", "remove"),
@@ -550,7 +560,11 @@ fn draw_project(frame: &mut Frame<'_>, app: &App, state: &ProjectState) {
         .as_ref()
         .map(|repo| repo.display().to_string())
         .unwrap_or_else(|| "(none: a hand-written flake)".into());
-    let mut fields = vec![field("Repo", &repo), field("VM", &status.vm_text())];
+    let vm = match status.vm {
+        Some(_) => status.vm_text(),
+        None => "stopped · press u to start".into(),
+    };
+    let mut fields = vec![field("Repo", &repo), field("VM", &vm)];
     if let Some(error) = &status.error {
         fields.push(Line::from(clean_text(error)).style(Style::new().fg(Color::Red)));
     }
@@ -582,6 +596,44 @@ fn draw_project(frame: &mut Frame<'_>, app: &App, state: &ProjectState) {
         .map(|worktree| ListItem::new(resource_line(&Resource::Worktree(worktree.clone()), width)))
         .collect();
     render_list(frame, list, items, state.selected);
+}
+
+fn draw_tailor(frame: &mut Frame<'_>, state: &TailorState) {
+    let area = frame.area();
+    let block = panel(
+        breadcrumb(Category::Sandbox, &state.project.name),
+        "new project".into(),
+        HELP_TAILOR,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let option = |key: &str, text: String| {
+        Line::from(vec![
+            Span::styled(format!("  {key}  "), Style::new().fg(ACCENT).bold()),
+            Span::raw(clean_text(&text)),
+        ])
+    };
+    let mut lines: Vec<Line> = state
+        .project
+        .summary
+        .lines()
+        .map(|line| Line::from(clean_text(line)))
+        .collect();
+    lines.extend([
+        Line::default(),
+        Line::from("Tailor flake.nix to the repository before the first start?".bold()),
+        Line::default(),
+        option(
+            "a",
+            format!(
+                "with {}, following agent-sandbox's setup instructions",
+                state.agent
+            ),
+        ),
+        option("e", format!("edit it in {}", state.editor)),
+        option("s", "skip; edit it later".into()),
+    ]);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn field(name: &str, value: &str) -> Line<'static> {
@@ -888,7 +940,7 @@ mod tests {
         let details = rendered(&app, 100, super::HEIGHT);
         for want in [
             "Repo    /p/demo",
-            "VM      stopped",
+            "VM      stopped · press u to start",
             "demo-agent-wt",
             "u start",
         ] {
@@ -898,6 +950,29 @@ mod tests {
         let mut empty = App::new("/tmp/project".into());
         empty.loaded(ToolId::SandboxProjects, Ok(Vec::new()));
         assert!(rendered(&empty, 100, super::HEIGHT).contains("No sandbox projects yet"));
+    }
+
+    #[test]
+    fn renders_the_tailor_prompt() {
+        let mut app = App::new("/tmp/project".into());
+        app.tailor_prompt(
+            crate::tui::app::NewProject {
+                name: "demo".into(),
+                summary: "Sandbox project demo: /sandbox/projects/demo".into(),
+            },
+            "claude".into(),
+            "nvim".into(),
+        );
+        let text = rendered(&app, 100, super::HEIGHT);
+        for want in [
+            "Sandbox project demo: /sandbox/projects/demo",
+            "Tailor flake.nix to the repository",
+            "a  with claude",
+            "e  edit it in nvim",
+            "s  skip",
+        ] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
     }
 
     #[test]

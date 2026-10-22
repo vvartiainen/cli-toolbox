@@ -201,13 +201,39 @@ pub(crate) enum Action {
     /// Sync and remove a project's worktree, keeping its branch.
     DoneProjectWorktree(String, AgentWorktree),
     EnterProjectWorktree(AgentWorktree),
+    /// Tailor a new project's flake to its repository.
+    TailorProject(String, Tailor),
     /// Stop the running VM with this runtime directory.
     StopVm(PathBuf),
     /// Remove the runtime directories of stopped VMs whose start directory is gone.
     PruneVms,
 }
 
+/// How to tailor a new project's flake.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Tailor {
+    /// Run this coding agent with agent-sandbox's setup instructions.
+    Agent(String),
+    /// Open the flake in the editor.
+    Editor,
+}
+
+/// A project that was just created, waiting for its flake to be tailored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NewProject {
+    pub(crate) name: String,
+    pub(crate) summary: String,
+}
+
 impl Action {
+    /// The project whose details open after the result screen, if any.
+    fn project_to_open(&self) -> Option<&str> {
+        match self {
+            Self::TailorProject(name, _) => Some(name),
+            _ => None,
+        }
+    }
+
     /// The picker to reload after the result screen, if any. Other actions
     /// return to the home screen.
     pub(crate) fn return_tool(&self) -> Option<ToolId> {
@@ -222,7 +248,8 @@ impl Action {
             | Self::SyncProject(_)
             | Self::AddProjectWorktree(_)
             | Self::DoneProjectWorktree(..)
-            | Self::EnterProjectWorktree(_) => Some(ToolId::SandboxProjects),
+            | Self::EnterProjectWorktree(_)
+            | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
             Self::Aws(_) | Self::Kitty(_) | Self::Ssh(_) => None,
         }
@@ -319,6 +346,15 @@ impl ProjectState {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct TailorState {
+    pub(crate) project: NewProject,
+    /// The coding agent `a` runs.
+    pub(crate) agent: String,
+    /// The editor `e` opens, for the hint.
+    pub(crate) editor: String,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ResultState {
     pub(crate) action: Action,
     pub(crate) title: String,
@@ -333,6 +369,7 @@ pub(crate) enum Screen {
     Picker(PickerState),
     WorktreeDetails(DetailsState),
     ProjectDetails(Box<ProjectState>),
+    TailorFlake(TailorState),
     ConfirmCleanup(ConfirmState),
     Result(ResultState),
 }
@@ -354,6 +391,8 @@ pub(crate) struct App {
     pub(crate) print_shell: bool,
     /// Herdr is installed, so worktree removal also closes its workspace.
     pub(crate) herdr: bool,
+    /// Open this project's details once the project list has loaded.
+    pub(crate) open_project: Option<String>,
 }
 
 impl App {
@@ -369,6 +408,7 @@ impl App {
             show_help: false,
             print_shell: false,
             herdr: false,
+            open_project: None,
         }
     }
 
@@ -412,8 +452,35 @@ impl App {
             }
         }
         picker.selected = selected_position(&picker, old_identity.as_ref());
-        self.screen = Screen::Picker(picker);
         self.loading = None;
+        let open = self
+            .open_project
+            .take()
+            .filter(|_| tool == ToolId::SandboxProjects);
+        let status = open.and_then(|name| {
+            picker.resources.iter().find_map(|resource| match resource {
+                Resource::Project(status) if status.project.name == name => Some(status.clone()),
+                _ => None,
+            })
+        });
+        self.screen = match status {
+            Some(status) => Screen::ProjectDetails(Box::new(ProjectState {
+                status: *status,
+                selected: 0,
+                return_picker: picker,
+            })),
+            None => Screen::Picker(picker),
+        };
+    }
+
+    /// Ask how to tailor the flake of a project that was just created.
+    pub(crate) fn tailor_prompt(&mut self, project: NewProject, agent: String, editor: String) {
+        self.loading = None;
+        self.screen = Screen::TailorFlake(TailorState {
+            project,
+            agent,
+            editor,
+        });
     }
 
     /// Move to an action result. The result screen owns the action so that its
@@ -458,6 +525,7 @@ impl App {
             Screen::Picker(_) => self.handle_picker_key(key),
             Screen::WorktreeDetails(_) => self.handle_details_key(key),
             Screen::ProjectDetails(_) => self.handle_project_key(key),
+            Screen::TailorFlake(_) => self.handle_tailor_key(key),
             Screen::ConfirmCleanup(_) => self.handle_confirm_key(key),
             Screen::Result(_) => self.handle_result_key(key),
         }
@@ -470,6 +538,7 @@ impl App {
             Screen::Picker(_) => false,
             Screen::WorktreeDetails(_)
             | Screen::ProjectDetails(_)
+            | Screen::TailorFlake(_)
             | Screen::ConfirmCleanup(_)
             | Screen::Result(_) => true,
         }
@@ -772,6 +841,30 @@ impl App {
         Effect::None
     }
 
+    fn handle_tailor_key(&mut self, key: KeyEvent) -> Effect {
+        let Screen::TailorFlake(state) = &self.screen else {
+            return Effect::None;
+        };
+        let name = state.project.name.clone();
+        match key.code {
+            KeyCode::Char('a') => Effect::Execute(Action::TailorProject(
+                name,
+                Tailor::Agent(state.agent.clone()),
+            )),
+            KeyCode::Char('e') => Effect::Execute(Action::TailorProject(name, Tailor::Editor)),
+            KeyCode::Char('s') | KeyCode::Esc => self.load_project(name),
+            _ => Effect::None,
+        }
+    }
+
+    /// Load the project list and open the project's details.
+    fn load_project(&mut self, name: String) -> Effect {
+        self.open_project = Some(name);
+        self.screen = Screen::Picker(PickerState::new(ToolId::SandboxProjects));
+        self.loading = Some(ToolId::SandboxProjects);
+        Effect::Load(ToolId::SandboxProjects)
+    }
+
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Effect {
         let Screen::ConfirmCleanup(confirm) = &mut self.screen else {
             return Effect::None;
@@ -803,6 +896,10 @@ impl App {
             KeyCode::PageUp => result.scroll = result.scroll.saturating_sub(10),
             KeyCode::PageDown => result.scroll = result.scroll.saturating_add(10),
             KeyCode::Enter | KeyCode::Esc => {
+                if let Some(name) = result.action.project_to_open() {
+                    let name = name.to_string();
+                    return self.load_project(name);
+                }
                 if let Some(tool) = result.action.return_tool() {
                     self.screen = Screen::Picker(PickerState::new(tool));
                     self.loading = Some(tool);
@@ -940,7 +1037,7 @@ pub(crate) fn branch_label(worktree: &AgentWorktree) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, App, Category, Effect, Resource, Screen, ToolId};
+    use super::{Action, App, Category, Effect, NewProject, Resource, Screen, Tailor, ToolId};
     use crate::agent::vm::ProjectStatus;
     use crate::aws::Profile;
     use crate::git::AgentWorktree;
@@ -1170,6 +1267,64 @@ mod tests {
             &app.screen,
             Screen::Picker(picker) if picker.tool == ToolId::SandboxProjects
         ));
+    }
+
+    #[test]
+    fn new_projects_ask_how_to_tailor_the_flake_then_open_details() {
+        let prompt = || {
+            let mut app = App::new("/repo".into());
+            app.tailor_prompt(
+                NewProject {
+                    name: "demo".into(),
+                    summary: "Created demo".into(),
+                },
+                "claude".into(),
+                "vi".into(),
+            );
+            app
+        };
+        let mut app = prompt();
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Effect::Execute(Action::TailorProject(
+                "demo".into(),
+                Tailor::Agent("claude".into())
+            ))
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('e'))),
+            Effect::Execute(Action::TailorProject("demo".into(), Tailor::Editor))
+        );
+
+        // Skipping, or leaving the result of tailoring, opens the project.
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('s'))),
+            Effect::Load(ToolId::SandboxProjects)
+        );
+        let projects = || {
+            Ok(vec![
+                Resource::Project(Box::new(project("other", &[]))),
+                Resource::Project(Box::new(project("demo", &[]))),
+            ])
+        };
+        app.loaded(ToolId::SandboxProjects, projects());
+        assert!(matches!(
+            &app.screen,
+            Screen::ProjectDetails(state) if state.status.project.name == "demo"
+        ));
+
+        let mut app = prompt();
+        let action = Action::TailorProject("demo".into(), Tailor::Editor);
+        app.finished(&action, "Done".into(), String::new(), false);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Load(ToolId::SandboxProjects)
+        );
+        app.loaded(ToolId::SandboxProjects, projects());
+        assert!(matches!(&app.screen, Screen::ProjectDetails(_)));
+        // Later loads show the list again.
+        app.loaded(ToolId::SandboxProjects, projects());
+        assert!(matches!(&app.screen, Screen::Picker(_)));
     }
 
     #[test]

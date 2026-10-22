@@ -96,7 +96,14 @@ fn event_loop(
                 if let Some(command) = shell_exit(print_shell, &outcome) {
                     return Ok(Some(command));
                 }
-                app.finished(&action, outcome.title, outcome.body, outcome.failed);
+                match outcome.project {
+                    Some(project) if !outcome.failed => app.tailor_prompt(
+                        project,
+                        actions::setup_agent(),
+                        crate::sandbox::project::editor().join(" "),
+                    ),
+                    _ => app.finished(&action, outcome.title, outcome.body, outcome.failed),
+                }
             }
         }
     }
@@ -203,6 +210,7 @@ mod tests {
                         body: "details".into(),
                         failed,
                         shell: None,
+                        project: None,
                     }
                 },
                 |_| {
@@ -257,6 +265,7 @@ mod tests {
                     body: "/tmp/created-worktree".into(),
                     failed: false,
                     shell: None,
+                    project: None,
                 }
             },
             |_| Err(Error::msg("resume failed")),
@@ -297,6 +306,7 @@ mod tests {
             body: String::new(),
             failed,
             shell: shell.map(String::from),
+            project: None,
         };
         assert_eq!(
             shell_exit(true, &outcome(false, Some("cd '/tmp/x'"))).as_deref(),
@@ -324,6 +334,7 @@ mod tests {
                 body: String::new(),
                 failed: false,
                 shell: Some("cd /tmp".into()),
+                project: None,
             },
             |_| Ok(None),
             &mut Vec::new(),

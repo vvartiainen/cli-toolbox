@@ -4,7 +4,7 @@ use crate::agent::vm::{self, VmOptions};
 use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
 use crate::{Error, agent, aws, git, kitty, ssh};
 
-use super::app::{Action, Resource, ToolId};
+use super::app::{Action, NewProject, Resource, Tailor, ToolId};
 
 pub(super) struct Context {
     cwd: Result<PathBuf, String>,
@@ -16,6 +16,8 @@ pub(super) struct Outcome {
     pub failed: bool,
     /// A command for the parent shell, such as an export or `cd`.
     pub shell: Option<String>,
+    /// A project was created; ask how to tailor its flake.
+    pub project: Option<NewProject>,
 }
 
 /// What a successful action reports back.
@@ -24,6 +26,7 @@ struct Done {
     shell: Option<String>,
     /// The action ran, but an optional step such as init failed.
     incomplete: bool,
+    project: Option<NewProject>,
 }
 
 impl Done {
@@ -32,6 +35,7 @@ impl Done {
             body,
             shell: None,
             incomplete: false,
+            project: None,
         }
     }
 }
@@ -85,12 +89,22 @@ impl Context {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = self.execute_inner(action, &mut stdout, &mut stderr);
-        let (title, mut body, shell, failed) = match result {
-            Ok(done) if done.incomplete => {
-                ("Action completed with errors", done.body, done.shell, true)
-            }
-            Ok(done) => ("Action completed", done.body, done.shell, false),
-            Err(err) => ("Action failed", err.to_string(), None, true),
+        let (title, mut body, shell, failed, project) = match result {
+            Ok(done) if done.incomplete => (
+                "Action completed with errors",
+                done.body,
+                done.shell,
+                true,
+                done.project,
+            ),
+            Ok(done) => (
+                "Action completed",
+                done.body,
+                done.shell,
+                false,
+                done.project,
+            ),
+            Err(err) => ("Action failed", err.to_string(), None, true, None),
         };
         for bytes in [&stdout, &stderr] {
             if !bytes.is_empty() {
@@ -103,6 +117,7 @@ impl Context {
             body,
             failed,
             shell,
+            project,
         }
     }
 
@@ -122,6 +137,7 @@ impl Context {
                     ),
                     shell: Some(export),
                     incomplete: false,
+                    project: None,
                 })
             }
             Action::Kitty(path) => {
@@ -155,6 +171,7 @@ impl Context {
                     ),
                     shell: cd_command(path),
                     incomplete: created.steps.iter().any(agent::Step::failed),
+                    project: None,
                 })
             }
             Action::CreateProject => {
@@ -172,17 +189,41 @@ impl Context {
                     None,
                     &mut std::io::stderr(),
                 )?;
+                let summary = format!(
+                    "Sandbox project {}: {}\nFirst worktree: {}",
+                    project.name,
+                    project.dir.display(),
+                    created.worktree.path.display(),
+                );
                 Ok(Done {
-                    body: format!(
-                        "Sandbox project {}: {}\nFirst worktree: {}\n\n{}\n\nTailor the flake's toolchain to the repository (or run `cli-toolbox agent project create --ai` next time), then start the VM from the project's details.",
-                        project.name,
-                        project.dir.display(),
-                        created.worktree.path.display(),
-                        steps_text(&created.steps)
-                    ),
+                    body: format!("{summary}\n\n{}", steps_text(&created.steps)),
                     shell: None,
                     incomplete: created.steps.iter().any(agent::Step::failed),
+                    project: Some(NewProject {
+                        name: project.name,
+                        summary,
+                    }),
                 })
+            }
+            Action::TailorProject(name, how) => {
+                let project = load_project(name)?;
+                // The agent or editor takes over the released terminal.
+                let done = match how {
+                    Tailor::Agent(kind) => {
+                        project::run_setup_agent(&project, None, kind, &mut std::io::stderr())?;
+                        format!(
+                            "{kind} finished tailoring {}/flake.nix.",
+                            project.dir.display()
+                        )
+                    }
+                    Tailor::Editor => {
+                        project::edit_flake(&project)?;
+                        format!("Edited {}/flake.nix.", project.dir.display())
+                    }
+                };
+                Ok(Done::body(format!(
+                    "{done}\n\nNext, open the project and press u to start the VM. The first start builds the guest, which takes a while; `nix build` in the project directory does it ahead of time."
+                )))
             }
             Action::StartProject(name) => {
                 let project = load_project(name)?;
@@ -221,6 +262,7 @@ impl Context {
                     ),
                     shell: None,
                     incomplete: created.steps.iter().any(agent::Step::failed),
+                    project: None,
                 })
             }
             Action::DoneProjectWorktree(name, worktree) => {
@@ -253,6 +295,7 @@ impl Context {
                 ),
                 shell: cd_command(&worktree.path),
                 incomplete: false,
+                project: None,
             }),
             Action::Cleanup(worktree) => {
                 let steps = agent::remove_worktree(
@@ -274,6 +317,7 @@ impl Context {
                     body: format!("{removed}\n\n{}", steps_text(&steps)),
                     shell: None,
                     incomplete: steps.iter().any(agent::Step::failed),
+                    project: None,
                 })
             }
         }
@@ -306,6 +350,11 @@ fn load_home(tool: ToolId, home: &Path) -> Result<Vec<Resource>, Error> {
     }
 }
 
+/// The coding agent that tailors new flakes: `CLI_TOOLBOX_AGENT`, or claude.
+pub(super) fn setup_agent() -> String {
+    vm_options().agent.unwrap_or_else(|| "claude".into())
+}
+
 /// VM options for the launcher: herdr on, the agent from `CLI_TOOLBOX_AGENT`.
 fn vm_options() -> VmOptions {
     VmOptions {
@@ -326,6 +375,7 @@ fn steps_done(title: String, steps: &[agent::Step]) -> Done {
         body: format!("{title}\n\n{}", steps_text(steps)),
         shell: None,
         incomplete: steps.iter().any(agent::Step::failed),
+        project: None,
     }
 }
 
