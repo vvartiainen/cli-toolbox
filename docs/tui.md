@@ -5,7 +5,8 @@ cli-toolbox tui
 ```
 
 Select AWS profiles, switch Kitty sessions, connect to SSH hosts, create, inspect,
-enter, and remove agent worktrees, or run sandbox project VMs. Worktree operations use
+enter, and remove agent worktrees, run sandbox project VMs, or stop any running
+sandbox VM. Worktree operations use
 the directory from which you launched the toolbox.
 
 The launcher opens in a compact panel below your prompt instead of taking over the
@@ -16,7 +17,7 @@ temporarily take over the terminal; the launcher resumes when they finish.
 ## Keys
 
 Actions are grouped into tabs: **AWS** (`a`), **Agents** (`i`, agent worktrees),
-**Sandbox** (`s`, sandbox projects) and **Terminal** (`t`, Kitty sessions and SSH).
+**Sandbox** (`s`, sandbox projects and running VMs) and **Terminal** (`t`, Kitty sessions and SSH).
 
 | Key | Action |
 | --- | --- |
@@ -56,6 +57,17 @@ worktree count (see [agents.md](agents.md#sandbox-projects)):
   worktree changes, `s` syncs the agents' commits, and `a` adds a worktree. Up/Down
   select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
   `agent project done` on it. The agent kind comes from `CLI_TOOLBOX_AGENT`.
+
+## Sandbox › VMs
+
+Lists every running agent-sandbox VM with its SSH port, runner PID and start
+directory, including VMs whose project directory was removed, which are marked
+`(directory gone)` (see [agents.md](agents.md#running-vms)):
+
+- Enter or Ctrl-X stops the selected VM and removes its herdr machine
+  (`agent vm stop`).
+- Ctrl-D removes the runtime directories of stopped VMs whose start directory is
+  gone (`agent vm prune`).
 
 ## Applying exports and directory changes
 

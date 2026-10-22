@@ -6,6 +6,7 @@ use crate::agent::vm::ProjectStatus;
 use crate::aws::Profile;
 use crate::git::AgentWorktree;
 use crate::kitty::Choice;
+use crate::sandbox::RunnerState;
 use crate::select;
 use crate::ssh::Host;
 
@@ -73,15 +74,17 @@ pub(crate) enum ToolId {
     AwsProfile,
     AgentWorktrees,
     SandboxProjects,
+    SandboxVms,
     KittySession,
     SshConnect,
 }
 
 impl ToolId {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::AwsProfile,
         Self::AgentWorktrees,
         Self::SandboxProjects,
+        Self::SandboxVms,
         Self::KittySession,
         Self::SshConnect,
     ];
@@ -90,7 +93,7 @@ impl ToolId {
         match self {
             Self::AwsProfile => Category::Aws,
             Self::AgentWorktrees => Category::Agents,
-            Self::SandboxProjects => Category::Sandbox,
+            Self::SandboxProjects | Self::SandboxVms => Category::Sandbox,
             Self::KittySession | Self::SshConnect => Category::Terminal,
         }
     }
@@ -102,6 +105,7 @@ impl ToolId {
             Self::SshConnect => "SSH connect",
             Self::AgentWorktrees => "Worktrees",
             Self::SandboxProjects => "Projects",
+            Self::SandboxVms => "VMs",
         }
     }
 
@@ -114,6 +118,7 @@ impl ToolId {
             Self::SandboxProjects => {
                 "Project VMs in ~/.agent-sandbox: create, start, add worktrees, sync"
             }
+            Self::SandboxVms => "Every running VM, also those whose project is gone: stop, prune",
         }
     }
 
@@ -124,6 +129,7 @@ impl ToolId {
             Self::SshConnect => "SSH hosts",
             Self::AgentWorktrees => "Agent worktrees",
             Self::SandboxProjects => "Sandbox projects",
+            Self::SandboxVms => "Running VMs",
         }
     }
 }
@@ -136,6 +142,7 @@ pub(crate) enum Resource {
     Ssh(Host),
     Worktree(AgentWorktree),
     Project(Box<ProjectStatus>),
+    Vm(Box<RunnerState>),
 }
 
 impl Resource {
@@ -146,6 +153,7 @@ impl Resource {
             Self::Ssh(host) => host.name.clone(),
             Self::Worktree(worktree) => worktree_label(worktree),
             Self::Project(status) => status.project.name.clone(),
+            Self::Vm(vm) => vm.name.clone(),
         }
     }
 
@@ -156,6 +164,7 @@ impl Resource {
             Self::Ssh(host) => ResourceIdentity::String(host.name.clone()),
             Self::Worktree(worktree) => ResourceIdentity::Path(worktree.path.clone()),
             Self::Project(status) => ResourceIdentity::Path(status.project.dir.clone()),
+            Self::Vm(vm) => ResourceIdentity::Path(vm.runtime_dir.clone()),
         }
     }
 
@@ -167,6 +176,7 @@ impl Resource {
                 | (ToolId::SshConnect, Self::Ssh(_))
                 | (ToolId::AgentWorktrees, Self::Worktree(_))
                 | (ToolId::SandboxProjects, Self::Project(_))
+                | (ToolId::SandboxVms, Self::Vm(_))
         )
     }
 }
@@ -191,6 +201,10 @@ pub(crate) enum Action {
     /// Sync and remove a project's worktree, keeping its branch.
     DoneProjectWorktree(String, AgentWorktree),
     EnterProjectWorktree(AgentWorktree),
+    /// Stop the running VM with this runtime directory.
+    StopVm(PathBuf),
+    /// Remove the runtime directories of stopped VMs whose start directory is gone.
+    PruneVms,
 }
 
 impl Action {
@@ -209,6 +223,7 @@ impl Action {
             | Self::AddProjectWorktree(_)
             | Self::DoneProjectWorktree(..)
             | Self::EnterProjectWorktree(_) => Some(ToolId::SandboxProjects),
+            Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
             Self::Aws(_) | Self::Kitty(_) | Self::Ssh(_) => None,
         }
     }
@@ -559,6 +574,9 @@ impl App {
         if let Some(effect) = self.handle_project_picker_key(key) {
             return effect;
         }
+        if let Some(effect) = self.handle_vm_picker_key(key) {
+            return effect;
+        }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
         {
@@ -618,6 +636,9 @@ impl App {
                             return_picker,
                         }));
                         Effect::None
+                    }
+                    (ToolId::SandboxVms, Resource::Vm(vm)) => {
+                        Effect::Execute(Action::StopVm(vm.runtime_dir))
                     }
                     _ => Effect::None,
                 }
@@ -695,6 +716,26 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Ctrl shortcuts of the VM list. Plain keys filter the list.
+    fn handle_vm_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        let picker = self
+            .picker()
+            .filter(|picker| picker.tool == ToolId::SandboxVms)?;
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        let effect = match key.code {
+            KeyCode::Char('x') => match picker.selected_resource() {
+                Some(Resource::Vm(vm)) => Effect::Execute(Action::StopVm(vm.runtime_dir.clone())),
+                _ => Effect::None,
+            },
+            KeyCode::Char('d') => Effect::Execute(Action::PruneVms),
+            _ => return None,
+        };
+        self.loading = None;
+        Some(effect)
     }
 
     fn handle_project_key(&mut self, key: KeyEvent) -> Effect {
@@ -904,6 +945,7 @@ mod tests {
     use crate::aws::Profile;
     use crate::git::AgentWorktree;
     use crate::kitty::Choice;
+    use crate::sandbox::RunnerState;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::path::PathBuf;
 
@@ -1128,6 +1170,39 @@ mod tests {
             &app.screen,
             Screen::Picker(picker) if picker.tool == ToolId::SandboxProjects
         ));
+    }
+
+    #[test]
+    fn vm_list_stops_and_prunes() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('2'))),
+            Effect::Load(ToolId::SandboxVms)
+        );
+        let vm = |name: &str| RunnerState {
+            name: format!("agent-{name}"),
+            runtime_dir: format!("/state/vms/{name}").into(),
+            ..RunnerState::default()
+        };
+        app.loaded(
+            ToolId::SandboxVms,
+            Ok(vec![
+                Resource::Vm(Box::new(vm("a"))),
+                Resource::Vm(Box::new(vm("b"))),
+            ]),
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::StopVm("/state/vms/a".into()))
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.handle_key(ctrl('x')),
+            Effect::Execute(Action::StopVm("/state/vms/b".into()))
+        );
+        assert_eq!(app.handle_key(ctrl('d')), Effect::Execute(Action::PruneVms));
+        assert_eq!(Action::PruneVms.return_tool(), Some(ToolId::SandboxVms));
     }
 
     #[test]

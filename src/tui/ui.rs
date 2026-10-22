@@ -17,6 +17,7 @@ const HELP_SEARCH: &str = "↑↓ move · ⏎ run · F1 help · esc back";
 const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help · esc back";
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
 const HELP_PROJECTS: &str = "type to filter · ⏎ open · ^A new for this repo · F1 help · esc back";
+const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
 const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
 const HELP_OVERLAY: &str = "any key closes help";
@@ -170,6 +171,14 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entries.extend([
                     entry("⏎", "project details"),
                     entry("^A", "new project for the launch directory's repository"),
+                ]);
+            } else if picker.tool == ToolId::SandboxVms {
+                entries.extend([
+                    entry("⏎ ^X", "stop the VM and remove its herdr machine"),
+                    entry(
+                        "^D",
+                        "prune runtime directories of VMs whose directory is gone",
+                    ),
                 ]);
             } else {
                 entries.push(entry("⏎", "select"));
@@ -369,6 +378,7 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
     let help = match picker.tool {
         ToolId::AgentWorktrees => HELP_WORKTREES,
         ToolId::SandboxProjects => HELP_PROJECTS,
+        ToolId::SandboxVms => HELP_VMS,
         _ => HELP_PICKER,
     };
     let block = panel(
@@ -390,6 +400,8 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
         Some("No agent worktrees yet. Press Ctrl-A to create one.".to_string())
     } else if picker.resources.is_empty() && picker.tool == ToolId::SandboxProjects {
         Some("No sandbox projects yet. Press Ctrl-A to create one for this repository.".to_string())
+    } else if picker.resources.is_empty() && picker.tool == ToolId::SandboxVms {
+        Some("No VMs running. Press Ctrl-D to prune stale runtime directories.".to_string())
     } else if picker.resources.is_empty() {
         Some(format!(
             "No {} found. Press F5 to refresh or Esc to go back.",
@@ -417,6 +429,7 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
         .filter_map(|resource| match resource {
             Resource::Worktree(worktree) => Some(clean_text(&worktree.name).chars().count()),
             Resource::Project(status) => Some(clean_text(&status.project.name).chars().count()),
+            Resource::Vm(vm) => Some(clean_text(&vm.name).chars().count()),
             _ => None,
         })
         .max()
@@ -474,6 +487,25 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
                 Span::raw(format!("{} worktree(s)  ", status.worktrees.len())),
                 clean_text(&repo).dark_gray(),
             ])
+        }
+        Resource::Vm(vm) => {
+            let port = vm
+                .ssh_port
+                .map(|port| format!("[:{port}]  "))
+                .unwrap_or_else(|| "[no ssh]  ".into());
+            let mut spans = vec![
+                Span::raw(format!(" {:<name_width$}  ", clean_text(&vm.name))),
+                Span::styled(port, Style::new().fg(ACCENT)),
+                Span::raw(format!("pid {}  ", vm.pid)),
+                clean_text(&vm.dir.display().to_string()).dark_gray(),
+            ];
+            if !vm.dir.exists() {
+                spans.push(Span::styled(
+                    "  (directory gone)",
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            Line::from(spans)
         }
         _ => Line::from(format!(" {}", clean_text(&resource.label()))),
     }
@@ -866,6 +898,29 @@ mod tests {
         let mut empty = App::new("/tmp/project".into());
         empty.loaded(ToolId::SandboxProjects, Ok(Vec::new()));
         assert!(rendered(&empty, 100, super::HEIGHT).contains("No sandbox projects yet"));
+    }
+
+    #[test]
+    fn renders_running_vms_and_flags_missing_directories() {
+        let vm = crate::sandbox::RunnerState {
+            pid: 4242,
+            ssh_port: Some(2300),
+            name: "agent-demo".into(),
+            dir: PathBuf::from("/gone/projects/demo"),
+            ..Default::default()
+        };
+        let mut app = App::new("/tmp/project".into());
+        app.loaded(ToolId::SandboxVms, Ok(vec![Resource::Vm(Box::new(vm))]));
+        let list = rendered(&app, 120, super::HEIGHT);
+        assert!(
+            list.contains("agent-demo  [:2300]  pid 4242  /gone/projects/demo  (directory gone)"),
+            "{list}"
+        );
+        assert!(list.contains("^D prune"), "{list}");
+
+        let mut empty = App::new("/tmp/project".into());
+        empty.loaded(ToolId::SandboxVms, Ok(Vec::new()));
+        assert!(rendered(&empty, 100, super::HEIGHT).contains("No VMs running"));
     }
 
     #[test]

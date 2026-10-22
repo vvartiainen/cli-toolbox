@@ -538,7 +538,8 @@ fn port_text(vm: &RunnerState) -> String {
         .unwrap_or_default()
 }
 
-fn running_vms() -> Vec<RunnerState> {
+/// Every running agent-sandbox VM.
+pub(crate) fn running_vms() -> Vec<RunnerState> {
     sandbox::runtime_root()
         .map(|root| sandbox::running_vms(&root))
         .unwrap_or_default()

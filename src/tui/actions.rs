@@ -68,6 +68,10 @@ impl Context {
                 .into_iter()
                 .map(|status| Resource::Project(Box::new(status)))
                 .collect()),
+            ToolId::SandboxVms => Ok(vm::running_vms()
+                .into_iter()
+                .map(|vm| Resource::Vm(Box::new(vm)))
+                .collect()),
             _ => {
                 let home = dirs::home_dir().ok_or_else(|| {
                     Error::msg("resolve home directory: home directory not found")
@@ -230,6 +234,17 @@ impl Context {
                     &steps,
                 ))
             }
+            Action::StopVm(runtime_dir) => {
+                let vm = vm::running_vms()
+                    .into_iter()
+                    .find(|vm| vm.runtime_dir == *runtime_dir)
+                    .ok_or_else(|| Error::msg("the VM is no longer running"))?;
+                Ok(steps_done(format!("VM {}", vm.name), &vm::vm_stop(&vm)))
+            }
+            Action::PruneVms => Ok(steps_done(
+                "Stale VM runtime directories".into(),
+                &vm::vm_prune(&project::sandbox_dir()?)?,
+            )),
             Action::EnterWorktree(worktree) | Action::EnterProjectWorktree(worktree) => Ok(Done {
                 body: format!(
                     "Worktree: {}\n\n{}",
