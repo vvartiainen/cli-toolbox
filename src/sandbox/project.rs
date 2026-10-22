@@ -82,6 +82,15 @@ impl Project {
             && read(self.dir.join(WORKTREES_FILE)) != read(self.state_dir.join(MOUNTED_FILE))
     }
 
+    /// Whether the running VM mounts the worktree `name`: it was recorded
+    /// when the VM started. Unknown without a record, which counts as yes.
+    pub(crate) fn mounts(&self, name: &str) -> bool {
+        match fs::read_to_string(self.state_dir.join(MOUNTED_FILE)) {
+            Ok(text) => text.contains(&format!("  {} = ", nix_string(name))),
+            Err(_) => true,
+        }
+    }
+
     /// Remember the worktrees the VM was just started with.
     pub(crate) fn record_mounted(&self) -> Result<(), Error> {
         if self.repo.is_none() {
@@ -755,8 +764,12 @@ mod tests {
             path: "/wt/demo-agent-wt".into(),
             branch: "demo-agent-wt".into(),
         };
+        assert!(!project.mounts("demo-agent-wt"));
         assert!(project.write_worktrees(&[worktree]).unwrap());
         assert!(project.restart_needed());
+        project.record_mounted().unwrap();
+        assert!(project.mounts("demo-agent-wt"));
+        assert!(!project.mounts("demo-agent-wt-2"));
     }
 
     #[test]

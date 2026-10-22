@@ -344,11 +344,26 @@ pub(crate) fn sync(project: &Project, worktree: Option<&AgentWorktree>) -> Resul
         Some(worktree) => vec![worktree.clone()],
         None => git::agent_worktrees(project.repo()?)?,
     };
-    let names: Vec<&str> = match worktree {
-        Some(worktree) => vec![worktree.name.as_str()],
-        None => Vec::new(),
-    };
-    let report = sandbox::git_pull(&project.dir, &names)?;
+    // The guest has no Git directory for worktrees added since it started.
+    let (mounted, unmounted): (Vec<_>, Vec<_>) = worktrees
+        .iter()
+        .partition(|worktree| project.mounts(&worktree.name));
+    let mut report: String = unmounted
+        .iter()
+        .map(|worktree| {
+            format!(
+                "{}: not mounted by the VM yet; restart it to sync.\n",
+                worktree.name
+            )
+        })
+        .collect();
+    if !mounted.is_empty() {
+        let names: Vec<&str> = mounted
+            .iter()
+            .map(|worktree| worktree.name.as_str())
+            .collect();
+        report.push_str(&sandbox::git_pull(&project.dir, &names)?);
+    }
     let mut unsynced = Vec::new();
     for worktree in &worktrees {
         if let Some(log) = unsynced_commits(&worktree.path, &worktree.branch)? {
@@ -434,7 +449,8 @@ fn done_blocker(
     if force {
         return Ok(None);
     }
-    if running {
+    // A worktree added after the VM started has no guest commits to lose.
+    if running && project.mounts(&worktree.name) {
         sandbox::git_pull(&project.dir, &[&worktree.name])?;
         if let Some(unsynced) = unsynced_commits(&worktree.path, &worktree.branch)? {
             return Ok(Some(format!(
@@ -695,6 +711,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(blocker.contains("?? wip.txt"), "{blocker}");
+        std::fs::remove_file(worktree.path.join("wip.txt")).unwrap();
+
+        // Added after the VM started: the guest never had it to pull from.
+        std::fs::create_dir_all(&project.state_dir).unwrap();
+        std::fs::write(project.state_dir.join("mounted-worktrees.nix"), "{\n}\n").unwrap();
+        assert_eq!(
+            done_blocker(&project, &worktree, true, false).unwrap(),
+            None
+        );
+        std::fs::write(worktree.path.join("wip.txt"), "wip\n").unwrap();
 
         std::fs::create_dir_all(&project.state_dir).unwrap();
         std::fs::write(project.state_dir.join("home.img"), "home").unwrap();
