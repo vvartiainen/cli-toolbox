@@ -3,6 +3,9 @@
 //! project's repository at `/workspace/<worktree>`. The VM is added to the
 //! host herdr as a machine, with a guest workspace per worktree. The agents'
 //! commits come back as the worktrees' branches.
+//!
+//! The `vm_*` functions manage every running agent-sandbox VM from its
+//! runner state alone, also when its project directory is gone.
 
 use std::io::Write;
 use std::path::Path;
@@ -11,7 +14,7 @@ use super::{Created, Step};
 use crate::git::{self, AgentWorktree};
 use crate::sandbox::project::{self, CreateOptions, Project};
 use crate::sandbox::{self, RunnerState};
-use crate::{Error, herdr};
+use crate::{Error, herdr, select};
 
 /// Choices shared by the project commands.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -194,12 +197,115 @@ pub(crate) fn stop(project: &Project) -> Result<Vec<Step>, Error> {
     };
     sandbox::stop(&project.dir)?;
     let mut steps = vec![Step::Done(format!("vm: stopped {}", project.name))];
-    if herdr::available() {
-        steps.push(match herdr::remove_machine(&vm.name) {
-            Ok(true) => Step::Done(format!("herdr: removed machine {}", vm.name)),
-            Ok(false) => Step::Skipped(format!("herdr: machine {} not saved", vm.name)),
-            Err(err) => Step::Failed(format!("herdr: remove machine {}: {err}", vm.name)),
-        });
+    steps.extend(remove_herdr_machine(&vm.name));
+    Ok(steps)
+}
+
+fn remove_herdr_machine(machine: &str) -> Option<Step> {
+    herdr::available().then(|| match herdr::remove_machine(machine) {
+        Ok(true) => Step::Done(format!("herdr: removed machine {machine}")),
+        Ok(false) => Step::Skipped(format!("herdr: machine {machine} not saved")),
+        Err(err) => Step::Failed(format!("herdr: remove machine {machine}: {err}")),
+    })
+}
+
+/// `agent vm list`: one line per running VM, flagging those whose start
+/// directory is gone.
+pub(crate) fn vm_list(stdout: &mut dyn Write) -> Result<(), Error> {
+    for vm in running_vms() {
+        writeln!(stdout, "{}", vm_line(&vm))?;
+    }
+    Ok(())
+}
+
+fn vm_line(vm: &RunnerState) -> String {
+    let port = vm
+        .ssh_port
+        .map(|port| format!("ssh:{port}"))
+        .unwrap_or_else(|| "no ssh".into());
+    let started = vm.started_at.as_deref().unwrap_or("-");
+    let gone = if vm.dir.exists() {
+        ""
+    } else {
+        " (directory gone)"
+    };
+    format!(
+        "{}\tpid {}\t{port}\t{started}\t{}{gone}",
+        vm.name,
+        vm.pid,
+        vm.dir.display()
+    )
+}
+
+/// The running VMs to stop: every one with `all`, the one named by its host
+/// alias or start directory name, the only one, or one picked.
+pub(crate) fn select_vms(name: Option<&str>, all: bool) -> Result<Vec<RunnerState>, Error> {
+    pick_vms(running_vms(), name, all, |lines| {
+        select::pick("vm> ", lines, "40%")
+    })
+}
+
+fn pick_vms(
+    running: Vec<RunnerState>,
+    name: Option<&str>,
+    all: bool,
+    pick: impl FnOnce(&[String]) -> Result<Option<usize>, Error>,
+) -> Result<Vec<RunnerState>, Error> {
+    if running.is_empty() {
+        return Err(Error::msg("no agent-sandbox VM is running"));
+    }
+    if all {
+        return Ok(running);
+    }
+    if let Some(name) = name {
+        return running
+            .into_iter()
+            .find(|vm| vm.name == name || vm.dir.file_name().is_some_and(|dir| dir == name))
+            .map(|vm| vec![vm])
+            .ok_or_else(|| Error::msg(format!("no running VM named {name}")));
+    }
+    if running.len() == 1 {
+        return Ok(running);
+    }
+    let lines: Vec<String> = running.iter().map(vm_line).collect();
+    match pick(&lines)? {
+        Some(index) => Ok(vec![running[index].clone()]),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Stop `vm` through its runner and remove its machine from the host herdr.
+pub(crate) fn vm_stop(vm: &RunnerState) -> Vec<Step> {
+    let mut steps = vec![match sandbox::stop_vm(vm, sandbox::stop_timeout()) {
+        Ok(sandbox::Stopped::Terminated) => Step::Done(format!("vm: stopped {}", vm.name)),
+        Ok(sandbox::Stopped::Killed) => {
+            Step::Done(format!("vm: killed {} after it did not stop", vm.name))
+        }
+        Err(err) => return vec![Step::Failed(format!("vm: stop {}: {err}", vm.name))],
+    }];
+    steps.extend(remove_herdr_machine(&vm.name));
+    steps
+}
+
+/// `agent vm prune`: remove the runtime directories of stopped VMs whose
+/// start directory is gone (logs, SSH config and known hosts).
+pub(crate) fn vm_prune(projects_root: &Path) -> Result<Vec<Step>, Error> {
+    let Some(root) = sandbox::runtime_root() else {
+        return Ok(Vec::new());
+    };
+    let keep: Vec<_> = project::projects(projects_root)?
+        .into_iter()
+        .map(|project| project.dir)
+        .collect();
+    let steps: Vec<Step> = sandbox::stale_runtime_dirs(&root, &keep)
+        .into_iter()
+        .map(|dir| match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Step::Done(format!("removed {}", dir.display())),
+            Err(err) => Step::Failed(format!("remove {}: {err}", dir.display())),
+        })
+        .collect();
+    if steps.is_empty() {
+        return Ok(vec![Step::Skipped("nothing to prune".into())]);
     }
     Ok(steps)
 }
@@ -630,7 +736,7 @@ mod tests {
                 name: "agent-demo".into(),
                 dir: "/sandbox/projects/demo".into(),
                 runtime_dir: "/state".into(),
-                console_log: None,
+                ..RunnerState::default()
             }),
             restart_needed: false,
             error: None,
@@ -644,5 +750,51 @@ mod tests {
             ..status
         };
         assert!(stale.vm_text().contains("restart"));
+    }
+
+    fn running(names: &[&str]) -> Vec<RunnerState> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(pid, name)| RunnerState {
+                pid: pid as u32 + 100,
+                ssh_port: Some(2300),
+                name: format!("agent-{name}"),
+                dir: format!("/gone/projects/{name}").into(),
+                started_at: Some("2026-10-21T11:21:01Z".into()),
+                ..RunnerState::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vm_lines_flag_missing_directories() {
+        assert_eq!(
+            vm_line(&running(&["demo"])[0]),
+            "agent-demo\tpid 100\tssh:2300\t2026-10-21T11:21:01Z\t/gone/projects/demo (directory gone)"
+        );
+    }
+
+    #[test]
+    fn vms_are_picked_by_name_alone_or_from_a_list() {
+        let unused = |_: &[String]| -> Result<Option<usize>, Error> { panic!("no pick") };
+        let names = |vms: Vec<RunnerState>| vms.into_iter().map(|vm| vm.name).collect::<Vec<_>>();
+
+        let picked = pick_vms(running(&["a", "b"]), Some("b"), false, unused).unwrap();
+        assert_eq!(names(picked), ["agent-b"]);
+        let picked = pick_vms(running(&["a", "b"]), Some("agent-a"), false, unused).unwrap();
+        assert_eq!(names(picked), ["agent-a"]);
+        let picked = pick_vms(running(&["a"]), None, false, unused).unwrap();
+        assert_eq!(names(picked), ["agent-a"]);
+        let picked = pick_vms(running(&["a", "b"]), None, true, unused).unwrap();
+        assert_eq!(names(picked), ["agent-a", "agent-b"]);
+        let picked = pick_vms(running(&["a", "b"]), None, false, |lines| {
+            assert_eq!(lines.len(), 2);
+            Ok(Some(1))
+        })
+        .unwrap();
+        assert_eq!(names(picked), ["agent-b"]);
+        assert!(pick_vms(running(&["a"]), Some("c"), false, unused).is_err());
+        assert!(pick_vms(Vec::new(), None, false, unused).is_err());
     }
 }

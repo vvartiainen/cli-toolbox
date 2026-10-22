@@ -27,6 +27,7 @@ AWS profile, Kitty session, and SSH host selection run an interactive terminal U
 | `agents [status\|set\|sync\|library]` | Select project MCP servers and skills through Rulesync. See [docs/agent-tools.md](docs/agent-tools.md). |
 | `agent worktree create\|list\|cleanup` | Git worktrees for AI agents, with project init and Herdr. See [docs/agents.md](docs/agents.md). |
 | `agent project list\|create\|start\|stop\|restart\|add\|sync\|done` | Sandbox projects in `~/.agent-sandbox`: one agent-sandbox VM per project, mounting its agent worktrees. See [docs/agents.md](docs/agents.md#sandbox-projects). |
+| `agent vm list\|stop\|prune` | Every running agent-sandbox VM, also those whose project directory is gone. See [docs/agents.md](docs/agents.md#running-vms). |
 | `kitty select-session` | Choose a `*.kitty-session` file from your home directory and switch Kitty to it. |
 | `ssh connect` | Choose an SSH host from your config and connect to it with Kitty's SSH kitten. |
 | `completion` | Print a shell completion script. |

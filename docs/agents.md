@@ -128,6 +128,18 @@ cli-toolbox agent project done cli-toolbox-agent-wt-2
 project. VM state comes from agent-sandbox's `runner.json` files under
 `~/.local/state/agent-sandbox/vms/`.
 
+### Running VMs
+
+`agent vm` works from those `runner.json` files alone, so it also reaches a VM
+whose project or flake directory was removed while it ran, where
+`nix run .#stop` no longer can.
+
+| Command | What it does |
+| --- | --- |
+| `agent vm list` | Every running VM: host alias, runner PID, SSH port, start time and start directory, marked `(directory gone)` when it no longer exists. |
+| `agent vm stop [name]` | Stops a VM the way the `stop` app does: SIGTERM to its runner, then SIGKILL to the runner and its VM process after `AGENT_SANDBOX_STOP_TIMEOUT` seconds (default 30). Removes its herdr machine. `name` is the host alias (`agent-<project>`) or the start directory's name; without it, the only running VM or one picked. `--all` stops every VM. |
+| `agent vm prune` | Removes the runtime directories (logs, SSH config, known hosts) of stopped VMs whose start directory is gone. Directories of existing projects are kept. |
+
 ### First-time setup
 
 1. Put your SSH public key in `authorizedKeys` (`project create` does this) and
@@ -154,7 +166,8 @@ project. VM state comes from agent-sandbox's `runner.json` files under
 | cli-toolbox | Projects, worktrees and the `worktrees.nix` that ties them together; orchestration of VM, herdr, sync and cleanup, from the CLI and the TUI. |
 
 - cli-toolbox never reads Nix internals. It only runs `nix run .#<app>` in the
-  project directory, and reads `runner.json`.
+  project directory, and reads `runner.json`; `agent vm stop` signals the
+  runner it records, as the `stop` app does.
 - `vm.workspaces` and `stateDir` are fixed when the flake is built, so mounting a
   new worktree needs a VM restart. cli-toolbox remembers what the running VM
   mounted (`state/<project>/mounted-worktrees.nix`) and says when a restart is due.

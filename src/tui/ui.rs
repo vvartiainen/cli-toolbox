@@ -841,7 +841,10 @@ mod tests {
             error: None,
         };
         let mut app = App::new("/tmp/project".into());
-        app.loaded(ToolId::SandboxProjects, Ok(vec![Resource::Project(status)]));
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(status))]),
+        );
         let list = rendered(&app, 100, super::HEIGHT);
         assert!(
             list.contains("demo  [stopped]  1 worktree(s)  /p/demo"),

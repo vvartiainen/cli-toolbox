@@ -8,8 +8,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::{Error, exec};
 
@@ -21,11 +23,17 @@ pub(crate) const RUNTIME_ROOT_ENV: &str = "AGENT_SANDBOX_RUNTIME_ROOT";
 /// Host loopback SSH ports handed out to project VMs.
 pub(crate) const SSH_PORTS: RangeInclusive<u16> = 2300..=2399;
 
+/// How long `stop` waits for a runner before killing it, like the runner.
+const STOP_TIMEOUT_ENV: &str = "AGENT_SANDBOX_STOP_TIMEOUT";
+const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The state the runner of a running VM records in `runner.json`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunnerState {
     pub(crate) pid: u32,
+    #[serde(default)]
+    pub(crate) vm_pid: Option<u32>,
     #[serde(default)]
     pub(crate) ssh_port: Option<u16>,
     pub(crate) name: String,
@@ -33,6 +41,17 @@ pub(crate) struct RunnerState {
     pub(crate) runtime_dir: PathBuf,
     #[serde(default)]
     pub(crate) console_log: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) started_at: Option<String>,
+}
+
+/// How a VM went down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Stopped {
+    /// The runner shut the VM down on SIGTERM.
+    Terminated,
+    /// The runner did not exit in time; it and its VM process were killed.
+    Killed,
 }
 
 /// Start the VM of the flake in `dir` in the background and wait until it
@@ -87,6 +106,111 @@ fn resolve_runtime_root(
             .or_else(|| home.map(|home| home.join(".local/state")))
             .map(|state| state.join("agent-sandbox"))
     })
+}
+
+/// The runtime directory name of the VM started from `dir`, as the runner
+/// derives it: `<basename>-<first 12 hex digits of sha256(dir)>`.
+pub(crate) fn runtime_dir_name(dir: &Path) -> String {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let hash = format!("{:x}", Sha256::digest(dir.as_os_str().as_encoded_bytes()));
+    format!("{name}-{}", &hash[..12])
+}
+
+/// Stop `vm` by signalling its runner, like the flake's `stop` app but
+/// without the directory it was started from: SIGTERM, then SIGKILL to the
+/// runner and its VM process after `timeout`.
+pub(crate) fn stop_vm(vm: &RunnerState, timeout: Duration) -> Result<Stopped, Error> {
+    if !runner_alive(vm.pid) {
+        return Err(Error::msg(format!(
+            "{}: runner {} is not running",
+            vm.name, vm.pid
+        )));
+    }
+    // Only a VM process that belongs to this runtime directory is killed,
+    // so a reused PID is left alone.
+    let vm_pid = vm.vm_pid.filter(|&pid| {
+        exec::combined_output("ps", &["-p", &pid.to_string(), "-o", "command="], None)
+            .is_ok_and(|command| command.contains(&*vm.runtime_dir.to_string_lossy()))
+    });
+    signal(vm.pid, libc::SIGTERM)?;
+    let deadline = Instant::now() + timeout;
+    while process_exists(vm.pid) {
+        if Instant::now() >= deadline {
+            let _ = signal(vm.pid, libc::SIGKILL);
+            if let Some(pid) = vm_pid {
+                let _ = signal(pid, libc::SIGKILL);
+            }
+            let _ = fs::remove_file(vm.runtime_dir.join("runner.json"));
+            return Ok(Stopped::Killed);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(Stopped::Terminated)
+}
+
+/// `$AGENT_SANDBOX_STOP_TIMEOUT` seconds, or 30.
+pub(crate) fn stop_timeout() -> Duration {
+    std::env::var(STOP_TIMEOUT_ENV)
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_STOP_TIMEOUT)
+}
+
+/// Runtime directories under `root` with no running VM whose start
+/// directory is gone: neither the directory recorded in `runner.json` nor
+/// one of `keep` (the existing projects) owns them.
+pub(crate) fn stale_runtime_dirs(root: &Path, keep: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(root.join("vms")) else {
+        return Vec::new();
+    };
+    let kept: Vec<String> = keep
+        .iter()
+        .map(|dir| runtime_dir_name(&dir.canonicalize().unwrap_or_else(|_| dir.clone())))
+        .collect();
+    let mut stale: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            let state = fs::read_to_string(path.join("runner.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<RunnerState>(&text).ok());
+            if state
+                .as_ref()
+                .is_some_and(|state| runner_alive(state.pid) || state.dir.exists())
+            {
+                return false;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            !kept.iter().any(|kept| *kept == name)
+        })
+        .collect();
+    stale.sort();
+    stale
+}
+
+fn signal(pid: u32, signal: libc::c_int) -> Result<(), Error> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| Error::msg(format!("invalid PID {pid}")))?;
+    // SAFETY: kill(2) only takes plain integers.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(Error::msg(format!(
+            "signal {pid}: {}",
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+
+fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// The VMs that are running now, from every `runner.json` under `root`.
@@ -166,6 +290,65 @@ mod tests {
         let dead = RUNNER_JSON.replace("4242", "0");
         fs::write(dir.join("runner.json"), dead).unwrap();
         assert!(running_vms(root.path()).is_empty());
+    }
+
+    #[test]
+    fn runtime_dir_names_match_the_runner() {
+        assert_eq!(
+            runtime_dir_name(Path::new(
+                "/Users/vvarti/.agent-sandbox/projects/hydrocap-app-template"
+            )),
+            "hydrocap-app-template-d6be8223f126"
+        );
+    }
+
+    #[test]
+    fn stale_runtime_dirs_skip_existing_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/demo");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let kept = root.path().join("vms").join(runtime_dir_name(&project));
+        let orphan = root.path().join("vms/gone-0123456789ab");
+        let recorded = root.path().join("vms/other-ba9876543210");
+        for dir in [&kept, &orphan, &recorded] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        // A dead runner whose start directory still exists is kept.
+        let state = RUNNER_JSON
+            .replace("4242", "0")
+            .replace("/sandbox/projects/demo", &project.to_string_lossy());
+        fs::write(recorded.join("runner.json"), state).unwrap();
+        assert_eq!(stale_runtime_dirs(root.path(), &[project]), vec![orphan]);
+    }
+
+    #[test]
+    fn stop_vm_terminates_the_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = dir.path().join("agent-sandbox-run");
+        fs::write(
+            &runner,
+            "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 0.1; done\n",
+        )
+        .unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg(&runner)
+            .spawn()
+            .unwrap();
+        let vm = RunnerState {
+            pid: child.id(),
+            name: "agent-demo".into(),
+            dir: dir.path().into(),
+            runtime_dir: dir.path().into(),
+            ..RunnerState::default()
+        };
+        // Reap the runner as it exits, so it does not linger as a zombie.
+        let waiter = std::thread::spawn(move || child.wait());
+        assert_eq!(
+            stop_vm(&vm, Duration::from_secs(10)).unwrap(),
+            Stopped::Terminated
+        );
+        assert!(waiter.join().unwrap().is_ok());
     }
 
     #[test]

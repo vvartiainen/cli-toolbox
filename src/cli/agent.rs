@@ -31,6 +31,16 @@ enum AgentCommands {
         #[command(subcommand)]
         command: ProjectCommands,
     },
+    /// Every running agent-sandbox VM, also those whose project is gone.
+    #[command(
+        subcommand_required = true,
+        subcommand_value_name = "command",
+        after_help = "Works from the runner.json files in ${AGENT_SANDBOX_RUNTIME_ROOT:-${XDG_STATE_HOME:-~/.local/state}/agent-sandbox}/vms, so it also reaches VMs whose project or flake directory was removed. Use `agent project stop` for the VM of an existing project."
+    )]
+    Vm {
+        #[command(subcommand)]
+        command: VmCommands,
+    },
     /// Manage git worktrees for AI agents.
     #[command(
         subcommand_required = true,
@@ -119,6 +129,26 @@ enum ProjectCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum VmCommands {
+    /// List running VMs: host alias, runner PID, SSH port, start time and start directory.
+    List,
+    /// Stop a running VM and remove its herdr machine.
+    #[command(
+        after_help = "Sends SIGTERM to the VM's runner, which shuts the VM down; after $AGENT_SANDBOX_STOP_TIMEOUT seconds (default 30) the runner and its VM process are killed. Without NAME, stops the only running VM or picks one."
+    )]
+    Stop {
+        /// Host alias (agent-<project>) or start directory name.
+        #[arg(conflicts_with = "all")]
+        name: Option<String>,
+        /// Stop every running VM.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Remove the runtime directories of stopped VMs whose start directory is gone.
+    Prune,
+}
+
 #[derive(Debug, Args)]
 struct BootArgs {
     /// Agent kind herdr starts in each guest workspace, e.g. claude or codex (default: $CLI_TOOLBOX_AGENT).
@@ -166,6 +196,7 @@ impl AgentCmd {
         match self.command {
             AgentCommands::Worktree { command } => run_worktree(command, stdout, stderr),
             AgentCommands::Project { command } => run_project(command, stdout, stderr),
+            AgentCommands::Vm { command } => run_vm(command, stdout, stderr),
         }
     }
 }
@@ -262,6 +293,24 @@ fn run_project(
             writeln!(stdout, "{}", worktree.branch)?;
             finish(&steps, stderr)
         }
+    }
+}
+
+fn run_vm(
+    command: VmCommands,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Error> {
+    match command {
+        VmCommands::List => vm::vm_list(stdout),
+        VmCommands::Stop { name, all } => {
+            let steps: Vec<_> = vm::select_vms(name.as_deref(), all)?
+                .iter()
+                .flat_map(vm::vm_stop)
+                .collect();
+            finish(&steps, stderr)
+        }
+        VmCommands::Prune => finish(&vm::vm_prune(&project::sandbox_dir()?)?, stderr),
     }
 }
 

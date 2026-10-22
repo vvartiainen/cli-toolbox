@@ -66,7 +66,7 @@ impl Context {
                 .collect()),
             ToolId::SandboxProjects => Ok(vm::statuses(&project::sandbox_dir()?)?
                 .into_iter()
-                .map(Resource::Project)
+                .map(|status| Resource::Project(Box::new(status)))
                 .collect()),
             _ => {
                 let home = dirs::home_dir().ok_or_else(|| {

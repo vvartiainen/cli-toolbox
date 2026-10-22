@@ -135,7 +135,7 @@ pub(crate) enum Resource {
     Kitty(Choice),
     Ssh(Host),
     Worktree(AgentWorktree),
-    Project(ProjectStatus),
+    Project(Box<ProjectStatus>),
 }
 
 impl Resource {
@@ -317,7 +317,7 @@ pub(crate) enum Screen {
     Home,
     Picker(PickerState),
     WorktreeDetails(DetailsState),
-    ProjectDetails(ProjectState),
+    ProjectDetails(Box<ProjectState>),
     ConfirmCleanup(ConfirmState),
     Result(ResultState),
 }
@@ -612,11 +612,11 @@ impl App {
                             .picker()
                             .cloned()
                             .unwrap_or_else(|| PickerState::new(ToolId::SandboxProjects));
-                        self.screen = Screen::ProjectDetails(ProjectState {
-                            status,
+                        self.screen = Screen::ProjectDetails(Box::new(ProjectState {
+                            status: *status,
                             selected: 0,
                             return_picker,
-                        });
+                        }));
                         Effect::None
                     }
                     _ => Effect::None,
@@ -1093,10 +1093,10 @@ mod tests {
         let second = worktree("demo-agent-wt-2");
         app.loaded(
             ToolId::SandboxProjects,
-            Ok(vec![Resource::Project(project(
+            Ok(vec![Resource::Project(Box::new(project(
                 "demo",
                 &[first.clone(), second.clone()],
-            ))]),
+            )))]),
         );
         assert_eq!(
             app.handle_key(ctrl('a')),
