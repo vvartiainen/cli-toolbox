@@ -206,9 +206,13 @@ fn signal(pid: u32, signal: libc::c_int) -> Result<(), Error> {
 }
 
 fn process_exists(pid: u32) -> bool {
+    // kill(0, …) signals the whole process group, so PID 0 never names a VM.
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
+    if pid == 0 {
+        return false;
+    }
     // SAFETY: signal 0 only checks that the process exists.
     unsafe { libc::kill(pid, 0) == 0 }
 }
@@ -233,10 +237,15 @@ pub(crate) fn vm_for(running: &[RunnerState], dir: &Path) -> Option<RunnerState>
     running.iter().find(|state| state.dir == dir).cloned()
 }
 
-/// Whether `pid` is an agent-sandbox runner, the same check the runner uses.
+/// Whether `pid` is an agent-sandbox runner, the same check the runner uses:
+/// the process exists, and its command line names the runner. Where `ps` is
+/// not allowed, as in the Nix build sandbox, the process existing is enough.
 fn runner_alive(pid: u32) -> bool {
+    if !process_exists(pid) {
+        return false;
+    }
     exec::combined_output("ps", &["-p", &pid.to_string(), "-o", "command="], None)
-        .is_ok_and(|command| command.contains("agent-sandbox-run"))
+        .map_or(true, |command| command.contains("agent-sandbox-run"))
 }
 
 #[cfg(test)]
