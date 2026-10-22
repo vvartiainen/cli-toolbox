@@ -183,7 +183,8 @@ pub(crate) fn resolve(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SshKey {
-    /// `~/.ssh/*.pub`, then the first key of the SSH agent.
+    /// The ssh config's IdentityFile for the VM's port, `~/.ssh/*.pub`,
+    /// then the first key of the SSH agent.
     Auto,
     File(PathBuf),
     None,
@@ -242,7 +243,7 @@ pub(crate) fn create(
     )?;
 
     let key = match &options.ssh_key {
-        SshKey::Auto => find_public_key(),
+        SshKey::Auto => find_public_key(port),
         SshKey::File(path) => Some(read_public_key(path)?),
         SshKey::None => None,
     };
@@ -483,11 +484,30 @@ fn project_name(repo: &Path) -> String {
     }
 }
 
-fn find_public_key() -> Option<String> {
-    let ssh = dirs::home_dir()?.join(".ssh");
-    ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"]
+/// The identity files ssh config sets for the VM's loopback port come first,
+/// since with `IdentitiesOnly` ssh offers nothing else.
+fn find_public_key(port: u16) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let configured = exec::combined_output(
+        "ssh",
+        &["-G", "-p", &port.to_string(), "agent@127.0.0.1"],
+        None,
+    )
+    .map(|config| configured_identity_files(&config, &home))
+    .unwrap_or_default();
+    let ssh = home.join(".ssh");
+    configured
         .iter()
-        .find_map(|file| read_public_key(&ssh.join(file)).ok())
+        .find_map(|identity| {
+            let mut public = identity.clone().into_os_string();
+            public.push(".pub");
+            read_public_key(Path::new(&public)).ok()
+        })
+        .or_else(|| {
+            ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"]
+                .iter()
+                .find_map(|file| read_public_key(&ssh.join(file)).ok())
+        })
         .or_else(|| {
             exec::combined_output("ssh-add", &["-L"], None)
                 .ok()?
@@ -495,6 +515,33 @@ fn find_public_key() -> Option<String> {
                 .find(|line| line.starts_with("ssh-"))
                 .map(str::to_string)
         })
+}
+
+/// The `identityfile` entries of `ssh -G` output, with `~` expanded, or none
+/// when they are just ssh's defaults.
+fn configured_identity_files(config: &str, home: &Path) -> Vec<PathBuf> {
+    const DEFAULTS: [&str; 5] = [
+        "~/.ssh/id_rsa",
+        "~/.ssh/id_ecdsa",
+        "~/.ssh/id_ecdsa_sk",
+        "~/.ssh/id_ed25519",
+        "~/.ssh/id_ed25519_sk",
+    ];
+    let files: Vec<&str> = config
+        .lines()
+        .filter_map(|line| line.strip_prefix("identityfile "))
+        .map(str::trim)
+        .collect();
+    if files == DEFAULTS {
+        return Vec::new();
+    }
+    files
+        .into_iter()
+        .map(|file| match file.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => PathBuf::from(file),
+        })
+        .collect()
 }
 
 fn read_public_key(path: &Path) -> Result<String, Error> {
@@ -756,5 +803,20 @@ mod tests {
         assert_eq!(read_public_key(&key).unwrap(), "ssh-ed25519 AAAAC3 me@mac");
         fs::write(&key, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
         assert!(read_public_key(&key).is_err());
+    }
+
+    #[test]
+    fn configured_identity_files_come_from_ssh_config() {
+        let home = Path::new("/home/me");
+        let configured = "user agent\nidentitiesonly yes\nidentityfile ~/.ssh/agent-sandbox-key\nidentityfile /keys/other\n";
+        assert_eq!(
+            configured_identity_files(configured, home),
+            [
+                PathBuf::from("/home/me/.ssh/agent-sandbox-key"),
+                PathBuf::from("/keys/other"),
+            ]
+        );
+        let defaults = "identityfile ~/.ssh/id_rsa\nidentityfile ~/.ssh/id_ecdsa\nidentityfile ~/.ssh/id_ecdsa_sk\nidentityfile ~/.ssh/id_ed25519\nidentityfile ~/.ssh/id_ed25519_sk\n";
+        assert!(configured_identity_files(defaults, home).is_empty());
     }
 }

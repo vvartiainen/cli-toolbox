@@ -71,7 +71,7 @@ enum ProjectCommands {
         /// agent-sandbox flake reference to use.
         #[arg(long, value_name = "FLAKE")]
         from: Option<String>,
-        /// SSH public key to authorize (default: ~/.ssh/*.pub, then the SSH agent).
+        /// SSH public key to authorize (default: the ssh config's IdentityFile for the VM, ~/.ssh/*.pub, then the SSH agent).
         #[arg(long, value_name = "PATH", conflicts_with = "no_ssh_key")]
         ssh_key: Option<PathBuf>,
         /// Keep the template's placeholder key.
