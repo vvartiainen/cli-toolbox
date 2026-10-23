@@ -315,7 +315,9 @@ struct FlakeSettings<'a> {
 }
 
 /// Point a template at `source` and the project's state, mount the
-/// generated worktrees and keep guest paths per worktree.
+/// generated worktrees, and apply guest paths and init steps to every
+/// worktree. Those name no worktree, so adding or removing one does not
+/// rebuild the guest system.
 fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
     let mut named = false;
     let mut out: Vec<String> = text
@@ -344,6 +346,8 @@ fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
                 format!("{indent}ssh.hostPort = {};", settings.ssh_port)
             } else if let Some(paths) = per_worktree_guest_paths(trimmed) {
                 format!("{indent}{paths}")
+            } else if trimmed.starts_with("init.steps.") && trimmed.ends_with("= {") {
+                format!("{line}\n{indent}  eachWorkspace = true;")
             } else {
                 line.to_string()
             }
@@ -359,7 +363,7 @@ fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
     }
 }
 
-/// `guestPaths = [ "app/target" ];` → the same path in every worktree.
+/// `guestPaths = [ "app/target" ];` → `"*/target"`, the path in every worktree.
 fn per_worktree_guest_paths(line: &str) -> Option<String> {
     let list = line
         .strip_prefix("guestPaths = [")?
@@ -374,14 +378,8 @@ fn per_worktree_guest_paths(line: &str) -> Option<String> {
     if paths.is_empty() {
         return None;
     }
-    let items: Vec<String> = paths
-        .iter()
-        .map(|path| format!("\"${{w}}/{path}\""))
-        .collect();
-    Some(format!(
-        "guestPaths = builtins.concatMap (w: [ {} ]) (builtins.attrNames (import ./{WORKTREES_FILE}));",
-        items.join(" ")
-    ))
+    let items: Vec<String> = paths.iter().map(|path| format!("\"*/{path}\"")).collect();
+    Some(format!("guestPaths = [ {} ];", items.join(" ")))
 }
 
 /// The generated `worktrees.nix`: worktree name → host path.
@@ -588,7 +586,7 @@ pub(crate) fn run_setup_agent(
     let instructions = fs::read_to_string(metadata.path.join(SETUP_PROMPT))
         .map_err(|err| Error::msg(format!("read {SETUP_PROMPT} from {source}: {err}")))?;
     let prompt = format!(
-        "{instructions}\n\nThe flake to tailor is {}/flake.nix, kept centrally. It is shared by every agent worktree of this repository: `vm.workspaces` comes from the generated ./{WORKTREES_FILE} (worktree name → path, mounted at /workspace/<name>), so write guest paths and init steps for every worktree, for example `guestPaths = builtins.concatMap (w: [ \"${{w}}/target\" ]) (builtins.attrNames (import ./{WORKTREES_FILE}));` and init steps with `directory = <worktree name>` generated the same way. Do not edit {WORKTREES_FILE}.",
+        "{instructions}\n\nThe flake to tailor is {}/flake.nix, kept centrally. It is shared by every agent worktree of this repository: `vm.workspaces` comes from the generated ./{WORKTREES_FILE} (worktree name → path, mounted at /workspace/<name>), so write guest paths and init steps for every worktree without naming any: `guestPaths = [ \"*/target\" ];` and init steps with `eachWorkspace = true;` (their `directory` is then relative to each worktree). The guest system then stays the same when worktrees come and go. Do not edit {WORKTREES_FILE} or use it outside `vm.workspaces`.",
         project.dir.display()
     );
     exec::require(agent)?;
@@ -646,6 +644,9 @@ mod tests {
       environment = [
         ({ pkgs, ... }: {
           guestPaths = [ "app/target" "app/.venv" ];
+          init.steps.cargo-fetch = {
+            script = "cargo fetch";
+          };
           ssh.authorizedKeys = [ "ssh-ed25519 AAAA... your-key-comment" ];
           name = "other";
         })
@@ -682,7 +683,8 @@ mod tests {
             "        workspaces = import ./worktrees.nix;",
             "        stateDir = \"/home/me/.agent-sandbox/state/cli-toolbox\";",
             "        ssh.hostPort = 2305;",
-            "guestPaths = builtins.concatMap (w: [ \"${w}/target\" \"${w}/.venv\" ]) (builtins.attrNames (import ./worktrees.nix));",
+            "          guestPaths = [ \"*/target\" \"*/.venv\" ];",
+            "          init.steps.cargo-fetch = {\n            eachWorkspace = true;\n",
             "\"ssh-ed25519 AAAAC3 me@mac\"",
             "name = \"other\"",
         ] {
