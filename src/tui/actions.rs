@@ -241,6 +241,8 @@ impl Context {
                     template: None,
                     source: None,
                     ssh_key: SshKey::Auto,
+                    proxy: true,
+                    backlog: true,
                 };
                 let (project, created) = vm::create(
                     &project::sandbox_dir()?,

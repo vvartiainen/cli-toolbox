@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::setup;
 use crate::git::AgentWorktree;
 use crate::{Error, exec};
 
@@ -210,6 +211,10 @@ pub(crate) struct CreateOptions {
     /// The agent-sandbox flake reference.
     pub(crate) source: Option<String>,
     pub(crate) ssh_key: SshKey,
+    /// Take agent credentials from agent-proxy on the host.
+    pub(crate) proxy: bool,
+    /// Give the project a backlog under [`setup::backlog_root`], if there is one.
+    pub(crate) backlog: bool,
 }
 
 /// Create `<root>/projects/<name>/flake.nix` from an agent-sandbox template.
@@ -263,12 +268,19 @@ pub(crate) fn create(
         )?;
     }
     let text = fs::read_to_string(&flake)?;
+    let backlog_dir = options
+        .backlog
+        .then(setup::backlog_root)
+        .flatten()
+        .map(|root| root.join(&name));
     let settings = FlakeSettings {
         source: &source,
         name: &name,
         state_dir: &project.state_dir,
         ssh_port: port,
         key: key.as_deref(),
+        proxy: options.proxy,
+        backlog_dir: backlog_dir.as_deref(),
     };
     fs::write(&flake, customize_flake(&text, &settings))?;
     project.write_worktrees(&[])?;
@@ -295,7 +307,9 @@ fn track_in_git(dir: &Path, files: &[&str]) {
     }
 }
 
-fn source(given: Option<&str>) -> String {
+/// The agent-sandbox flake: `given`, `$CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`, then
+/// the upstream repository.
+pub(crate) fn source(given: Option<&str>) -> String {
     given
         .map(str::to_string)
         .or_else(|| {
@@ -312,12 +326,15 @@ struct FlakeSettings<'a> {
     state_dir: &'a Path,
     ssh_port: u16,
     key: Option<&'a str>,
+    proxy: bool,
+    backlog_dir: Option<&'a Path>,
 }
 
 /// Point a template at `source` and the project's state, mount the
 /// generated worktrees, and apply guest paths and init steps to every
 /// worktree. Those name no worktree, so adding or removing one does not
-/// rebuild the guest system.
+/// rebuild the guest system. Adds the cli-toolbox defaults module and the
+/// backlog folder.
 fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
     let mut named = false;
     let mut out: Vec<String> = text
@@ -343,7 +360,22 @@ fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
                     nix_string(&settings.state_dir.to_string_lossy())
                 )
             } else if trimmed.starts_with("ssh.hostPort =") {
-                format!("{indent}ssh.hostPort = {};", settings.ssh_port)
+                let port = format!("{indent}ssh.hostPort = {};", settings.ssh_port);
+                match settings.backlog_dir {
+                    Some(dir) => format!(
+                        "{port}\n{indent}backlogDir = {};",
+                        nix_string(&dir.to_string_lossy())
+                    ),
+                    None => port,
+                }
+            } else if trimmed == "environment = [" {
+                let module = setup::defaults_module(
+                    settings.name,
+                    settings.proxy,
+                    settings.backlog_dir.is_some(),
+                    &format!("{indent}  "),
+                );
+                format!("{line}\n{module}")
             } else if let Some(paths) = per_worktree_guest_paths(trimmed) {
                 format!("{indent}{paths}")
             } else if trimmed.starts_with("init.steps.") && trimmed.ends_with("= {") {
@@ -398,7 +430,7 @@ pub(crate) fn worktrees_nix(worktrees: &[AgentWorktree]) -> String {
     text
 }
 
-fn nix_string(value: &str) -> String {
+pub(crate) fn nix_string(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -570,6 +602,14 @@ struct FlakeMetadata {
     path: PathBuf,
 }
 
+/// The store path of the agent-sandbox flake `source`.
+pub(crate) fn source_dir(source: &str) -> Result<PathBuf, Error> {
+    let json = exec::combined_output("nix", &["flake", "metadata", "--json", source], None)?;
+    let metadata: FlakeMetadata = serde_json::from_str(json.lines().last().unwrap_or_default())
+        .map_err(|err| Error::msg(format!("parse nix flake metadata: {err}")))?;
+    Ok(metadata.path)
+}
+
 /// Start `agent` in the repository with agent-sandbox's setup instructions
 /// to tailor the project's flake.
 pub(crate) fn run_setup_agent(
@@ -580,13 +620,10 @@ pub(crate) fn run_setup_agent(
 ) -> Result<(), Error> {
     let source = self::source(source);
     let repo = project.repo()?;
-    let json = exec::combined_output("nix", &["flake", "metadata", "--json", &source], None)?;
-    let metadata: FlakeMetadata = serde_json::from_str(json.lines().last().unwrap_or_default())
-        .map_err(|err| Error::msg(format!("parse nix flake metadata: {err}")))?;
-    let instructions = fs::read_to_string(metadata.path.join(SETUP_PROMPT))
+    let instructions = fs::read_to_string(source_dir(&source)?.join(SETUP_PROMPT))
         .map_err(|err| Error::msg(format!("read {SETUP_PROMPT} from {source}: {err}")))?;
     let prompt = format!(
-        "{instructions}\n\nThe flake to tailor is {}/flake.nix, kept centrally. It is shared by every agent worktree of this repository: `vm.workspaces` comes from the generated ./{WORKTREES_FILE} (worktree name → path, mounted at /workspace/<name>), so write guest paths and init steps for every worktree without naming any: `guestPaths = [ \"*/target\" ];` and init steps with `eachWorkspace = true;` (their `directory` is then relative to each worktree). The guest system then stays the same when worktrees come and go. Do not edit {WORKTREES_FILE} or use it outside `vm.workspaces`.",
+        "{instructions}\n\nThe flake to tailor is {}/flake.nix, kept centrally. It is shared by every agent worktree of this repository: `vm.workspaces` comes from the generated ./{WORKTREES_FILE} (worktree name → path, mounted at /workspace/<name>), so write guest paths and init steps for every worktree without naming any: `guestPaths = [ \"*/target\" ];` and init steps with `eachWorkspace = true;` (their `directory` is then relative to each worktree). The guest system then stays the same when worktrees come and go. Do not edit {WORKTREES_FILE} or use it outside `vm.workspaces`. Leave the cli-toolbox defaults module (proxy, ai) and `vm.backlogDir` as they are; cli-toolbox sets up the host side of both.",
         project.dir.display()
     );
     exec::require(agent)?;
@@ -667,6 +704,8 @@ mod tests {
             state_dir,
             ssh_port: 2305,
             key,
+            proxy: true,
+            backlog_dir: Some(Path::new("/home/me/Agents/cli-toolbox")),
         }
     }
 
@@ -687,6 +726,10 @@ mod tests {
             "          init.steps.cargo-fetch = {\n            eachWorkspace = true;\n",
             "\"ssh-ed25519 AAAAC3 me@mac\"",
             "name = \"other\"",
+            "      environment = [\n        # cli-toolbox defaults",
+            "          proxy = {\n            enable = true;\n            client = \"cli-toolbox\";",
+            "            backlog.enable = true;",
+            "        ssh.hostPort = 2305;\n        backlogDir = \"/home/me/Agents/cli-toolbox\";",
         ] {
             assert!(text.contains(want), "missing {want}:\n{text}");
         }

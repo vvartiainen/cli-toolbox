@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::{Error, exec};
 
 pub(crate) mod project;
+pub(crate) mod setup;
 
 /// Overrides agent-sandbox's runtime state root, like the runner does.
 pub(crate) const RUNTIME_ROOT_ENV: &str = "AGENT_SANDBOX_RUNTIME_ROOT";

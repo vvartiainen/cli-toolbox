@@ -31,7 +31,7 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 - `src/aws`, `src/azure`, `src/git`, `src/herdr`, `src/kitty`, `src/project`, `src/sandbox`, `src/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command modules
 - `src/agent`: agent worktree workflows that combine git, project init and Herdr; shared by the CLI and the TUI
   - `src/agent/vm.rs`: sandbox projects (one agent-sandbox VM per project mounting its worktrees, + herdr machine): create, add, start, stop, restart, sync, done, list
-- `src/sandbox`: agent-sandbox integration through the project flake's apps and `runner.json`; `project.rs` discovers and creates the central projects in `~/.agent-sandbox/projects` and writes their `worktrees.nix`
+- `src/sandbox`: agent-sandbox integration through the project flake's apps and `runner.json`; `project.rs` discovers and creates the central projects in `~/.agent-sandbox/projects` and writes their `worktrees.nix`; `setup.rs` holds the shared proxy and backlog setup
 - `src/select.rs`: shared interactive picker (`fzf` when available, ratatui otherwise)
 - `src/exec.rs`: PATH lookup and process helpers
 - Tests live next to the module they cover

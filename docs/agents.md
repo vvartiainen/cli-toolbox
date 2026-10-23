@@ -117,7 +117,8 @@ cli-toolbox agent project done cli-toolbox-agent-wt-2
 | Command | What it does |
 | --- | --- |
 | `agent project list` | Projects with VM state and SSH port, and their worktrees. |
-| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes your SSH public key and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Then creates the first agent worktree. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
+| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes your SSH public key and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Adds a cli-toolbox defaults module (see [Shared setup](#shared-setup)). Then creates the first agent worktree and runs `agent project setup`. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
+| `agent project setup [project]` | Sets up the host side of the flake's proxy credentials and backlog; see [Shared setup](#shared-setup). Safe to re-run. |
 | `agent project start [project]` | Writes `worktrees.nix`, runs the flake's `start` app (detached; waits for guest SSH), runs `herdr-add` and opens a herdr workspace at `/workspace/<worktree>` for every worktree, starting the agent (`--agent KIND` or `CLI_TOOLBOX_AGENT`) in each. |
 | `agent project stop\|restart [project]` | Stops or restarts the VM. Stopping signals the runner like `agent vm stop`, so it works without a worktree to mount (after the last `done`), and removes the VM's machine from the host herdr; the next start adds it again. A restart mounts worktrees added or removed since the start. |
 | `agent project add [project]` | Creates the next agent worktree of the project's repository and prints its path. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). |
@@ -127,6 +128,35 @@ cli-toolbox agent project done cli-toolbox-agent-wt-2
 `[project]` defaults to the project of the current repository, then to the only
 project. VM state comes from agent-sandbox's `runner.json` files under
 `~/.local/state/agent-sandbox/vms/`.
+
+### Shared setup
+
+Every new project gets the same agent setup, from a module `project create` adds
+at the top of the flake's `environment`:
+
+- Claude Code and Codex (and Pi, on by default) take their credentials from
+  [agent-proxy](https://github.com/vvartiainen/agent-sandbox-setup/blob/main/docs/proxy.md)
+  on the host, so nothing logs in inside the guest: `proxy` with the client
+  named after the project and `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_OAUTH_TOKEN`
+  placeholders, and `ai.chatgptLoginFromProxy`. `--no-proxy` leaves this out.
+- A Backlog.md backlog for the agents (`ai.backlog` and `vm.backlogDir`) in
+  `$CLI_TOOLBOX_BACKLOG_ROOT/<project>`, by default the Obsidian `Agents` folder in
+  iCloud when it exists. An empty `CLI_TOOLBOX_BACKLOG_ROOT` or `--no-backlog` leaves
+  it out.
+
+`agent project setup` then does the host side of what the flake uses, and
+`project create` runs it:
+
+- With `caCert = ./agent-proxy-ca.pem` in the flake, it runs agent-sandbox's
+  `scripts/agent-proxy-setup.sh` for `claude-code,codex`: it stores missing secrets
+  (prompting for them), creates the client and its keychain token, and writes the CA
+  next to the flake. agent-proxy must be running, and on `PATH` or in
+  `AGENT_PROXY_FLAKE`.
+- With `vm.backlogDir`, it creates that folder and runs `backlog init` in it
+  unless it already has a backlog.
+
+Run it again after fixing a failed step, or for a project whose flake you added
+these settings to by hand.
 
 ### Running VMs
 

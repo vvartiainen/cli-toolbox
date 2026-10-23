@@ -59,7 +59,7 @@ enum ProjectCommands {
     List,
     /// Create a sandbox project for the current repository and its first worktree.
     #[command(
-        after_help = "Creates <sandbox dir>/projects/<name>/flake.nix from `nix flake init -t <agent-sandbox>#<template>`, points its agent-sandbox input at the same flake, keeps the guest home in <sandbox dir>/state/<name>, picks a free SSH port (2300-2399), authorizes your SSH public key and mounts the generated worktrees.nix. Then creates the repository's first agent worktree.\n\nWith --ai, a coding agent then tailors the toolchain to the repository following agent-sandbox's docs/setup-agent.md.\n\nThe agent-sandbox flake defaults to $CLI_TOOLBOX_AGENT_SANDBOX_FLAKE, then the upstream repository."
+        after_help = "Creates <sandbox dir>/projects/<name>/flake.nix from `nix flake init -t <agent-sandbox>#<template>`, points its agent-sandbox input at the same flake, keeps the guest home in <sandbox dir>/state/<name>, picks a free SSH port (2300-2399), authorizes your SSH public key and mounts the generated worktrees.nix. It adds a cli-toolbox defaults module: Claude Code and Codex with their credentials from agent-proxy on the host, and a Backlog.md backlog in $CLI_TOOLBOX_BACKLOG_ROOT/<name> (default: the Obsidian Agents folder in iCloud, when it exists). Then creates the repository's first agent worktree and runs `agent project setup`.\n\nWith --ai, a coding agent then tailors the toolchain to the repository following agent-sandbox's docs/setup-agent.md.\n\nThe agent-sandbox flake defaults to $CLI_TOOLBOX_AGENT_SANDBOX_FLAKE, then the upstream repository."
     )]
     Create {
         /// Project name (default: the repository's directory name).
@@ -80,7 +80,18 @@ enum ProjectCommands {
         /// Let a coding agent tailor the flake: optionally the agent kind (default: $CLI_TOOLBOX_AGENT or claude).
         #[arg(long, value_name = "KIND", num_args = 0..=1, default_missing_value = "")]
         ai: Option<String>,
+        /// Do not take agent credentials from agent-proxy.
+        #[arg(long)]
+        no_proxy: bool,
+        /// Do not give the project a backlog.
+        #[arg(long)]
+        no_backlog: bool,
     },
+    /// Set up the host side of the project's proxy credentials and backlog.
+    #[command(
+        after_help = "When flake.nix takes its credentials from agent-proxy (caCert = ./agent-proxy-ca.pem), runs agent-sandbox's scripts/agent-proxy-setup.sh for the services claude-code and codex: it stores missing secrets (prompting for them), creates the client named after the project with its token in the login keychain, and writes agent-proxy-ca.pem next to the flake. agent-proxy must be running, and on PATH or in $AGENT_PROXY_FLAKE.\n\nWhen flake.nix sets vm.backlogDir, creates that folder and runs `backlog init` in it unless it already has a backlog.\n\nSafe to re-run; `agent project create` runs it."
+    )]
+    Setup { project: Option<String> },
     /// Start the project's VM and open its worktrees in herdr.
     Start {
         project: Option<String>,
@@ -216,6 +227,8 @@ fn run_project(
             ssh_key,
             no_ssh_key,
             ai,
+            no_proxy,
+            no_backlog,
         } => {
             let options = CreateOptions {
                 name,
@@ -227,6 +240,8 @@ fn run_project(
                     (None, true) => SshKey::None,
                     (None, false) => SshKey::Auto,
                 },
+                proxy: !no_proxy,
+                backlog: !no_backlog,
             };
             let ai = ai.map(|kind| {
                 if kind.is_empty() {
@@ -246,6 +261,7 @@ fn run_project(
             writeln!(stdout, "{}", project.dir.display())?;
             Ok(())
         }
+        ProjectCommands::Setup { project } => finish(&vm::setup(&resolve(&root, project)?), stderr),
         ProjectCommands::Start { project, boot } => {
             let steps = vm::start(&resolve(&root, project)?, &boot_options(boot), stderr)?;
             finish(&steps, stderr)

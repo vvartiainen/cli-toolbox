@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn prints_sandbox_project_help() {
         for command in [
-            "list", "create", "start", "stop", "restart", "add", "sync", "done",
+            "list", "create", "setup", "start", "stop", "restart", "add", "sync", "done",
         ] {
             let (result, stdout, stderr) = run_args(&["agent", "project", command, "--help"]);
             result.unwrap();

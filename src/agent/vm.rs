@@ -13,6 +13,7 @@ use std::path::Path;
 use super::{Created, Step};
 use crate::git::{self, AgentWorktree};
 use crate::sandbox::project::{self, CreateOptions, Project};
+use crate::sandbox::setup::{self, Backlog};
 use crate::sandbox::{self, RunnerState};
 use crate::{Error, herdr, select};
 
@@ -84,8 +85,9 @@ fn status_with(project: Project, running: &[RunnerState]) -> ProjectStatus {
     }
 }
 
-/// Create a project for the repository and its first worktree. With `ai`,
-/// that agent kind then tailors the flake to the repository.
+/// Create a project for the repository and its first worktree, and set up
+/// its host side. With `ai`, that agent kind then tailors the flake to the
+/// repository.
 pub(crate) fn create(
     root: &Path,
     worktrees_root: &Path,
@@ -101,6 +103,7 @@ pub(crate) fn create(
         project.dir.display(),
         worktree.name
     ))];
+    steps.extend(self::setup(&project));
     if let Some(agent) = ai {
         steps.push(
             match project::run_setup_agent(&project, options.source.as_deref(), agent, stderr) {
@@ -110,6 +113,33 @@ pub(crate) fn create(
         );
     }
     Ok((project, Created { worktree, steps }))
+}
+
+/// Set up the host side of what the project's flake uses: the agent-proxy
+/// client, token and CA, and the backlog folder. Safe to re-run.
+pub(crate) fn setup(project: &Project) -> Vec<Step> {
+    let flake = match std::fs::read_to_string(project.dir.join("flake.nix")) {
+        Ok(flake) => flake,
+        Err(err) => return vec![Step::Failed(format!("setup: read flake.nix: {err}"))],
+    };
+    let rerun = "fix it and run `cli-toolbox agent project setup`";
+    let proxy = match setup::proxy(project, &flake) {
+        Ok(true) => Step::Done(format!(
+            "proxy: client {} with its token and CA",
+            project.name
+        )),
+        Ok(false) => Step::Skipped("proxy: not used by flake.nix".into()),
+        Err(err) => Step::Failed(format!("proxy: {err}; {rerun}")),
+    };
+    let backlog = match setup::backlog(project, &flake) {
+        Ok(Backlog::Initialized(dir)) => {
+            Step::Done(format!("backlog: initialized {}", dir.display()))
+        }
+        Ok(Backlog::Exists(dir)) => Step::Done(format!("backlog: {}", dir.display())),
+        Ok(Backlog::Disabled) => Step::Skipped("backlog: no vm.backlogDir in flake.nix".into()),
+        Err(err) => Step::Failed(format!("backlog: {err}; {rerun}")),
+    };
+    vec![proxy, backlog]
 }
 
 /// Create the next agent worktree of the project's repository. A running VM
