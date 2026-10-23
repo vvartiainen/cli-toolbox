@@ -1,6 +1,7 @@
 mod agent;
 mod agents;
 mod aws;
+mod azure;
 mod complete;
 mod git;
 mod kitty;
@@ -14,6 +15,7 @@ use clap::{Parser, Subcommand};
 use self::agent::AgentCmd;
 use self::agents::AgentsCmd;
 use self::aws::AwsCmd;
+use self::azure::AzureCmd;
 use self::complete::CompletionCmd;
 use self::git::GitCmd;
 use self::kitty::KittyCmd;
@@ -39,6 +41,9 @@ enum Commands {
     Tui(TuiCmd),
     /// AWS helpers.
     Aws(AwsCmd),
+    /// Azure CLI helpers.
+    #[command(alias = "az")]
+    Azure(AzureCmd),
     /// AI agent helpers.
     Agent(AgentCmd),
     /// Project MCP and skill selections through Rulesync.
@@ -85,6 +90,7 @@ impl Commands {
         match self {
             Self::Tui(cmd) => cmd.run(stdout, stderr),
             Self::Aws(cmd) => cmd.run(stdout, stderr),
+            Self::Azure(cmd) => cmd.run(stdout, stderr),
             Self::Agent(cmd) => cmd.run(stdout, stderr),
             Self::Agents(cmd) => cmd.run(stdout, stderr),
             Self::Git(cmd) => cmd.run(stdout, stderr),
@@ -405,7 +411,7 @@ mod tests {
     #[test]
     fn generated_completion_includes_root_commands() {
         let stdout = generate_to_string("bash").unwrap();
-        for command in ["agent", "aws", "completion", "kitty", "ssh", "tui"] {
+        for command in ["agent", "aws", "azure", "completion", "kitty", "ssh", "tui"] {
             assert!(stdout.contains(command), "missing {command}: {stdout}");
         }
     }

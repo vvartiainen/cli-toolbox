@@ -75,6 +75,14 @@ pub fn combined_output(name: &str, args: &[&str], cwd: Option<&Path>) -> Result<
     }
 }
 
+/// Run `name` without a terminal and return its stdout. Stderr is captured
+/// and only shown in the error.
+pub fn captured_stdout(name: &str, args: &[&str]) -> Result<String, Error> {
+    let output = output(name, args, None)?;
+    status_ok(name, args, &output)?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 pub fn run_discard(name: &str, args: &[&str]) -> Result<(), Error> {
     let mut cmd = Command::new(name);
     cmd.args(args)

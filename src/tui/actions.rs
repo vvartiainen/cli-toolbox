@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::vm::{self, VmOptions};
+use crate::azure::{self, AccountAction, Az, AzCli};
 use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
 use crate::{Error, agent, aws, git, kitty, ssh};
 
@@ -72,6 +73,22 @@ impl Context {
                 .into_iter()
                 .map(|status| Resource::Project(Box::new(status)))
                 .collect()),
+            ToolId::AzureSubscription => {
+                let subscriptions = AzCli::new()?.subscriptions()?;
+                if subscriptions.is_empty() {
+                    return Err(Error::msg(
+                        "no Azure subscriptions: log in with Azure > Account > Log in",
+                    ));
+                }
+                Ok(subscriptions
+                    .into_iter()
+                    .map(Resource::AzureSubscription)
+                    .collect())
+            }
+            ToolId::AzureAccount => Ok(AccountAction::ALL
+                .into_iter()
+                .map(Resource::AzureAccount)
+                .collect()),
             ToolId::SandboxVms => Ok(vm::running_vms()
                 .into_iter()
                 .map(|vm| Resource::Vm(Box::new(vm)))
@@ -139,6 +156,49 @@ impl Context {
                     incomplete: false,
                     project: None,
                 })
+            }
+            Action::AzureSubscription(subscription) => {
+                let export = azure::use_subscription(&AzCli::new()?, subscription, stderr)?;
+                Ok(Done {
+                    body: format!(
+                        "Subscription ready: {}\n\nRun this in your shell after exiting (bash/zsh):\n{export}\n\nTo apply it automatically, start the launcher with `tui --print-shell` (see docs/tui.md).\n\nThe az CLI default subscription has been changed; the launcher's parent shell has not.",
+                        subscription.name
+                    ),
+                    shell: Some(export),
+                    incomplete: false,
+                    project: None,
+                })
+            }
+            Action::AzureAccount(action) => {
+                let az = AzCli::new()?;
+                let shell_subscription = std::env::var("AZURE_SUBSCRIPTION_ID").ok();
+                match action {
+                    AccountAction::Status => Ok(Done::body(azure::status(
+                        &az,
+                        shell_subscription.as_deref(),
+                    ))),
+                    AccountAction::Login | AccountAction::Relogin => {
+                        let tenant = azure::tenant_from_env(None);
+                        let force = *action == AccountAction::Relogin;
+                        Ok(Done::body(azure::login(
+                            &az,
+                            tenant.as_deref(),
+                            force,
+                            stderr,
+                        )?))
+                    }
+                    AccountAction::Logout => {
+                        let unset = azure::logout(&az, stderr)?;
+                        Ok(Done {
+                            body: format!(
+                                "Logged out.\n\nRun this in your shell after exiting (bash/zsh):\n{unset}"
+                            ),
+                            shell: Some(unset),
+                            incomplete: false,
+                            project: None,
+                        })
+                    }
+                }
             }
             Action::Kitty(path) => {
                 kitty::launch_session(path, stdout, stderr)?;

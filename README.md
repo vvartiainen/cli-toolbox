@@ -10,13 +10,14 @@ Command parsing and help output are handled with [clap](https://github.com/clap-
 - `fzf` for interactive selection (optional; a built-in picker is used if it is missing)
 - `kitty` for Kitty-specific commands
 - `aws` for AWS helpers
+- `az` (Azure CLI) for Azure helpers
 - `git` for git helpers
 - `rulesync` (38.0.0 tested) for project MCP and skill generation with `agents`
 - `herdr` (optional) to open agent worktrees as Herdr workspaces
 - `nix` and [agent-sandbox](https://github.com/vvartiainen/agent-sandbox-setup) for sandbox projects (`agent project`)
 - `just` for development, and optionally to run a project's `worktree-init` recipe
 
-AWS profile, Kitty session, and SSH host selection run an interactive terminal UI. Those commands need a TTY.
+AWS profile, Azure subscription, Kitty session, and SSH host selection run an interactive terminal UI. Those commands need a TTY.
 
 ## Commands
 
@@ -24,6 +25,7 @@ AWS profile, Kitty session, and SSH host selection run an interactive terminal U
 | --- | --- |
 | `tui` | Interactive launcher for everything below. See [docs/tui.md](docs/tui.md). |
 | `aws profile` | Pick an AWS profile, log in to AWS SSO if needed, and print the `AWS_PROFILE` export. |
+| `azure login\|logout\|subscription\|status` | Log in to the Azure CLI (`--force` after PIM activation), log out, pick a subscription (`az account set` plus `AZURE_SUBSCRIPTION_ID`/`ARM_*` exports), or show the current session. Alias `az`. |
 | `agents [status\|set\|sync\|library]` | Select project MCP servers and skills through Rulesync. See [docs/agent-tools.md](docs/agent-tools.md). |
 | `agent worktree create\|list\|cleanup` | Git worktrees for AI agents, with project init and Herdr. See [docs/agents.md](docs/agents.md). |
 | `agent project list\|create\|start\|stop\|restart\|add\|sync\|done` | Sandbox projects in `~/.agent-sandbox`: one agent-sandbox VM per project, mounting its agent worktrees. See [docs/agents.md](docs/agents.md#sandbox-projects). |
@@ -38,6 +40,17 @@ Use `aws profile` via `eval` so the export is applied in your current shell:
 
 ```sh
 eval "$(cli-toolbox aws profile)"
+```
+
+Azure works the same way. Set `AZURE_TENANT_ID` in your shell profile to log in to
+that tenant by default (`--tenant` overrides it); without it, `az login` uses your
+home tenant.
+
+```sh
+export AZURE_TENANT_ID=<tenant-id>
+eval "$(cli-toolbox azure subscription)"
+cli-toolbox azure login --force   # after activating a PIM role
+eval "$(cli-toolbox azure logout)"
 ```
 
 ## Completions

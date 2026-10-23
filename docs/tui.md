@@ -4,19 +4,19 @@
 cli-toolbox tui
 ```
 
-Select AWS profiles, switch Kitty sessions, connect to SSH hosts, create, inspect,
+Select AWS profiles and Azure subscriptions, switch Kitty sessions, connect to SSH hosts, create, inspect,
 enter, and remove agent worktrees, run sandbox project VMs, or stop any running
 sandbox VM. Worktree operations use
 the directory from which you launched the toolbox.
 
 The launcher opens in a compact panel below your prompt instead of taking over the
 whole screen. It always uses ratatui, whether or not `fzf` is installed. It draws on
-stderr and requires stdin, stdout, and stderr to be terminals. SSH and AWS SSO
-temporarily take over the terminal; the launcher resumes when they finish.
+stderr and requires stdin, stdout, and stderr to be terminals. SSH, AWS SSO and Azure
+login temporarily take over the terminal; the launcher resumes when they finish.
 
 ## Keys
 
-Actions are grouped into tabs: **AWS** (`a`), **Agents** (`i`, agent worktrees),
+Actions are grouped into tabs: **AWS** (`a`), **Azure** (`z`, subscriptions and account login/logout), **Agents** (`i`, agent worktrees),
 **Sandbox** (`s`, sandbox projects and running VMs) and **Terminal** (`t`, Kitty sessions and SSH).
 
 | Key | Action |
@@ -75,9 +75,9 @@ directory, including VMs whose project directory was removed, which are marked
 
 ## Applying exports and directory changes
 
-By default, AWS exports and worktree directory changes appear as bash/zsh commands to
+By default, AWS and Azure exports and worktree directory changes appear as bash/zsh commands to
 run after exiting, because the launcher cannot change your parent shell's
-environment or directory. With `--print-shell`, a successful AWS profile selection,
+environment or directory. With `--print-shell`, a successful AWS profile or Azure subscription selection, Azure logout,
 worktree creation or worktree `cd` exits the launcher and prints that command to
 stdout instead, so a shell function can `eval` it:
 

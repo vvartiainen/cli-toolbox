@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::agent::vm::ProjectStatus;
 use crate::aws::Profile;
+use crate::azure::{AccountAction, Subscription};
 use crate::git::AgentWorktree;
 use crate::kitty::Choice;
 use crate::sandbox::RunnerState;
@@ -18,17 +19,25 @@ const PAGE: isize = 8;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Category {
     Aws,
+    Azure,
     Agents,
     Sandbox,
     Terminal,
 }
 
 impl Category {
-    pub(crate) const ALL: [Self; 4] = [Self::Aws, Self::Agents, Self::Sandbox, Self::Terminal];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Aws,
+        Self::Azure,
+        Self::Agents,
+        Self::Sandbox,
+        Self::Terminal,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Aws => "AWS",
+            Self::Azure => "Azure",
             Self::Agents => "Agents",
             Self::Sandbox => "Sandbox",
             Self::Terminal => "Terminal",
@@ -39,6 +48,7 @@ impl Category {
     pub(crate) fn hotkey(self) -> char {
         match self {
             Self::Aws => 'a',
+            Self::Azure => 'z',
             Self::Agents => 'i',
             Self::Sandbox => 's',
             Self::Terminal => 't',
@@ -72,6 +82,8 @@ impl Category {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ToolId {
     AwsProfile,
+    AzureSubscription,
+    AzureAccount,
     AgentWorktrees,
     SandboxProjects,
     SandboxVms,
@@ -80,8 +92,10 @@ pub(crate) enum ToolId {
 }
 
 impl ToolId {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::AwsProfile,
+        Self::AzureSubscription,
+        Self::AzureAccount,
         Self::AgentWorktrees,
         Self::SandboxProjects,
         Self::SandboxVms,
@@ -92,6 +106,7 @@ impl ToolId {
     pub(crate) fn category(self) -> Category {
         match self {
             Self::AwsProfile => Category::Aws,
+            Self::AzureSubscription | Self::AzureAccount => Category::Azure,
             Self::AgentWorktrees => Category::Agents,
             Self::SandboxProjects | Self::SandboxVms => Category::Sandbox,
             Self::KittySession | Self::SshConnect => Category::Terminal,
@@ -101,6 +116,8 @@ impl ToolId {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::AwsProfile => "Select profile",
+            Self::AzureSubscription => "Select subscription",
+            Self::AzureAccount => "Account",
             Self::KittySession => "Switch Kitty session",
             Self::SshConnect => "SSH connect",
             Self::AgentWorktrees => "Worktrees",
@@ -112,6 +129,10 @@ impl ToolId {
     pub(crate) fn description(self) -> &'static str {
         match self {
             Self::AwsProfile => "SSO login when needed, then AWS_PROFILE export",
+            Self::AzureSubscription => {
+                "Login when needed, az account set, then AZURE/ARM_SUBSCRIPTION_ID export"
+            }
+            Self::AzureAccount => "Status, log in, log in again after PIM activation, log out",
             Self::KittySession => "Switch to a .kitty-session file from your home directory",
             Self::SshConnect => "Connect to a configured host with Kitty's SSH kitten",
             Self::AgentWorktrees => "Create, inspect, cd into or remove agent worktrees",
@@ -125,6 +146,8 @@ impl ToolId {
     pub(crate) fn picker_title(self) -> &'static str {
         match self {
             Self::AwsProfile => "Profiles",
+            Self::AzureSubscription => "Subscriptions",
+            Self::AzureAccount => "Azure account",
             Self::KittySession => "Kitty sessions",
             Self::SshConnect => "SSH hosts",
             Self::AgentWorktrees => "Agent worktrees",
@@ -138,6 +161,8 @@ impl ToolId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Resource {
     Aws(Profile),
+    AzureSubscription(Subscription),
+    AzureAccount(AccountAction),
     Kitty(Choice),
     Ssh(Host),
     Worktree(AgentWorktree),
@@ -149,6 +174,8 @@ impl Resource {
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Aws(profile) => profile.name.clone(),
+            Self::AzureSubscription(subscription) => subscription.label(),
+            Self::AzureAccount(action) => action.label().into(),
             Self::Kitty(choice) => choice.label.clone(),
             Self::Ssh(host) => host.name.clone(),
             Self::Worktree(worktree) => worktree_label(worktree),
@@ -160,6 +187,10 @@ impl Resource {
     fn identity(&self) -> ResourceIdentity {
         match self {
             Self::Aws(profile) => ResourceIdentity::String(profile.name.clone()),
+            Self::AzureSubscription(subscription) => {
+                ResourceIdentity::String(subscription.id.clone())
+            }
+            Self::AzureAccount(action) => ResourceIdentity::String(action.label().into()),
             Self::Kitty(choice) => ResourceIdentity::Path(choice.path.clone()),
             Self::Ssh(host) => ResourceIdentity::String(host.name.clone()),
             Self::Worktree(worktree) => ResourceIdentity::Path(worktree.path.clone()),
@@ -172,6 +203,8 @@ impl Resource {
         matches!(
             (tool, self),
             (ToolId::AwsProfile, Self::Aws(_))
+                | (ToolId::AzureSubscription, Self::AzureSubscription(_))
+                | (ToolId::AzureAccount, Self::AzureAccount(_))
                 | (ToolId::KittySession, Self::Kitty(_))
                 | (ToolId::SshConnect, Self::Ssh(_))
                 | (ToolId::AgentWorktrees, Self::Worktree(_))
@@ -185,6 +218,8 @@ impl Resource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
     Aws(Profile),
+    AzureSubscription(Subscription),
+    AzureAccount(AccountAction),
     Kitty(PathBuf),
     Ssh(Host),
     CreateWorktree,
@@ -251,7 +286,11 @@ impl Action {
             | Self::EnterProjectWorktree(_)
             | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
-            Self::Aws(_) | Self::Kitty(_) | Self::Ssh(_) => None,
+            Self::Aws(_)
+            | Self::AzureSubscription(_)
+            | Self::AzureAccount(_)
+            | Self::Kitty(_)
+            | Self::Ssh(_) => None,
         }
     }
 }
@@ -677,6 +716,12 @@ impl App {
                 match (tool, resource) {
                     (ToolId::AwsProfile, Resource::Aws(profile)) => {
                         Effect::Execute(Action::Aws(profile))
+                    }
+                    (ToolId::AzureSubscription, Resource::AzureSubscription(subscription)) => {
+                        Effect::Execute(Action::AzureSubscription(subscription))
+                    }
+                    (ToolId::AzureAccount, Resource::AzureAccount(action)) => {
+                        Effect::Execute(Action::AzureAccount(action))
                     }
                     (ToolId::KittySession, Resource::Kitty(choice)) => {
                         Effect::Execute(Action::Kitty(choice.path))
@@ -1161,6 +1206,7 @@ mod tests {
     fn brackets_cycle_tabs_both_ways() {
         let mut app = App::new("/repo".into());
         for expected in [
+            Category::Azure,
             Category::Agents,
             Category::Sandbox,
             Category::Terminal,

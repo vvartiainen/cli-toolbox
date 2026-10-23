@@ -1,6 +1,7 @@
 mod agent;
 mod agents;
 mod aws;
+mod azure;
 mod cli;
 mod error;
 mod exec;
