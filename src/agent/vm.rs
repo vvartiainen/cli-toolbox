@@ -191,14 +191,25 @@ pub(crate) fn start(
 
 /// Stop the project's VM and remove its machine from the host herdr;
 /// worktrees and the guest home stay. The next start adds the machine again.
+/// Works from `runner.json` rather than the flake's `stop` app: without
+/// worktrees, as after the last `done`, the flake does not evaluate.
 pub(crate) fn stop(project: &Project) -> Result<Vec<Step>, Error> {
     let Some(vm) = sandbox::vm_for(&running_vms(), &project.dir) else {
         return Ok(vec![Step::Skipped("vm: not running".into())]);
     };
-    sandbox::stop(&project.dir)?;
-    let mut steps = vec![Step::Done(format!("vm: stopped {}", project.name))];
+    let stopped = sandbox::stop_vm(&vm, sandbox::stop_timeout())?;
+    let mut steps = vec![stopped_step(&vm, stopped)];
     steps.extend(remove_herdr_machine(&vm.name));
     Ok(steps)
+}
+
+fn stopped_step(vm: &RunnerState, stopped: sandbox::Stopped) -> Step {
+    match stopped {
+        sandbox::Stopped::Terminated => Step::Done(format!("vm: stopped {}", vm.name)),
+        sandbox::Stopped::Killed => {
+            Step::Done(format!("vm: killed {} after it did not stop", vm.name))
+        }
+    }
 }
 
 fn remove_herdr_machine(machine: &str) -> Option<Step> {
@@ -277,10 +288,7 @@ fn pick_vms(
 /// Stop `vm` through its runner and remove its machine from the host herdr.
 pub(crate) fn vm_stop(vm: &RunnerState) -> Vec<Step> {
     let mut steps = vec![match sandbox::stop_vm(vm, sandbox::stop_timeout()) {
-        Ok(sandbox::Stopped::Terminated) => Step::Done(format!("vm: stopped {}", vm.name)),
-        Ok(sandbox::Stopped::Killed) => {
-            Step::Done(format!("vm: killed {} after it did not stop", vm.name))
-        }
+        Ok(stopped) => stopped_step(vm, stopped),
         Err(err) => return vec![Step::Failed(format!("vm: stop {}: {err}", vm.name))],
     }];
     steps.extend(remove_herdr_machine(&vm.name));

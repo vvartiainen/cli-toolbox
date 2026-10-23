@@ -1,8 +1,8 @@
 //! agent-sandbox integration: the central project flakes and the microVM
 //! each one runs. Everything goes through the flake's apps
-//! (`nix run .#start|stop|git-pull|herdr-add`, run from the project
-//! directory, which identifies the VM) and the `runner.json` files the
-//! runner keeps in its host-only runtime directory.
+//! (`nix run .#start|git-pull|herdr-add`, run from the project directory,
+//! which identifies the VM) and the `runner.json` files the runner keeps in
+//! its host-only runtime directory; stopping needs only the latter.
 
 use std::ffi::OsString;
 use std::fs;
@@ -60,11 +60,6 @@ pub(crate) fn start(dir: &Path) -> Result<RunnerState, Error> {
     let json = exec::stdout_of_in("nix", &["run", ".#start"], Some(dir), &[])?;
     serde_json::from_str(&json)
         .map_err(|err| Error::msg(format!("parse agent-sandbox start output: {err}\n{json}")))
-}
-
-/// Stop the VM of the flake in `dir`. Stopping a stopped VM is not an error.
-pub(crate) fn stop(dir: &Path) -> Result<(), Error> {
-    exec::run_on_stderr_in("nix", &["run", ".#stop"], Some(dir), &[])
 }
 
 /// Fetch the guest's commits of `workspaces` (all when empty) into their
