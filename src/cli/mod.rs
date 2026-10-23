@@ -232,6 +232,19 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_project_commands_take_all_running_vms() {
+        for command in ["stop", "restart", "sync"] {
+            let (_, stdout, _) = run_args(&["agent", "project", command, "--help"]);
+            assert!(stdout.contains("--all"), "{command}: {stdout}");
+            let (result, _, _) = run_args(&["agent", "project", command, "demo", "--all"]);
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("cannot be used"), "{err}");
+        }
+        let (result, _, _) = run_args(&["agent", "project", "sync", "--all", "--worktree", "w"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn prints_agent_worktree_help() {
         let (result, stdout, stderr) = run_args(&["agent", "worktree", "--help"]);
         result.unwrap();

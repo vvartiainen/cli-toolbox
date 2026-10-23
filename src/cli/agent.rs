@@ -99,10 +99,20 @@ enum ProjectCommands {
         boot: BootArgs,
     },
     /// Stop the project's VM, keeping its worktrees and guest home.
-    Stop { project: Option<String> },
+    Stop {
+        #[arg(conflicts_with = "all")]
+        project: Option<String>,
+        /// Stop the VM of every project whose VM is running.
+        #[arg(long)]
+        all: bool,
+    },
     /// Restart the project's VM, so it mounts the current worktrees.
     Restart {
+        #[arg(conflicts_with = "all")]
         project: Option<String>,
+        /// Restart the VM of every project whose VM is running.
+        #[arg(long)]
+        all: bool,
         #[command(flatten)]
         boot: BootArgs,
     },
@@ -120,10 +130,14 @@ enum ProjectCommands {
         after_help = "Fetches the guest's commits into sandbox/* and fast-forwards each worktree branch, which then exists in the main repository for review and merge. Files are already shared live; only git history moves."
     )]
     Sync {
+        #[arg(conflicts_with = "all")]
         project: Option<String>,
         /// Only this worktree.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         worktree: Option<String>,
+        /// Sync every project whose VM is running.
+        #[arg(long)]
+        all: bool,
     },
     /// Sync a worktree, then remove it and keep its branch.
     #[command(
@@ -266,8 +280,21 @@ fn run_project(
             let steps = vm::start(&resolve(&root, project)?, &boot_options(boot), stderr)?;
             finish(&steps, stderr)
         }
-        ProjectCommands::Stop { project } => finish(&vm::stop(&resolve(&root, project)?)?, stderr),
-        ProjectCommands::Restart { project, boot } => {
+        ProjectCommands::Stop { all: true, .. } => {
+            each_running(&root, stderr, |project, _| vm::stop(project))
+        }
+        ProjectCommands::Stop { project, .. } => {
+            finish(&vm::stop(&resolve(&root, project)?)?, stderr)
+        }
+        ProjectCommands::Restart {
+            all: true, boot, ..
+        } => {
+            let options = boot_options(boot);
+            each_running(&root, stderr, |project, stderr| {
+                vm::restart(project, &options, stderr)
+            })
+        }
+        ProjectCommands::Restart { project, boot, .. } => {
             let steps = vm::restart(&resolve(&root, project)?, &boot_options(boot), stderr)?;
             finish(&steps, stderr)
         }
@@ -286,7 +313,27 @@ fn run_project(
             writeln!(stdout, "{}", created.worktree.path.display())?;
             finish(&created.steps, stderr)
         }
-        ProjectCommands::Sync { project, worktree } => {
+        ProjectCommands::Sync { all: true, .. } => {
+            let mut failed = false;
+            for project in vm::running_projects(&root)? {
+                writeln!(stdout, "{}:", project.name)?;
+                match vm::sync(&project, None) {
+                    Ok(synced) => vm::write_synced(&synced, stdout)?,
+                    Err(err) => {
+                        writeln!(stderr, "{}", agent::Step::Failed(format!("sync: {err}")))?;
+                        failed = true;
+                    }
+                }
+            }
+            if failed {
+                Err(Error::msg("a sync failed"))
+            } else {
+                Ok(())
+            }
+        }
+        ProjectCommands::Sync {
+            project, worktree, ..
+        } => {
             let project = resolve(&root, project)?;
             let worktree = worktree
                 .map(|name| vm::select_worktree(&project, &name))
@@ -327,6 +374,27 @@ fn run_vm(
             finish(&steps, stderr)
         }
         VmCommands::Prune => finish(&vm::vm_prune(&project::sandbox_dir()?)?, stderr),
+    }
+}
+
+/// Run `each` on every project with a running VM, writing its name and
+/// steps to `stderr`. An error fails that project only; the others still run.
+fn each_running(
+    root: &Path,
+    stderr: &mut dyn Write,
+    mut each: impl FnMut(&Project, &mut dyn Write) -> Result<Vec<agent::Step>, Error>,
+) -> Result<(), Error> {
+    let mut failed = false;
+    for project in vm::running_projects(root)? {
+        writeln!(stderr, "{}:", project.name)?;
+        let steps =
+            each(&project, stderr).unwrap_or_else(|err| vec![agent::Step::Failed(err.to_string())]);
+        failed |= finish(&steps, stderr).is_err();
+    }
+    if failed {
+        Err(Error::msg("a step failed"))
+    } else {
+        Ok(())
     }
 }
 

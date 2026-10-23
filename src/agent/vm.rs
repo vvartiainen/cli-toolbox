@@ -599,6 +599,22 @@ pub(crate) fn running_vms() -> Vec<RunnerState> {
         .unwrap_or_default()
 }
 
+/// The projects in `root` whose VM is running, for the `--all` commands.
+pub(crate) fn running_projects(root: &Path) -> Result<Vec<Project>, Error> {
+    with_running_vm(project::projects(root)?, &running_vms())
+}
+
+fn with_running_vm(projects: Vec<Project>, running: &[RunnerState]) -> Result<Vec<Project>, Error> {
+    let projects: Vec<Project> = projects
+        .into_iter()
+        .filter(|project| sandbox::vm_for(running, &project.dir).is_some())
+        .collect();
+    if projects.is_empty() {
+        return Err(Error::msg("no sandbox project VM is running"));
+    }
+    Ok(projects)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,6 +846,43 @@ mod tests {
                 ..RunnerState::default()
             })
             .collect()
+    }
+
+    #[test]
+    fn all_takes_the_projects_with_a_running_vm() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let projects: Vec<Project> = ["a", "b", "c"]
+            .iter()
+            .map(|name| Project {
+                name: (*name).into(),
+                dir: root.join("projects").join(name),
+                repo: None,
+                state_dir: root.join("state").join(name),
+            })
+            .collect();
+        let vms = running(&["a", "c", "gone"])
+            .into_iter()
+            .map(|vm| RunnerState {
+                dir: root
+                    .join("projects")
+                    .join(vm.name.trim_start_matches("agent-")),
+                ..vm
+            })
+            .collect::<Vec<_>>();
+
+        let names = |projects: Vec<Project>| {
+            projects
+                .into_iter()
+                .map(|project| project.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(with_running_vm(projects.clone(), &vms).unwrap()),
+            ["a", "c"]
+        );
+        let err = with_running_vm(projects, &[]).unwrap_err();
+        assert!(err.to_string().contains("no sandbox project VM"), "{err}");
     }
 
     #[test]
