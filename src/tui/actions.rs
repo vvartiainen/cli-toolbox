@@ -312,6 +312,21 @@ impl Context {
                 vm::write_synced(&synced, stdout)?;
                 Ok(Done::body(format!("Synced the worktrees of {name}")))
             }
+            Action::SyncAllProjects => {
+                let steps = vm::sync_all(&project::sandbox_dir()?, stdout)?;
+                Ok(steps_done("Synced every running project".into(), &steps))
+            }
+            Action::RestartAllProjects => {
+                let options = vm_options();
+                let steps = vm::each_running(&project::sandbox_dir()?, |project| {
+                    vm::restart(project, &options, &mut std::io::stderr())
+                })?;
+                Ok(steps_done("Restarted every running VM".into(), &steps))
+            }
+            Action::StopAllProjects => Ok(steps_done(
+                "Stopped every running VM".into(),
+                &vm::each_running(&project::sandbox_dir()?, vm::stop)?,
+            )),
             Action::AddProjectWorktree(name) => {
                 let created = vm::add_worktree(
                     &load_project(name)?,

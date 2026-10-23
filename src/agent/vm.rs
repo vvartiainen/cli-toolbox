@@ -599,6 +599,32 @@ pub(crate) fn running_vms() -> Vec<RunnerState> {
         .unwrap_or_default()
 }
 
+/// Run `each` on every project whose VM is running, for the `--all`
+/// commands. Steps name their project; an error fails that project only, so
+/// the others still run.
+pub(crate) fn each_running(
+    root: &Path,
+    mut each: impl FnMut(&Project) -> Result<Vec<Step>, Error>,
+) -> Result<Vec<Step>, Error> {
+    let mut steps = Vec::new();
+    for project in running_projects(root)? {
+        let done = each(&project).unwrap_or_else(|err| vec![Step::Failed(err.to_string())]);
+        steps.extend(done.into_iter().map(|step| step.prefixed(&project.name)));
+    }
+    Ok(steps)
+}
+
+/// Sync every project whose VM is running, writing each report to `out`
+/// under a `<project>:` heading.
+pub(crate) fn sync_all(root: &Path, out: &mut dyn Write) -> Result<Vec<Step>, Error> {
+    each_running(root, |project| {
+        let synced = sync(project, None)?;
+        writeln!(out, "{}:", project.name)?;
+        write_synced(&synced, out)?;
+        Ok(vec![Step::Done("synced".into())])
+    })
+}
+
 /// The projects in `root` whose VM is running, for the `--all` commands.
 pub(crate) fn running_projects(root: &Path) -> Result<Vec<Project>, Error> {
     with_running_vm(project::projects(root)?, &running_vms())
@@ -846,6 +872,14 @@ mod tests {
                 ..RunnerState::default()
             })
             .collect()
+    }
+
+    #[test]
+    fn steps_of_several_projects_name_their_project() {
+        assert_eq!(
+            Step::Failed("vm: boom".into()).prefixed("demo"),
+            Step::Failed("demo: vm: boom".into())
+        );
     }
 
     #[test]

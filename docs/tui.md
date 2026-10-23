@@ -62,6 +62,9 @@ worktree count (see [agents.md](agents.md#sandbox-projects)):
   (`agent project setup`), `s` syncs the agents' commits, and `a` adds a worktree. Up/Down
   select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
   `agent project done` on it. The agent kind comes from `CLI_TOOLBOX_AGENT`.
+- Ctrl-S syncs, Ctrl-R restarts and Ctrl-X stops every project whose VM is
+  running (`agent project sync|restart|stop --all`). A failing project does not
+  stop the others.
 
 ## Sandbox › VMs
 

@@ -37,6 +37,15 @@ impl Step {
     pub(crate) fn failed(&self) -> bool {
         matches!(self, Self::Failed(_))
     }
+
+    /// The step with `name: ` before its text, for steps of several projects.
+    pub(crate) fn prefixed(self, name: &str) -> Self {
+        match self {
+            Self::Done(text) => Self::Done(format!("{name}: {text}")),
+            Self::Skipped(text) => Self::Skipped(format!("{name}: {text}")),
+            Self::Failed(text) => Self::Failed(format!("{name}: {text}")),
+        }
+    }
 }
 
 impl fmt::Display for Step {

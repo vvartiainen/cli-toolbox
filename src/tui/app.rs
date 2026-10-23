@@ -240,6 +240,10 @@ pub(crate) enum Action {
     EnterProjectWorktree(AgentWorktree),
     /// Tailor a new project's flake to its repository.
     TailorProject(String, Tailor),
+    /// The following act on every project whose VM is running.
+    SyncAllProjects,
+    RestartAllProjects,
+    StopAllProjects,
     /// Stop the running VM with this runtime directory.
     StopVm(PathBuf),
     /// Remove the runtime directories of stopped VMs whose start directory is gone.
@@ -287,7 +291,10 @@ impl Action {
             | Self::AddProjectWorktree(_)
             | Self::DoneProjectWorktree(..)
             | Self::EnterProjectWorktree(_)
-            | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
+            | Self::TailorProject(..)
+            | Self::SyncAllProjects
+            | Self::RestartAllProjects
+            | Self::StopAllProjects => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
             Self::Aws(_)
             | Self::AzureSubscription(_)
@@ -826,13 +833,15 @@ impl App {
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
-        match key.code {
-            KeyCode::Char('a') => {
-                self.loading = None;
-                Some(Effect::Execute(Action::CreateProject))
-            }
-            _ => None,
-        }
+        let action = match key.code {
+            KeyCode::Char('a') => Action::CreateProject,
+            KeyCode::Char('s') => Action::SyncAllProjects,
+            KeyCode::Char('r') => Action::RestartAllProjects,
+            KeyCode::Char('x') => Action::StopAllProjects,
+            _ => return None,
+        };
+        self.loading = None;
+        Some(Effect::Execute(action))
     }
 
     /// Ctrl shortcuts of the VM list. Plain keys filter the list.
@@ -1291,6 +1300,14 @@ mod tests {
             app.handle_key(ctrl('a')),
             Effect::Execute(Action::CreateProject)
         );
+        for (ch, action) in [
+            ('s', Action::SyncAllProjects),
+            ('r', Action::RestartAllProjects),
+            ('x', Action::StopAllProjects),
+        ] {
+            assert_eq!(action.return_tool(), Some(ToolId::SandboxProjects));
+            assert_eq!(app.handle_key(ctrl(ch)), Effect::Execute(action));
+        }
 
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.screen, Screen::ProjectDetails(_)));

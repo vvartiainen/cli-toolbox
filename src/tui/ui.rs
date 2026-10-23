@@ -16,7 +16,8 @@ const ACCENT: Color = Color::Cyan;
 const HELP_SEARCH: &str = "↑↓ move · ⏎ run · F1 help · esc back";
 const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help · esc back";
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
-const HELP_PROJECTS: &str = "type to filter · ⏎ open · ^A new for this repo · F1 help · esc back";
+const HELP_PROJECTS: &str =
+    "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop all · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
@@ -173,6 +174,9 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entries.extend([
                     entry("⏎", "project details"),
                     entry("^A", "new project for the launch directory's repository"),
+                    entry("^S", "sync every project whose VM is running"),
+                    entry("^R", "restart every running project VM"),
+                    entry("^X", "stop every running project VM"),
                 ]);
             } else if picker.tool == ToolId::SandboxVms {
                 entries.extend([
@@ -935,7 +939,8 @@ mod tests {
             list.contains("demo  [stopped]  1 worktree(s)  /p/demo"),
             "{list}"
         );
-        assert!(list.contains("^A new for this repo"), "{list}");
+        assert!(list.contains("^A new"), "{list}");
+        assert!(list.contains("^S/^R/^X sync/restart/stop all"), "{list}");
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let details = rendered(&app, 100, super::HEIGHT);
