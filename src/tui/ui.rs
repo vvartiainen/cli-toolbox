@@ -5,8 +5,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
 use super::app::{
-    App, Category, ConfirmState, DetailsState, PickerState, ProjectState, Resource, ResultState,
-    Screen, TailorState, ToolId, branch_label,
+    App, Category, ConfirmState, DetailsState, LaunchForm, NewWorktree, PickerState, ProjectState,
+    Resource, ResultState, Screen, TailorState, ToolId, branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -20,6 +20,7 @@ const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop all · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
+const HELP_NEW_WORKTREE: &str = "←→ agent · type the prompt · ⏎ create · F1 help · esc back";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
 const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
 const HELP_OVERLAY: &str = "any key closes help";
@@ -67,6 +68,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         Screen::WorktreeDetails(details) => draw_details(frame, app, details),
         Screen::ProjectDetails(project) => draw_project(frame, app, project),
         Screen::TailorFlake(tailor) => draw_tailor(frame, tailor),
+        Screen::NewWorktree(form) => draw_new_worktree(frame, app, form),
         Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, app, confirm),
         Screen::Result(result) => draw_result(frame, result),
     }
@@ -229,6 +231,13 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             ),
             entry("e", "edit flake.nix in $VISUAL or $EDITOR"),
             entry("s esc", "skip and open the project"),
+        ],
+        Screen::NewWorktree(_) => vec![
+            entry("←→ ↑↓ tab", "choose the agent, or none"),
+            entry("type", "write its first prompt (optional)"),
+            entry("⌫ ^W ^U", "delete a character / word / all"),
+            entry("⏎", "create the worktree"),
+            entry("esc", "back without creating"),
         ],
         Screen::ConfirmCleanup(_) => vec![
             entry("y", "remove"),
@@ -641,6 +650,76 @@ fn draw_tailor(frame: &mut Frame<'_>, state: &TailorState) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+fn draw_new_worktree(frame: &mut Frame<'_>, app: &App, form: &LaunchForm) {
+    let area = frame.area();
+    let (category, context) = match &form.target {
+        NewWorktree::Local => (Category::Agents, app.cwd_display.clone()),
+        NewWorktree::Project(name) => (Category::Sandbox, format!("project {name}")),
+    };
+    let block = panel(
+        breadcrumb(category, "New worktree"),
+        context,
+        HELP_NEW_WORKTREE,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [agent, prompt, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ])
+    .spacing(1)
+    .areas(inner);
+
+    let label = |name: &str| Span::styled(format!("{name:<8}"), Style::new().fg(ACCENT));
+    let kind = match form.kind() {
+        Some(kind) => Span::styled(format!("‹ {} ›", clean_text(kind)), Style::new().bold()),
+        None => "‹ none ›".dark_gray(),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![label("Agent"), kind])),
+        agent,
+    );
+
+    let text = if form.prompt.is_empty() {
+        "optional: what the agent should do first".dark_gray()
+    } else if form.kind.is_none() {
+        Span::styled(clean_text(&form.prompt), Style::new().fg(Color::DarkGray))
+    } else {
+        Span::raw(clean_text(&form.prompt))
+    };
+    let cursor = Span::styled("▏", Style::new().fg(ACCENT));
+    let paragraph =
+        Paragraph::new(Line::from(vec![label("Prompt"), text, cursor])).wrap(Wrap { trim: false });
+    // Keep the end of a long prompt, where typing happens, in view.
+    let scroll = max_scroll(&paragraph, prompt);
+    frame.render_widget(paragraph.scroll((scroll, 0)), prompt);
+
+    let with_prompt = if form.prompt.trim().is_empty() {
+        ""
+    } else {
+        " with the prompt"
+    };
+    let hint_text = match (&form.target, form.kind()) {
+        (NewWorktree::Local, Some(kind)) => {
+            format!("⏎ creates the worktree, opens it in herdr and starts {kind}{with_prompt}.")
+        }
+        (NewWorktree::Local, None) => {
+            "⏎ creates the worktree and opens it in herdr, without an agent.".into()
+        }
+        (NewWorktree::Project(_), Some(kind)) => format!(
+            "⏎ adds the worktree. {kind} starts in it{with_prompt} when the VM opens it: u starts, r restarts a running VM."
+        ),
+        (NewWorktree::Project(_), None) => {
+            "⏎ adds the worktree. The VM opens it in herdr with $CLI_TOOLBOX_AGENT, if set.".into()
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(clean_text(&hint_text).dark_gray()).wrap(Wrap { trim: true }),
+        hint,
+    );
+}
+
 fn field(name: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{name:<8}"), Style::new().fg(ACCENT)),
@@ -775,7 +854,7 @@ mod tests {
     fn wrapped_result_scroll_clamps_state_and_moves_back_immediately() {
         let mut app = App::new("/tmp/project".into());
         app.finished(
-            &Action::CreateWorktree,
+            &Action::CreateWorktree(None),
             "Created".into(),
             "界".repeat(150),
             false,
@@ -811,7 +890,7 @@ mod tests {
 
         let mut result_app = App::new("/tmp/project".into());
         result_app.finished(
-            &Action::CreateWorktree,
+            &Action::CreateWorktree(None),
             "Created".into(),
             "line one\nline two".into(),
             false,
@@ -982,6 +1061,33 @@ mod tests {
     }
 
     #[test]
+    fn renders_the_new_worktree_form() {
+        let mut app = App::new("~/repo".into());
+        app.herdr = true;
+        app.agent_kinds = vec!["claude".into(), "codex".into()];
+        app.default_agent = Some("codex".into());
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        app.loaded(ToolId::AgentWorktrees, Ok(Vec::new()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        let text = rendered(&app, 100, super::HEIGHT);
+        for want in [
+            "New worktree",
+            "Agent   ‹ codex ›",
+            "optional: what the agent should do first",
+            "starts codex.",
+        ] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
+        for ch in "Add tests".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let text = rendered(&app, 100, super::HEIGHT);
+        assert!(text.contains("Prompt  Add tests"), "{text}");
+        assert!(text.contains("starts codex with the prompt."), "{text}");
+    }
+
+    #[test]
     fn renders_running_vms_and_flags_missing_directories() {
         let vm = crate::sandbox::RunnerState {
             pid: 4242,
@@ -1008,7 +1114,7 @@ mod tests {
     fn replaces_terminal_controls_in_results() {
         let mut app = App::new("/tmp/project".into());
         app.finished(
-            &Action::CreateWorktree,
+            &Action::CreateWorktree(None),
             "Title\u{1b}".into(),
             "safe\u{7}".into(),
             false,

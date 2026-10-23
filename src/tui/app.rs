@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::agent::Launch;
 use crate::agent::vm::ProjectStatus;
 use crate::aws::Profile;
 use crate::azure::{AccountAction, Subscription};
@@ -14,6 +15,9 @@ use crate::ssh::Host;
 /// Rows moved by PageUp/PageDown in lists. Matches the list height of the
 /// inline viewport.
 const PAGE: isize = 8;
+
+/// Agent kinds to offer when Herdr does not list its own.
+const FALLBACK_AGENTS: [&str; 3] = ["claude", "codex", "pi"];
 
 /// A group of related actions shown as one tab on the home screen.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -222,7 +226,8 @@ pub(crate) enum Action {
     AzureAccount(AccountAction),
     Kitty(PathBuf),
     Ssh(Host),
-    CreateWorktree,
+    /// A worktree of the launch directory, with the agent to start in it.
+    CreateWorktree(Option<Launch>),
     EnterWorktree(AgentWorktree),
     Cleanup(AgentWorktree),
     /// A sandbox project for the launch directory's repository.
@@ -234,7 +239,8 @@ pub(crate) enum Action {
     /// Set up the host side of the project's proxy credentials and backlog.
     SetupProject(String),
     SyncProject(String),
-    AddProjectWorktree(String),
+    /// A worktree of the project, with the agent to start in it with the VM.
+    AddProjectWorktree(String, Option<Launch>),
     /// Sync and remove a project's worktree, keeping its branch.
     DoneProjectWorktree(String, AgentWorktree),
     EnterProjectWorktree(AgentWorktree),
@@ -279,7 +285,7 @@ impl Action {
     /// return to the home screen.
     pub(crate) fn return_tool(&self) -> Option<ToolId> {
         match self {
-            Self::CreateWorktree | Self::EnterWorktree(_) | Self::Cleanup(_) => {
+            Self::CreateWorktree(_) | Self::EnterWorktree(_) | Self::Cleanup(_) => {
                 Some(ToolId::AgentWorktrees)
             }
             Self::CreateProject
@@ -288,7 +294,7 @@ impl Action {
             | Self::RestartProject(_)
             | Self::SetupProject(_)
             | Self::SyncProject(_)
-            | Self::AddProjectWorktree(_)
+            | Self::AddProjectWorktree(..)
             | Self::DoneProjectWorktree(..)
             | Self::EnterProjectWorktree(_)
             | Self::TailorProject(..)
@@ -403,6 +409,56 @@ pub(crate) struct TailorState {
     pub(crate) editor: String,
 }
 
+/// Where the new worktree of the form goes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NewWorktree {
+    /// The launch directory's repository; the agent starts right away.
+    Local,
+    /// The named sandbox project; the agent starts with its VM.
+    Project(String),
+}
+
+/// The agent and first prompt for a new worktree.
+#[derive(Clone, Debug)]
+pub(crate) struct LaunchForm {
+    pub(crate) target: NewWorktree,
+    /// The agent kinds to choose from.
+    pub(crate) kinds: Vec<String>,
+    /// The chosen kind, or none for a worktree without an agent.
+    pub(crate) kind: Option<usize>,
+    pub(crate) prompt: String,
+    /// Where Esc returns to.
+    pub(crate) back: Box<Screen>,
+}
+
+impl LaunchForm {
+    pub(crate) fn kind(&self) -> Option<&str> {
+        self.kind
+            .and_then(|index| self.kinds.get(index))
+            .map(String::as_str)
+    }
+
+    fn launch(&self) -> Option<Launch> {
+        self.kind()
+            .map(|kind| Launch::new(kind, Some(self.prompt.clone())))
+    }
+
+    fn action(&self) -> Action {
+        match &self.target {
+            NewWorktree::Local => Action::CreateWorktree(self.launch()),
+            NewWorktree::Project(name) => Action::AddProjectWorktree(name.clone(), self.launch()),
+        }
+    }
+
+    /// Step through no agent and the kinds.
+    fn cycle(&mut self, delta: isize) {
+        let choices = self.kinds.len() as isize + 1;
+        let current = self.kind.map_or(0, |index| index as isize + 1);
+        let next = (current + delta).rem_euclid(choices);
+        self.kind = (next > 0).then(|| next as usize - 1);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ResultState {
     pub(crate) action: Action,
@@ -419,6 +475,7 @@ pub(crate) enum Screen {
     WorktreeDetails(DetailsState),
     ProjectDetails(Box<ProjectState>),
     TailorFlake(TailorState),
+    NewWorktree(LaunchForm),
     ConfirmCleanup(ConfirmState),
     Result(ResultState),
 }
@@ -438,8 +495,13 @@ pub(crate) struct App {
     pub(crate) show_help: bool,
     /// Successful shell actions exit and print their command for `eval`.
     pub(crate) print_shell: bool,
-    /// Herdr is installed, so worktree removal also closes its workspace.
+    /// Herdr is installed, so worktree removal also closes its workspace and
+    /// new worktrees can start an agent.
     pub(crate) herdr: bool,
+    /// The agent kinds Herdr can start.
+    pub(crate) agent_kinds: Vec<String>,
+    /// The agent new worktrees start with unless changed: `CLI_TOOLBOX_AGENT`.
+    pub(crate) default_agent: Option<String>,
     /// Open this project's details once the project list has loaded.
     pub(crate) open_project: Option<String>,
 }
@@ -457,8 +519,45 @@ impl App {
             show_help: false,
             print_shell: false,
             herdr: false,
+            agent_kinds: Vec::new(),
+            default_agent: None,
             open_project: None,
         }
+    }
+
+    /// Ask for the agent and prompt of a new worktree, or create it right
+    /// away when there is no Herdr to start an agent in.
+    fn new_worktree(&mut self, target: NewWorktree, back: Screen) -> Effect {
+        self.loading = None;
+        let form = LaunchForm {
+            target,
+            kinds: Vec::new(),
+            kind: None,
+            prompt: String::new(),
+            back: Box::new(back),
+        };
+        if !self.herdr {
+            return Effect::Execute(form.action());
+        }
+        let mut kinds = self.agent_kinds.clone();
+        if kinds.is_empty() {
+            kinds = FALLBACK_AGENTS.map(String::from).to_vec();
+        }
+        if let Some(default) = &self.default_agent
+            && !kinds.contains(default)
+        {
+            kinds.insert(0, default.clone());
+        }
+        let kind = self
+            .default_agent
+            .as_ref()
+            .and_then(|default| kinds.iter().position(|kind| kind == default));
+        self.screen = Screen::NewWorktree(LaunchForm {
+            kinds,
+            kind,
+            ..form
+        });
+        Effect::None
     }
 
     /// Tools listed on the home screen: the active category, or every tool
@@ -575,16 +674,18 @@ impl App {
             Screen::WorktreeDetails(_) => self.handle_details_key(key),
             Screen::ProjectDetails(_) => self.handle_project_key(key),
             Screen::TailorFlake(_) => self.handle_tailor_key(key),
+            Screen::NewWorktree(_) => self.handle_new_worktree_key(key),
             Screen::ConfirmCleanup(_) => self.handle_confirm_key(key),
             Screen::Result(_) => self.handle_result_key(key),
         }
     }
 
-    /// `?` is text input while searching or filtering, so only F1 opens help there.
+    /// `?` is text input while searching, filtering or writing a prompt, so
+    /// only F1 opens help there.
     fn question_opens_help(&self) -> bool {
         match self.screen {
             Screen::Home => !self.searching,
-            Screen::Picker(_) => false,
+            Screen::Picker(_) | Screen::NewWorktree(_) => false,
             Screen::WorktreeDetails(_)
             | Screen::ProjectDetails(_)
             | Screen::TailorFlake(_)
@@ -781,8 +882,8 @@ impl App {
         }
         match key.code {
             KeyCode::Char('a') => {
-                self.loading = None;
-                Some(Effect::Execute(Action::CreateWorktree))
+                let back = Screen::Picker(picker.clone());
+                Some(self.new_worktree(NewWorktree::Local, back))
             }
             KeyCode::Char('d') => {
                 let Some(worktree) = picker.selected_worktree() else {
@@ -882,7 +983,10 @@ impl App {
             KeyCode::Char('r') => return Effect::Execute(Action::RestartProject(name)),
             KeyCode::Char('p') => return Effect::Execute(Action::SetupProject(name)),
             KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
-            KeyCode::Char('a') => return Effect::Execute(Action::AddProjectWorktree(name)),
+            KeyCode::Char('a') => {
+                let back = Screen::ProjectDetails(state.clone());
+                return self.new_worktree(NewWorktree::Project(name), back);
+            }
             KeyCode::Enter | KeyCode::Char('c') => {
                 if let Some(worktree) = worktree {
                     return Effect::Execute(Action::EnterProjectWorktree(worktree));
@@ -913,6 +1017,30 @@ impl App {
             KeyCode::Char('s') | KeyCode::Esc => self.load_project(name),
             _ => Effect::None,
         }
+    }
+
+    fn handle_new_worktree_key(&mut self, key: KeyEvent) -> Effect {
+        let Screen::NewWorktree(form) = &mut self.screen else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Enter, _) => return Effect::Execute(form.action()),
+            (KeyCode::Esc, _) => self.screen = (*form.back).clone(),
+            (KeyCode::Left | KeyCode::Up | KeyCode::BackTab, _) => form.cycle(-1),
+            (KeyCode::Right | KeyCode::Down | KeyCode::Tab, _) => form.cycle(1),
+            (KeyCode::Backspace, _) => {
+                form.prompt.pop();
+            }
+            (KeyCode::Char('u'), true) => form.prompt.clear(),
+            (KeyCode::Char('w'), true) => {
+                let kept = form.prompt.trim_end().rfind(' ').map_or(0, |at| at + 1);
+                form.prompt.truncate(kept);
+            }
+            (KeyCode::Char(ch), false) => form.prompt.push(ch),
+            _ => {}
+        }
+        Effect::None
     }
 
     /// Load the project list and open the project's details.
@@ -1095,7 +1223,10 @@ pub(crate) fn branch_label(worktree: &AgentWorktree) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, App, Category, Effect, NewProject, Resource, Screen, Tailor, ToolId};
+    use super::{
+        Action, App, Category, Effect, NewProject, NewWorktree, Resource, Screen, Tailor, ToolId,
+    };
+    use crate::agent::Launch;
     use crate::agent::vm::ProjectStatus;
     use crate::aws::Profile;
     use crate::git::AgentWorktree;
@@ -1317,7 +1448,7 @@ mod tests {
             ('r', Action::RestartProject("demo".into())),
             ('p', Action::SetupProject("demo".into())),
             ('s', Action::SyncProject("demo".into())),
-            ('a', Action::AddProjectWorktree("demo".into())),
+            ('a', Action::AddProjectWorktree("demo".into(), None)),
             ('c', Action::EnterProjectWorktree(first.clone())),
         ] {
             assert_eq!(
@@ -1434,7 +1565,7 @@ mod tests {
         let mut app = worktree_manager(std::slice::from_ref(&tree));
         assert_eq!(
             app.handle_key(ctrl('a')),
-            Effect::Execute(Action::CreateWorktree)
+            Effect::Execute(Action::CreateWorktree(None))
         );
         app.handle_key(ctrl('d'));
         assert!(matches!(app.screen, Screen::ConfirmCleanup(_)));
@@ -1443,6 +1574,78 @@ mod tests {
             &app.screen,
             Screen::Picker(picker) if picker.tool == ToolId::AgentWorktrees
         ));
+    }
+
+    #[test]
+    fn new_worktrees_ask_for_the_agent_and_prompt_with_herdr() {
+        let mut app = worktree_manager(&[]);
+        app.herdr = true;
+        app.agent_kinds = vec!["pi".into(), "claude".into(), "codex".into()];
+        app.default_agent = Some("claude".into());
+
+        assert_eq!(app.handle_key(ctrl('a')), Effect::None);
+        let Screen::NewWorktree(form) = &app.screen else {
+            panic!("expected the new worktree form");
+        };
+        assert_eq!(form.target, NewWorktree::Local);
+        assert_eq!(form.kind(), Some("claude"));
+
+        app.handle_key(key(KeyCode::Right));
+        for ch in "Fix it?".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Backspace));
+        assert!(!app.show_help, "? is prompt text");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::CreateWorktree(Some(Launch::new(
+                "codex",
+                Some("Fix it".into())
+            ))))
+        );
+
+        // Past the last kind comes no agent; Esc goes back to the list.
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::CreateWorktree(None))
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            &app.screen,
+            Screen::Picker(picker) if picker.tool == ToolId::AgentWorktrees
+        ));
+    }
+
+    #[test]
+    fn project_worktrees_ask_for_the_agent_that_starts_with_the_vm() {
+        let mut app = App::new("/repo".into());
+        app.herdr = true;
+        app.default_agent = Some("my-agent".into());
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Char('1')));
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(project("demo", &[])))]),
+        );
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('a')));
+        let Screen::NewWorktree(form) = &app.screen else {
+            panic!("expected the new worktree form");
+        };
+        assert_eq!(form.target, NewWorktree::Project("demo".into()));
+        // Without Herdr's list, the default and common kinds are offered.
+        assert_eq!(form.kinds, ["my-agent", "claude", "codex", "pi"]);
+        app.handle_key(ctrl('w'));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::AddProjectWorktree(
+                "demo".into(),
+                Some(Launch::new("my-agent", None))
+            ))
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::ProjectDetails(_)));
     }
 
     #[test]
@@ -1464,7 +1667,7 @@ mod tests {
     fn worktree_results_reload_the_manager_and_other_results_return_home() {
         let mut app = App::new("/repo".into());
         for action in [
-            Action::CreateWorktree,
+            Action::CreateWorktree(None),
             Action::EnterWorktree(worktree("a")),
             Action::Cleanup(worktree("a")),
         ] {

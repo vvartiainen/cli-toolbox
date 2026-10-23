@@ -55,6 +55,21 @@ Progress goes to stderr; only the path goes to stdout. Skip the steps with
 `--no-init` or `--no-herdr`. If a step fails, the worktree is kept, the path is still
 printed, and the command exits with an error.
 
+To put an agent to work right away, pass `--agent KIND` and, if you like, its first
+prompt with `--prompt TEXT`. The agent then starts in the new Herdr workspace and gets
+the prompt:
+
+```sh
+cli-toolbox agent worktree create --agent codex --prompt "Fix the flaky login test"
+cli-toolbox agent worktree create --agent claude --prompt - < task.md
+```
+
+`KIND` is any kind `herdr agent start` supports, such as `claude`, `codex` or `pi`.
+If you pass `--prompt` without `--agent`, `CLI_TOOLBOX_AGENT` runs it. `--prompt -`
+reads the prompt from stdin. Short one-line prompts go to Claude Code and Codex as
+their initial prompt argument, so they still run after a startup question such as
+folder trust. Other prompts are sent with `herdr agent prompt` once the agent is ready.
+
 ### `agent worktree list`
 
 List agent worktrees for the current directory.
@@ -98,6 +113,7 @@ Projects live centrally, out of the agents' reach, where cli-toolbox discovers t
     flake.nix        # from an agent-sandbox template, tailored to the repository
     worktrees.nix    # written by cli-toolbox: worktree name -> path
     project.json     # the repository's main checkout
+    agents.json      # written by cli-toolbox: worktree name -> agent and first prompt
   state/<project>/   # home.img (/home/agent), logs
   worktrees/<repo>/<repo>-agent-wt[-N]
 ```
@@ -109,7 +125,7 @@ identifies it.
 ```sh
 cli-toolbox agent project create --ai             # in the repository, once
 cli-toolbox agent project start --agent claude    # VM + herdr workspace per worktree
-cli-toolbox agent project add --restart           # another worktree for another agent
+cli-toolbox agent project add --restart --agent codex --prompt "Add a --json flag"
 cli-toolbox agent project sync                    # guest commits -> worktree branches
 cli-toolbox agent project done cli-toolbox-agent-wt-2
 ```
@@ -117,17 +133,36 @@ cli-toolbox agent project done cli-toolbox-agent-wt-2
 | Command | What it does |
 | --- | --- |
 | `agent project list` | Projects with VM state and SSH port, and their worktrees. |
-| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes your SSH public key and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Adds a cli-toolbox defaults module (see [Shared setup](#shared-setup)). Then creates the first agent worktree and runs `agent project setup`. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
+| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes your SSH public key and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Adds a cli-toolbox defaults module (see [Shared setup](#shared-setup)). Then creates the first agent worktree (with `--agent`/`--prompt` for its agent; see [Agents per worktree](#agents-per-worktree)) and runs `agent project setup`. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
 | `agent project setup [project]` | Sets up the host side of the flake's proxy credentials and backlog; see [Shared setup](#shared-setup). Safe to re-run. |
-| `agent project start [project]` | Writes `worktrees.nix`, runs the flake's `start` app (detached; waits for guest SSH), runs `herdr-add` and opens a herdr workspace at `/workspace/<worktree>` for every worktree, starting the agent (`--agent KIND` or `CLI_TOOLBOX_AGENT`) in each. |
+| `agent project start [project]` | Writes `worktrees.nix`, runs the flake's `start` app (detached; waits for guest SSH), runs `herdr-add` and opens a herdr workspace at `/workspace/<worktree>` for every worktree, starting the worktree's own agent (see [Agents per worktree](#agents-per-worktree)), or else `--agent KIND` or `CLI_TOOLBOX_AGENT`, in each. |
 | `agent project stop\|restart [project]` | Stops or restarts the VM. Stopping signals the runner like `agent vm stop`, so it works without a worktree to mount (after the last `done`), and removes the VM's machine from the host herdr; the next start adds it again. A restart mounts worktrees added or removed since the start. `--all` stops or restarts the VM of every project whose VM is running, one after another; a project that fails does not stop the others. |
-| `agent project add [project]` | Creates the next agent worktree of the project's repository and prints its path. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). |
+| `agent project add [project]` | Creates the next agent worktree of the project's repository and prints its path. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). `--agent KIND` and `--prompt TEXT` choose its agent and first prompt; see [Agents per worktree](#agents-per-worktree). |
 | `agent project sync [project]` | Runs the flake's `git-pull`: the guest's commits are fetched into `sandbox/*` and each worktree branch is fast-forwarded (`--worktree NAME` for one). Reports branches that diverged. `--all` syncs every project whose VM is running, under a `<project>:` heading each. |
 | `agent project done [worktree]` | Syncs the worktree, removes it and keeps its branch. It refuses when guest commits have diverged from the branch, when the VM is stopped but has a guest home (so it cannot sync), or when the worktree has uncommitted changes; `--force` removes anyway. The VM stops when its last worktree is done. |
 
 `[project]` defaults to the project of the current repository, then to the only
 project. VM state comes from agent-sandbox's `runner.json` files under
 `~/.local/state/agent-sandbox/vms/`.
+
+### Agents per worktree
+
+Each worktree can run its own agent. `agent project add` and `agent project create`
+take `--agent KIND` and `--prompt TEXT` for the new worktree, just like
+[`agent worktree create`](#agent-worktree-create). The worktree is not mounted until
+the VM starts or restarts, so cli-toolbox saves the choice in the project's
+`agents.json`, next to the flake and out of the agents' reach. When the VM next opens
+the worktree in herdr, it starts that agent and sends the prompt:
+
+```sh
+cli-toolbox agent project add --agent codex --prompt "Add a --json flag to list"
+cli-toolbox agent project restart       # codex starts in the new worktree with the prompt
+```
+
+The prompt is sent only once. Later restarts start the same agent without it, and
+worktrees without an agent of their own get `--agent` or `CLI_TOOLBOX_AGENT`. A
+worktree's entry is dropped once the worktree is gone, so a later worktree that
+reuses the name starts clean.
 
 ### Shared setup
 
@@ -211,7 +246,8 @@ verified yet. These are the parts most likely to need fixes:
 
 - **herdr calls on a machine.** `herdr --machine … workspace create --cwd /workspace/<worktree>`
   and `agent start` were written from the API schema and have not run against a
-  real machine.
+  real machine. The same goes for the first prompt (`agent start -- <prompt>` or
+  `agent prompt`), locally and on a machine.
 - **Template init steps.** With several worktrees, an init step without a
   `directory` runs in `/workspace`, where the templates' steps skip themselves.
   `--ai` asks the agent to write per-worktree steps.

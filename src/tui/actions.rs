@@ -211,13 +211,14 @@ impl Context {
                 ssh::connect(host, stdout, stderr)?;
                 Ok(Done::body(format!("SSH session for {} ended.", host.name)))
             }
-            Action::CreateWorktree => {
+            Action::CreateWorktree(launch) => {
                 // The launcher has released the terminal, so git and the init
                 // command stream their progress to it directly.
                 let created = agent::create_worktree(
                     self.working_dir()?,
                     &git::worktrees_root()?,
                     agent::Options::default(),
+                    launch.as_ref(),
                     &mut std::io::stderr(),
                 )?;
                 let path = &created.worktree.path;
@@ -248,6 +249,7 @@ impl Context {
                     &project::sandbox_dir()?,
                     &git::worktrees_root()?,
                     &options,
+                    None,
                     None,
                     &mut std::io::stderr(),
                 )?;
@@ -327,11 +329,12 @@ impl Context {
                 "Stopped every running VM".into(),
                 &vm::each_running(&project::sandbox_dir()?, vm::stop)?,
             )),
-            Action::AddProjectWorktree(name) => {
+            Action::AddProjectWorktree(name, launch) => {
                 let created = vm::add_worktree(
                     &load_project(name)?,
                     &git::worktrees_root()?,
                     false,
+                    launch.as_ref(),
                     &vm_options(),
                     &mut std::io::stderr(),
                 )?;
@@ -434,7 +437,12 @@ fn load_home(tool: ToolId, home: &Path) -> Result<Vec<Resource>, Error> {
 
 /// The coding agent that tailors new flakes: `CLI_TOOLBOX_AGENT`, or claude.
 pub(super) fn setup_agent() -> String {
-    vm_options().agent.unwrap_or_else(|| "claude".into())
+    default_agent().unwrap_or_else(|| "claude".into())
+}
+
+/// The agent new worktrees start with unless changed: `CLI_TOOLBOX_AGENT`.
+pub(super) fn default_agent() -> Option<String> {
+    vm_options().agent
 }
 
 /// VM options for the launcher: herdr on, the agent from `CLI_TOOLBOX_AGENT`.
@@ -536,7 +544,7 @@ mod tests {
         let context = Context {
             cwd: Err("directory no longer exists".into()),
         };
-        let outcome = context.execute(&Action::CreateWorktree);
+        let outcome = context.execute(&Action::CreateWorktree(None));
         assert!(outcome.failed);
         assert!(outcome.shell.is_none());
         assert!(outcome.body.contains("directory no longer exists"));

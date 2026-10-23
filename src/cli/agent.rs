@@ -1,8 +1,9 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 
+use crate::agent::Launch;
 use crate::agent::vm::{self, VmOptions};
 use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
 use crate::{Error, agent, git};
@@ -86,6 +87,8 @@ enum ProjectCommands {
         /// Do not give the project a backlog.
         #[arg(long)]
         no_backlog: bool,
+        #[command(flatten)]
+        launch: LaunchArgs,
     },
     /// Set up the host side of the project's proxy credentials and backlog.
     #[command(
@@ -117,13 +120,19 @@ enum ProjectCommands {
         boot: BootArgs,
     },
     /// Create another agent worktree for the project; prints its path.
+    #[command(
+        after_help = "With --agent or --prompt, the agent starts in the worktree's herdr workspace when the VM next opens it: on `--restart`, `agent project restart` or `agent project start`. The prompt is sent once. Other worktrees keep their own agent, or get $CLI_TOOLBOX_AGENT."
+    )]
     Add {
         project: Option<String>,
         /// Restart a running VM right away to mount it.
         #[arg(long)]
         restart: bool,
         #[command(flatten)]
-        boot: BootArgs,
+        launch: LaunchArgs,
+        /// Do not add the VM to herdr on --restart.
+        #[arg(long)]
+        no_herdr: bool,
     },
     /// Bring the agents' commits to the worktree branches on the host.
     #[command(
@@ -175,8 +184,18 @@ enum VmCommands {
 }
 
 #[derive(Debug, Args)]
+pub(super) struct LaunchArgs {
+    /// Agent kind to start in the new worktree's herdr workspace, e.g. claude or codex.
+    #[arg(long, value_name = "KIND")]
+    agent: Option<String>,
+    /// First prompt for that agent; `-` reads it from stdin. Without --agent, $CLI_TOOLBOX_AGENT runs it.
+    #[arg(long, value_name = "TEXT")]
+    prompt: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct BootArgs {
-    /// Agent kind herdr starts in each guest workspace, e.g. claude or codex (default: $CLI_TOOLBOX_AGENT).
+    /// Agent kind herdr starts in each guest workspace without an agent of its own, e.g. claude or codex (default: $CLI_TOOLBOX_AGENT).
     #[arg(long, value_name = "KIND")]
     agent: Option<String>,
     /// Do not add the VM to herdr.
@@ -188,15 +207,17 @@ struct BootArgs {
 pub(super) enum WorktreeCommands {
     /// Create a git worktree and branch for AI agents, initialize it and open it in Herdr.
     #[command(
-        after_help = "Creates a new worktree and branch and prints the path.\n\nThe worktree is then initialized: a `worktree-init` recipe in the project's justfile runs if there is one (with CLI_TOOLBOX_WORKTREE_SOURCE set to the source checkout), otherwise the install of the package manager whose lockfile is present (npm ci, pnpm install, yarn install, bun install). If herdr is installed, the worktree opens as a focused Herdr workspace.\n\nShell usage:\n\n  cd \"$(cli-toolbox agent worktree create)\""
+        after_help = "Creates a new worktree and branch and prints the path.\n\nThe worktree is then initialized: a `worktree-init` recipe in the project's justfile runs if there is one (with CLI_TOOLBOX_WORKTREE_SOURCE set to the source checkout), otherwise the install of the package manager whose lockfile is present (npm ci, pnpm install, yarn install, bun install). If herdr is installed, the worktree opens as a focused Herdr workspace. With --agent or --prompt, that agent starts there and gets the prompt.\n\nShell usage:\n\n  cd \"$(cli-toolbox agent worktree create)\"\n  cli-toolbox agent worktree create --agent codex --prompt \"Fix the flaky login test\""
     )]
     Create {
         /// Skip the worktree-init recipe or package install.
         #[arg(long)]
         no_init: bool,
         /// Do not open the worktree in Herdr.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["agent", "prompt"])]
         no_herdr: bool,
+        #[command(flatten)]
+        launch: LaunchArgs,
     },
     /// List agent worktrees for the current directory.
     List,
@@ -243,6 +264,7 @@ fn run_project(
             ai,
             no_proxy,
             no_backlog,
+            launch,
         } => {
             let options = CreateOptions {
                 name,
@@ -269,6 +291,7 @@ fn run_project(
                 &git::worktrees_root()?,
                 &options,
                 ai.as_deref(),
+                launch.resolve()?.as_ref(),
                 stderr,
             )?;
             finish(&created.steps, stderr)?;
@@ -300,12 +323,18 @@ fn run_project(
         ProjectCommands::Add {
             project,
             restart,
-            boot,
+            launch,
+            no_herdr,
         } => {
+            let boot = BootArgs {
+                agent: None,
+                no_herdr,
+            };
             let created = vm::add_worktree(
                 &resolve(&root, project)?,
                 &git::worktrees_root()?,
                 restart,
+                launch.resolve()?.as_ref(),
                 &boot_options(boot),
                 stderr,
             )?;
@@ -373,7 +402,11 @@ pub(super) fn run_worktree(
     stderr: &mut dyn Write,
 ) -> Result<(), Error> {
     match command {
-        WorktreeCommands::Create { no_init, no_herdr } => {
+        WorktreeCommands::Create {
+            no_init,
+            no_herdr,
+            launch,
+        } => {
             let options = agent::Options {
                 init: !no_init,
                 herdr: !no_herdr,
@@ -382,6 +415,7 @@ pub(super) fn run_worktree(
                 &working_dir()?,
                 &git::worktrees_root()?,
                 options,
+                launch.resolve()?.as_ref(),
                 stdout,
                 stderr,
             )
@@ -406,6 +440,48 @@ pub(super) fn run_worktree(
             )
         }
     }
+}
+
+impl LaunchArgs {
+    /// The agent to start in the new worktree, if any.
+    fn resolve(self) -> Result<Option<Launch>, Error> {
+        launch(
+            self.agent,
+            self.prompt,
+            default_agent(),
+            &mut std::io::stdin(),
+        )
+    }
+}
+
+/// `agent` with `prompt`; with only a prompt, the `default` agent runs it.
+/// A `-` prompt is read from `stdin`.
+fn launch(
+    agent: Option<String>,
+    prompt: Option<String>,
+    default: Option<String>,
+    stdin: &mut dyn Read,
+) -> Result<Option<Launch>, Error> {
+    let prompt = match prompt.as_deref() {
+        Some("-") => {
+            let mut text = String::new();
+            stdin
+                .read_to_string(&mut text)
+                .map_err(|err| Error::msg(format!("read the prompt from stdin: {err}")))?;
+            Some(text.trim().to_string())
+        }
+        _ => prompt,
+    };
+    let kind = match (agent, &prompt) {
+        (Some(kind), _) => kind,
+        (None, Some(_)) => default.ok_or_else(|| {
+            Error::msg(format!(
+                "--prompt needs an agent: pass --agent KIND or set {AGENT_ENV}"
+            ))
+        })?,
+        (None, None) => return Ok(None),
+    };
+    Ok(Some(Launch::new(kind, prompt)))
 }
 
 fn boot_options(boot: BootArgs) -> VmOptions {
@@ -435,4 +511,43 @@ fn finish(steps: &[agent::Step], stderr: &mut dyn Write) -> Result<(), Error> {
 
 fn working_dir() -> Result<PathBuf, Error> {
     std::env::current_dir().map_err(|err| Error::msg(format!("resolve working directory: {err}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prompt_alone_runs_the_default_agent() {
+        let mut stdin = "".as_bytes();
+        let resolve = |agent: Option<&str>, prompt: Option<&str>, default: Option<&str>| {
+            launch(
+                agent.map(String::from),
+                prompt.map(String::from),
+                default.map(String::from),
+                &mut "".as_bytes(),
+            )
+        };
+        assert_eq!(resolve(None, None, Some("claude")).unwrap(), None);
+        assert_eq!(
+            resolve(Some("codex"), None, Some("claude")).unwrap(),
+            Some(Launch::new("codex", None))
+        );
+        assert_eq!(
+            resolve(None, Some("Fix it"), Some("claude")).unwrap(),
+            Some(Launch::new("claude", Some("Fix it".into())))
+        );
+        let err = resolve(None, Some("Fix it"), None).unwrap_err();
+        assert!(err.to_string().contains("--agent"), "{err}");
+
+        let mut stdin_prompt = "Fix\nthe tests\n".as_bytes();
+        assert_eq!(
+            launch(Some("pi".into()), Some("-".into()), None, &mut stdin_prompt).unwrap(),
+            Some(Launch::new("pi", Some("Fix\nthe tests".into())))
+        );
+        assert_eq!(
+            launch(Some("pi".into()), None, None, &mut stdin).unwrap(),
+            Some(Launch::new("pi", None))
+        );
+    }
 }

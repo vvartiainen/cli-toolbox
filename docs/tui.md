@@ -40,8 +40,9 @@ Manages the agent worktrees of the current directory (see [agents.md](agents.md)
 - Enter opens a worktree's details. There, Enter (or `c`) shows the `cd` command and
   `d` removes the worktree.
 - Ctrl-A creates a new worktree, initializes it and opens it in Herdr. Init output
-  streams to the terminal while it runs. Ctrl-D removes the selected worktree and
-  closes its Herdr workspace.
+  streams to the terminal while it runs. With Herdr installed, it first asks which
+  agent to start there and its first prompt (see [New worktree](#new-worktree)).
+  Ctrl-D removes the selected worktree and closes its Herdr workspace.
 - Removal asks for confirmation: `y` removes and `n` or Esc cancels. Tab or
   Left/Right with Enter also works.
 
@@ -59,9 +60,11 @@ worktree count (see [agents.md](agents.md#sandbox-projects)):
 - Enter opens a project: its repository, VM state and worktrees. There, `u` starts
   the VM and opens every worktree in herdr, `x` stops it, `r` restarts it to mount
   worktree changes, `p` sets up its agent-proxy credentials and backlog
-  (`agent project setup`), `s` syncs the agents' commits, and `a` adds a worktree. Up/Down
+  (`agent project setup`), `s` syncs the agents' commits, and `a` adds a worktree,
+  asking for its agent and first prompt (see [New worktree](#new-worktree)). Up/Down
   select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
-  `agent project done` on it. The agent kind comes from `CLI_TOOLBOX_AGENT`.
+  `agent project done` on it. Worktrees without an agent of their own get
+  `CLI_TOOLBOX_AGENT`.
 - Ctrl-S syncs, Ctrl-R restarts and Ctrl-X stops every project whose VM is
   running (`agent project sync|restart|stop --all`). A failing project does not
   stop the others.
@@ -76,6 +79,23 @@ directory, including VMs whose project directory was removed, which are marked
   (`agent vm stop`).
 - Ctrl-D removes the runtime directories of stopped VMs whose start directory is
   gone (`agent vm prune`).
+
+## New worktree
+
+When Herdr is installed, creating a worktree (Ctrl-A in Agents › Worktrees, `a` in a
+sandbox project) first opens a short form:
+
+- Left/Right (also Up/Down, Tab) choose the agent from the kinds Herdr supports,
+  or none. It starts as `CLI_TOOLBOX_AGENT`, or none if that is not set.
+- Typing writes the agent's first prompt, which is optional. Backspace, Ctrl-W and
+  Ctrl-U delete a character, a word or everything. `?` is part of the prompt here;
+  F1 shows the keys.
+- Enter creates the worktree and Esc goes back.
+
+A local worktree starts the agent in its Herdr workspace right away, like
+`agent worktree create --agent KIND --prompt TEXT`. A sandbox project's worktree
+starts it when the VM opens the worktree: press `u` to start a stopped VM or `r` to
+restart a running one (see [agents.md](agents.md#agents-per-worktree)).
 
 ## Applying exports and directory changes
 

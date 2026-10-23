@@ -7,20 +7,26 @@
 //! The `vm_*` functions manage every running agent-sandbox VM from its
 //! runner state alone, also when its project directory is gone.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
-use super::{Created, Step};
+use super::{Created, Launch, Step};
 use crate::git::{self, AgentWorktree};
 use crate::sandbox::project::{self, CreateOptions, Project};
 use crate::sandbox::setup::{self, Backlog};
 use crate::sandbox::{self, RunnerState};
 use crate::{Error, herdr, select};
 
+/// Each worktree's own agent and its first prompt until it is sent, by
+/// worktree name, next to the flake.
+const AGENTS_FILE: &str = "agents.json";
+
 /// Choices shared by the project commands.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct VmOptions {
-    /// The agent kind herdr starts in each guest workspace, if any.
+    /// The agent kind herdr starts in each guest workspace that has no agent
+    /// of its own, if any.
     pub(crate) agent: Option<String>,
     /// Add the VM to herdr and open a guest workspace per worktree.
     pub(crate) herdr: bool,
@@ -87,12 +93,13 @@ fn status_with(project: Project, running: &[RunnerState]) -> ProjectStatus {
 
 /// Create a project for the repository and its first worktree, and set up
 /// its host side. With `ai`, that agent kind then tailors the flake to the
-/// repository.
+/// repository. `launch` starts in the first worktree with the VM.
 pub(crate) fn create(
     root: &Path,
     worktrees_root: &Path,
     options: &CreateOptions,
     ai: Option<&str>,
+    launch: Option<&Launch>,
     stderr: &mut dyn Write,
 ) -> Result<(Project, Created), Error> {
     let project = project::create(root, options, stderr)?;
@@ -103,6 +110,9 @@ pub(crate) fn create(
         project.dir.display(),
         worktree.name
     ))];
+    if let Some(launch) = launch {
+        steps.push(record_launch_step(&project, &worktree.name, launch));
+    }
     steps.extend(self::setup(&project));
     if let Some(agent) = ai {
         steps.push(
@@ -143,29 +153,75 @@ pub(crate) fn setup(project: &Project) -> Vec<Step> {
 }
 
 /// Create the next agent worktree of the project's repository. A running VM
-/// mounts it after a restart, which `restart` does right away.
+/// mounts it after a restart, which `restart` does right away. `launch`
+/// starts in it once the VM opens it in herdr.
 pub(crate) fn add_worktree(
     project: &Project,
     worktrees_root: &Path,
     restart: bool,
+    launch: Option<&Launch>,
     options: &VmOptions,
     stderr: &mut dyn Write,
 ) -> Result<Created, Error> {
+    // Forget the agents of worktrees removed by hand before the new one can
+    // reuse such a name.
+    write_worktrees(project)?;
     let worktree = git::create_agent_worktree_record(project.repo()?, worktrees_root, stderr)?;
     write_worktrees(project)?;
+    let mut steps = Vec::new();
+    if let Some(launch) = launch {
+        steps.push(record_launch_step(project, &worktree.name, launch));
+    }
     let running = sandbox::vm_for(&running_vms(), &project.dir).is_some();
-    let steps = match (running, restart) {
-        (true, true) => self::restart(project, options, stderr)?,
-        (true, false) => vec![Step::Skipped(format!(
+    match (running, restart) {
+        (true, true) => steps.extend(self::restart(project, options, stderr)?),
+        (true, false) => steps.push(Step::Skipped(format!(
             "vm: running; restart it to mount {}",
             worktree.name
-        ))],
-        (false, _) => vec![Step::Skipped(format!(
+        ))),
+        (false, _) => steps.push(Step::Skipped(format!(
             "vm: stopped; starting it mounts {}",
             worktree.name
-        ))],
-    };
+        ))),
+    }
     Ok(Created { worktree, steps })
+}
+
+/// The agents chosen for the project's worktrees, by worktree name.
+pub(crate) fn launches(project: &Project) -> BTreeMap<String, Launch> {
+    std::fs::read_to_string(project.dir.join(AGENTS_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_launches(project: &Project, launches: &BTreeMap<String, Launch>) -> Result<(), Error> {
+    let path = project.dir.join(AGENTS_FILE);
+    if launches.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                Err(Error::msg(format!("remove {}: {err}", path.display())))
+            }
+            _ => Ok(()),
+        };
+    }
+    let json = serde_json::to_string_pretty(launches)
+        .map_err(|err| Error::msg(format!("serialize {AGENTS_FILE}: {err}")))?;
+    std::fs::write(&path, json + "\n")
+        .map_err(|err| Error::msg(format!("write {}: {err}", path.display())))
+}
+
+/// Remember `launch` for the worktree `name`, to start with the VM.
+fn record_launch_step(project: &Project, name: &str, launch: &Launch) -> Step {
+    let mut launches = launches(project);
+    launches.insert(name.into(), launch.clone());
+    match save_launches(project, &launches) {
+        Ok(()) => Step::Done(format!(
+            "agent: {} starts in {name} with the VM",
+            launch.text()
+        )),
+        Err(err) => Step::Failed(format!("agent: {err}")),
+    }
 }
 
 /// Start the project's VM with its current worktrees and open them in herdr.
@@ -550,9 +606,19 @@ fn write_worktrees(project: &Project) -> Result<Vec<AgentWorktree>, Error> {
     };
     let worktrees = git::agent_worktrees(repo)?;
     project.write_worktrees(&worktrees)?;
+    // A later worktree of the same name must not inherit a removed one's agent.
+    let mut launches = launches(project);
+    let count = launches.len();
+    launches.retain(|name, _| worktrees.iter().any(|worktree| worktree.name == *name));
+    if launches.len() != count {
+        save_launches(project, &launches)?;
+    }
     Ok(worktrees)
 }
 
+/// Add the VM to herdr and open a workspace per worktree, starting the
+/// worktree's own agent or else `agent` in it. A worktree's first prompt is
+/// sent once.
 fn herdr_steps(
     project: &Project,
     machine: &str,
@@ -566,17 +632,43 @@ fn herdr_steps(
         return vec![Step::Failed(format!("herdr: add machine {machine}: {err}"))];
     }
     let mut steps = vec![Step::Done(format!("herdr: machine {machine}"))];
+    let mut launches = launches(project);
+    let mut prompted = false;
     for worktree in worktrees {
         let cwd = guest_dir(&worktree.name);
+        let opened = match herdr::open_machine_workspace(machine, &cwd, &worktree.name) {
+            Ok(opened) => opened,
+            Err(err) => {
+                steps.push(Step::Failed(format!("herdr: open workspace {cwd}: {err}")));
+                continue;
+            }
+        };
+        let id = &opened.workspace_id;
+        let launch = launches
+            .get(&worktree.name)
+            .cloned()
+            .or_else(|| agent.map(|kind| Launch::new(kind, None)));
+        let Some(launch) = launch else {
+            steps.push(Step::Done(format!("herdr: workspace {id} at {cwd}")));
+            continue;
+        };
         steps.push(
-            match herdr::open_machine_workspace(machine, &cwd, &worktree.name, agent) {
-                Ok(id) => Step::Done(match agent {
-                    Some(kind) => format!("herdr: workspace {id} at {cwd} running {kind}"),
-                    None => format!("herdr: workspace {id} at {cwd}"),
-                }),
-                Err(err) => Step::Failed(format!("herdr: open workspace {cwd}: {err}")),
+            match super::start_agent(Some(machine), &worktree.name, &opened.pane_id, &launch) {
+                Ok(running) => {
+                    if let Some(own) = launches.get_mut(&worktree.name) {
+                        prompted |= own.prompt.take().is_some();
+                    }
+                    Step::Done(format!("herdr: workspace {id} at {cwd} running {running}"))
+                }
+                Err(err) => Step::Failed(format!(
+                    "herdr: workspace {id} at {cwd}, but could not start {}: {err}",
+                    launch.kind
+                )),
             },
         );
+    }
+    if prompted && let Err(err) = save_launches(project, &launches) {
+        steps.push(Step::Failed(format!("agent: forget sent prompts: {err}")));
     }
     steps
 }
@@ -733,10 +825,24 @@ mod tests {
         let worktrees_root = temp.path().join("worktrees");
         let options = VmOptions::default();
 
-        let first =
-            add_worktree(&project, &worktrees_root, false, &options, &mut Vec::new()).unwrap();
-        let second =
-            add_worktree(&project, &worktrees_root, false, &options, &mut Vec::new()).unwrap();
+        let first = add_worktree(
+            &project,
+            &worktrees_root,
+            false,
+            None,
+            &options,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let second = add_worktree(
+            &project,
+            &worktrees_root,
+            false,
+            None,
+            &options,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(second.worktree.name, "demo-agent-wt-2");
         assert!(matches!(&first.steps[..], [Step::Skipped(text)] if text.contains("stopped")));
 
@@ -748,6 +854,58 @@ mod tests {
         assert_eq!(status.worktrees.len(), 2);
         assert_eq!(status.vm, None);
         assert_eq!(status.vm_text(), "stopped");
+    }
+
+    #[test]
+    fn worktree_agents_are_kept_until_the_worktree_is_gone() {
+        if skip_without_git() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("demo");
+        init_git_repo(&repo);
+        let project = project(&temp.path().join("sandbox"), &repo);
+        let worktrees_root = temp.path().join("worktrees");
+        let launch = Launch::new("codex", Some("Add a --json flag".into()));
+
+        let created = add_worktree(
+            &project,
+            &worktrees_root,
+            false,
+            Some(&launch),
+            &VmOptions::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            created.steps[0],
+            Step::Done("agent: codex with the prompt starts in demo-agent-wt with the VM".into())
+        );
+        assert_eq!(
+            launches(&project),
+            BTreeMap::from([("demo-agent-wt".to_string(), launch)])
+        );
+
+        // Removed some other way: the next worktree reuses its name.
+        git::remove_agent_worktree(
+            &repo,
+            &created.worktree,
+            git::RemoveOptions::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let again = add_worktree(
+            &project,
+            &worktrees_root,
+            false,
+            None,
+            &VmOptions::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(again.worktree.name, "demo-agent-wt");
+        assert!(launches(&project).is_empty());
+        assert!(!project.dir.join(AGENTS_FILE).exists());
     }
 
     #[test]
@@ -776,6 +934,7 @@ mod tests {
             &project,
             &temp.path().join("worktrees"),
             false,
+            None,
             &VmOptions::default(),
             &mut Vec::new(),
         )

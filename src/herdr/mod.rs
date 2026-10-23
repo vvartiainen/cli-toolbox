@@ -47,16 +47,20 @@ pub(crate) fn close_workspace(id: &str) -> Result<(), Error> {
     exec::combined_output("herdr", &["workspace", "close", id], None).map(drop)
 }
 
+/// A new workspace and the pane an agent can start in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenedWorkspace {
+    pub(crate) workspace_id: String,
+    pub(crate) pane_id: String,
+}
+
 /// Open a workspace in `cwd` on the saved machine `machine`, labelled
-/// `label`. With `agent`, start that agent kind, named `label`, in its first
-/// pane. Returns
-/// the workspace id.
+/// `label`, without focusing it.
 pub(crate) fn open_machine_workspace(
     machine: &str,
     cwd: &str,
     label: &str,
-    agent: Option<&str>,
-) -> Result<String, Error> {
+) -> Result<OpenedWorkspace, Error> {
     let json = exec::combined_output(
         "herdr",
         &[
@@ -73,25 +77,92 @@ pub(crate) fn open_machine_workspace(
         None,
     )?;
     let created = workspace_created(&json)?;
-    if let Some(kind) = agent {
-        // Agent names must be unique per server; one runs per worktree.
-        exec::combined_output(
-            "herdr",
-            &[
-                "--machine",
-                machine,
-                "agent",
-                "start",
-                label,
-                "--kind",
-                kind,
-                "--pane",
-                &created.root_pane.pane_id,
-            ],
-            None,
-        )?;
+    Ok(OpenedWorkspace {
+        workspace_id: created.workspace.workspace_id,
+        pane_id: created.root_pane.pane_id,
+    })
+}
+
+/// The first pane of the local workspace `id`: the root pane of a workspace
+/// that was just opened.
+pub(crate) fn first_pane(id: &str) -> Result<String, Error> {
+    let json = exec::combined_output("herdr", &["pane", "list", "--workspace", id], None)?;
+    first_pane_in(&json)?.ok_or_else(|| Error::msg(format!("workspace {id} has no pane")))
+}
+
+/// Start the agent `kind`, named `name`, in `pane` on `machine` (or the
+/// local server), passing `args` to the agent itself.
+pub(crate) fn start_agent(
+    machine: Option<&str>,
+    name: &str,
+    kind: &str,
+    pane: &str,
+    args: &[&str],
+) -> Result<(), Error> {
+    let mut command = vec!["agent", "start", name, "--kind", kind, "--pane", pane];
+    if !args.is_empty() {
+        command.push("--");
+        command.extend(args);
     }
-    Ok(created.workspace.workspace_id)
+    run_on(machine, &command)
+}
+
+/// Submit `text` to the running agent `name`.
+pub(crate) fn prompt_agent(machine: Option<&str>, name: &str, text: &str) -> Result<(), Error> {
+    run_on(machine, &["agent", "prompt", name, text])
+}
+
+fn run_on(machine: Option<&str>, args: &[&str]) -> Result<(), Error> {
+    let mut command = Vec::new();
+    if let Some(machine) = machine {
+        command.extend(["--machine", machine]);
+    }
+    command.extend(args);
+    exec::combined_output("herdr", &command, None).map(drop)
+}
+
+/// Whether a herdr error is `agent_not_ready`: the agent started but waits
+/// at a question, such as a folder trust prompt.
+pub(crate) fn not_ready(err: &Error) -> bool {
+    err.to_string().contains("agent_not_ready")
+}
+
+/// A valid herdr agent name for `label`: lowercase letters, digits, `-` and
+/// `_`, starting with a letter, at most 32 characters.
+pub(crate) fn agent_name(label: &str) -> String {
+    let mut name: String = label
+        .chars()
+        .map(|ch| match ch.to_ascii_lowercase() {
+            ch @ ('a'..='z' | '0'..='9' | '_' | '-') => ch,
+            _ => '-',
+        })
+        .collect();
+    if !name.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+        name.insert_str(0, "a-");
+    }
+    // Keep the end, which tells numbered worktrees apart. Only ASCII is left.
+    if name.len() > 32 {
+        name = format!("a-{}", &name[name.len() - 30..]);
+    }
+    name
+}
+
+/// The agent kinds `herdr agent start` supports, from its help.
+pub(crate) fn agent_kinds() -> Vec<String> {
+    exec::combined_output("herdr", &["agent", "start", "--help"], None)
+        .map(|help| kinds_in(&help))
+        .unwrap_or_default()
+}
+
+fn kinds_in(help: &str) -> Vec<String> {
+    help.lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("[possible values: ")?
+                .strip_suffix(']')
+        })
+        .map(|values| values.split(", ").map(String::from).collect())
+        .unwrap_or_default()
 }
 
 /// Remove the saved machine labelled `label` from Herdr. Returns whether one
@@ -153,6 +224,29 @@ fn workspace_created(json: &str) -> Result<Created, Error> {
     serde_json::from_str::<CreateResponse>(json)
         .map(|response| response.result)
         .map_err(|err| Error::msg(format!("parse herdr workspace create: {err}\n{json}")))
+}
+
+#[derive(Deserialize)]
+struct PaneListResponse {
+    result: PaneList,
+}
+
+#[derive(Deserialize)]
+struct PaneList {
+    panes: Vec<CreatedPane>,
+}
+
+fn first_pane_in(json: &str) -> Result<Option<String>, Error> {
+    serde_json::from_str::<PaneListResponse>(json)
+        .map(|response| {
+            response
+                .result
+                .panes
+                .into_iter()
+                .next()
+                .map(|pane| pane.pane_id)
+        })
+        .map_err(|err| Error::msg(format!("parse herdr pane list: {err}")))
 }
 
 #[derive(Deserialize)]
@@ -223,6 +317,36 @@ mod tests {
         let created = workspace_created(json).unwrap();
         assert_eq!(created.workspace.workspace_id, "w2");
         assert_eq!(created.root_pane.pane_id, "w2:p1");
+    }
+
+    #[test]
+    fn reads_the_first_pane_of_a_workspace() {
+        let json = r#"{"id":"cli:pane:list","result":{"panes":[
+            {"agent":null,"cwd":"/wt","focused":true,"pane_id":"w3:p1","tab_id":"w3:t1","workspace_id":"w3"}
+        ],"type":"pane_list"}}"#;
+        assert_eq!(first_pane_in(json).unwrap(), Some("w3:p1".into()));
+        let empty = r#"{"result":{"panes":[],"type":"pane_list"}}"#;
+        assert_eq!(first_pane_in(empty).unwrap(), None);
+    }
+
+    #[test]
+    fn agent_names_follow_the_herdr_rules() {
+        assert_eq!(
+            agent_name("cli-toolbox-agent-wt-2"),
+            "cli-toolbox-agent-wt-2"
+        );
+        assert_eq!(agent_name("My.Repo-agent-wt"), "my-repo-agent-wt");
+        assert_eq!(agent_name("2fa-agent-wt"), "a-2fa-agent-wt");
+        let long = agent_name("a-very-long-repository-name-agent-wt-12");
+        assert_eq!(long, "a-ng-repository-name-agent-wt-12");
+        assert_eq!(long.len(), 32);
+    }
+
+    #[test]
+    fn reads_the_supported_agent_kinds_from_the_help() {
+        let help = "      --kind <KIND>\n          Supported agent kind\n\n          [possible values: pi, claude, codex]\n\n      --pane <ID>\n";
+        assert_eq!(kinds_in(help), ["pi", "claude", "codex"]);
+        assert!(kinds_in("no kinds").is_empty());
     }
 
     #[test]

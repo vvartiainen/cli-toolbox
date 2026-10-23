@@ -28,6 +28,10 @@ pub(crate) fn run(
     let mut app = App::new(context.cwd_display());
     app.print_shell = print_shell;
     app.herdr = crate::herdr::available();
+    if app.herdr {
+        app.agent_kinds = crate::herdr::agent_kinds();
+    }
+    app.default_agent = actions::default_agent();
     let mut session = Some(TerminalSession::inline(ui::HEIGHT)?);
     let result = event_loop(&context, &mut app, &mut session, stderr);
     let restoration = session.as_mut().map(Session::restore).transpose();
