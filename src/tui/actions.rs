@@ -302,6 +302,11 @@ impl Context {
                 let steps = vm::restart(&project, &vm_options(), &mut std::io::stderr())?;
                 Ok(steps_done(format!("VM of {name}"), &steps))
             }
+            Action::SetupProject(name) => {
+                // The proxy setup may prompt for secrets in the released terminal.
+                let steps = vm::setup(&load_project(name)?);
+                Ok(steps_done(format!("Setup of {name}"), &steps))
+            }
             Action::SyncProject(name) => {
                 let synced = vm::sync(&load_project(name)?, None)?;
                 vm::write_synced(&synced, stdout)?;

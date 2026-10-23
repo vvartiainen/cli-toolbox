@@ -58,7 +58,8 @@ worktree count (see [agents.md](agents.md#sandbox-projects)):
   project's details open next, ready for `u`. The VM does not start by itself.
 - Enter opens a project: its repository, VM state and worktrees. There, `u` starts
   the VM and opens every worktree in herdr, `x` stops it, `r` restarts it to mount
-  worktree changes, `s` syncs the agents' commits, and `a` adds a worktree. Up/Down
+  worktree changes, `p` sets up its agent-proxy credentials and backlog
+  (`agent project setup`), `s` syncs the agents' commits, and `a` adds a worktree. Up/Down
   select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
   `agent project done` on it. The agent kind comes from `CLI_TOOLBOX_AGENT`.
 

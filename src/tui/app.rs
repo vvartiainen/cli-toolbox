@@ -231,6 +231,8 @@ pub(crate) enum Action {
     StartProject(String),
     StopProject(String),
     RestartProject(String),
+    /// Set up the host side of the project's proxy credentials and backlog.
+    SetupProject(String),
     SyncProject(String),
     AddProjectWorktree(String),
     /// Sync and remove a project's worktree, keeping its branch.
@@ -280,6 +282,7 @@ impl Action {
             | Self::StartProject(_)
             | Self::StopProject(_)
             | Self::RestartProject(_)
+            | Self::SetupProject(_)
             | Self::SyncProject(_)
             | Self::AddProjectWorktree(_)
             | Self::DoneProjectWorktree(..)
@@ -868,6 +871,7 @@ impl App {
             KeyCode::Char('u') => return Effect::Execute(Action::StartProject(name)),
             KeyCode::Char('x') => return Effect::Execute(Action::StopProject(name)),
             KeyCode::Char('r') => return Effect::Execute(Action::RestartProject(name)),
+            KeyCode::Char('p') => return Effect::Execute(Action::SetupProject(name)),
             KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
             KeyCode::Char('a') => return Effect::Execute(Action::AddProjectWorktree(name)),
             KeyCode::Enter | KeyCode::Char('c') => {
@@ -1294,6 +1298,7 @@ mod tests {
             ('u', Action::StartProject("demo".into())),
             ('x', Action::StopProject("demo".into())),
             ('r', Action::RestartProject("demo".into())),
+            ('p', Action::SetupProject("demo".into())),
             ('s', Action::SyncProject("demo".into())),
             ('a', Action::AddProjectWorktree("demo".into())),
             ('c', Action::EnterProjectWorktree(first.clone())),
