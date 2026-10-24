@@ -5,9 +5,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
 use super::app::{
-    App, Category, ConfirmState, DetailsState, FormField, LaunchForm, NewWorktree, PickerState,
-    ProjectField, ProjectForm, ProjectState, Resource, ResultState, Screen, TailorState, ToolId,
-    branch_label,
+    App, Category, ConfirmState, DetailsState, FormField, LaunchForm, MenuState, NewWorktree,
+    PickerState, ProjectCommand, ProjectField, ProjectForm, ProjectState, Resource, ResultState,
+    Screen, TailorState, ToolId, branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -20,6 +20,7 @@ const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove 
 const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
+const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · ? help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
 const HELP_RETAILOR: &str = "a agent · e edit · ? help · esc back";
 const HELP_NEW_WORKTREE: &str = "tab name/prompt · ←→ agent · ⏎ create · F1 help · esc back";
@@ -75,6 +76,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         Screen::Picker(picker) => draw_picker(frame, app, picker),
         Screen::WorktreeDetails(details) => draw_details(frame, app, details),
         Screen::ProjectDetails(project) => draw_project(frame, app, project),
+        Screen::ProjectMenu(menu) => draw_menu(frame, menu),
         Screen::TailorFlake(tailor) => draw_tailor(frame, tailor),
         Screen::NewWorktree(form) => draw_new_worktree(frame, app, form),
         Screen::ProjectForm(form) => draw_project_form(frame, form),
@@ -136,11 +138,11 @@ fn details_help(app: &App) -> &'static str {
 
 fn project_help(state: &ProjectState) -> &'static str {
     if state.status.worktrees.is_empty() {
-        "a add · t tailor · f update · v review saved · ? help · esc back"
+        "a add · u start · v review saved · m more · ? help · esc back"
     } else if state.status.vm.is_some() {
-        "v review · s sync · x stop · r restart · a add · ⏎ cd · D done · d remove · ? help"
+        "v review · x stop · a add · ⏎ cd · D done · d remove · m more · ? help"
     } else {
-        "v review saved · u start · a add · ⏎ cd · D done · d remove · ? help · esc back"
+        "v review saved · u start · a add · ⏎ cd · D done · d remove · m more · ? help"
     }
 }
 
@@ -223,17 +225,7 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
         Screen::ProjectDetails(_) => vec![
             entry("↑↓ j k", "select a worktree"),
             entry("u", "start the VM and open the worktrees in herdr"),
-            entry("x r", "stop / restart the VM (asks first)"),
-            entry(
-                "t",
-                "tailor flake.nix again with a coding agent or the editor",
-            ),
-            entry("f", "update the flake's inputs (nix flake update)"),
-            entry(
-                "p",
-                "prune review snapshots whose work is on main, and their checkouts (asks)",
-            ),
-            entry("s", "publish agent work as host review branches"),
+            entry("x", "stop the VM (asks first)"),
             entry(
                 "v",
                 "review selected agent in lazygit (separate host checkout)",
@@ -255,8 +247,21 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 "d",
                 "remove the worktree without saving (asks; keep or delete the branch)",
             ),
+            entry("m", "more: sync, restart, tailor, update, prune"),
             entry("esc", "back to the list"),
         ],
+        Screen::ProjectMenu(_) => {
+            let mut entries: Vec<_> = ProjectCommand::ALL
+                .iter()
+                .map(|command| (command.key().to_string(), command.description()))
+                .collect();
+            entries.extend([
+                entry("↑↓ j k", "move"),
+                entry("⏎", "run the highlighted command"),
+                entry("esc", "back to the project"),
+            ]);
+            entries
+        }
         Screen::TailorFlake(_) => vec![
             entry(
                 "a",
@@ -663,6 +668,36 @@ fn draw_project(frame: &mut Frame<'_>, app: &App, state: &ProjectState) {
         .map(|worktree| ListItem::new(resource_line(&Resource::Worktree(worktree.clone()), width)))
         .collect();
     render_list(frame, list, items, state.selected);
+}
+
+/// The project commands that have no key of their own on the details.
+fn draw_menu(frame: &mut Frame<'_>, menu: &MenuState) {
+    let area = frame.area();
+    let project = &menu.project.status.project;
+    let mut title = breadcrumb(Category::Sandbox, &project.name);
+    title.extend([" › ".dark_gray(), Span::styled("More", Style::new().bold())]);
+    let block = panel(title, project.dir.display().to_string(), HELP_MENU);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = ProjectCommand::ALL
+        .iter()
+        .map(|command| command.label().len())
+        .max()
+        .unwrap_or_default();
+    let items: Vec<ListItem> = ProjectCommand::ALL
+        .iter()
+        .map(|command| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", command.key()),
+                    Style::new().fg(ACCENT).bold(),
+                ),
+                Span::raw(format!(" {:<width$}  ", command.label())),
+                Span::styled(command.description(), Style::new().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect();
+    render_list(frame, inner, items, menu.selected);
 }
 
 fn draw_tailor(frame: &mut Frame<'_>, state: &TailorState) {
@@ -1277,7 +1312,19 @@ mod tests {
         );
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let details = rendered(&app, 100, super::HEIGHT);
-        assert!(details.contains("a add · t tailor · f update"), "{details}");
+        assert!(details.contains("a add · u start"), "{details}");
+        assert!(details.contains("m more"), "{details}");
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        let menu = rendered(&app, 100, super::HEIGHT);
+        for want in [
+            "demo › More",
+            " s  sync     publish agent work",
+            " t  tailor   tailor flake.nix again",
+            " f  update   update the flake's inputs",
+            " p  prune    prune review snapshots",
+        ] {
+            assert!(menu.contains(want), "missing {want}: {menu}");
+        }
         app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
         let text = rendered(&app, 100, super::HEIGHT);
         for want in [

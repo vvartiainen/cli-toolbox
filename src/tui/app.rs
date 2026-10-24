@@ -499,6 +499,64 @@ pub(crate) struct TailorState {
     pub(crate) back: Option<Box<Screen>>,
 }
 
+/// A project command in the command menu (`m`) rather than on a key of its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectCommand {
+    Sync,
+    Restart,
+    Tailor,
+    UpdateFlake,
+    Prune,
+}
+
+impl ProjectCommand {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Sync,
+        Self::Restart,
+        Self::Tailor,
+        Self::UpdateFlake,
+        Self::Prune,
+    ];
+
+    /// Key that runs it from the menu.
+    pub(crate) fn key(self) -> char {
+        match self {
+            Self::Sync => 's',
+            Self::Restart => 'r',
+            Self::Tailor => 't',
+            Self::UpdateFlake => 'f',
+            Self::Prune => 'p',
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::Restart => "restart",
+            Self::Tailor => "tailor",
+            Self::UpdateFlake => "update",
+            Self::Prune => "prune",
+        }
+    }
+
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Sync => "publish agent work as host review branches",
+            Self::Restart => "restart the VM (asks first while it runs)",
+            Self::Tailor => "tailor flake.nix again with a coding agent or the editor",
+            Self::UpdateFlake => "update the flake's inputs (nix flake update)",
+            Self::Prune => "prune review snapshots whose work is on main (dry run first)",
+        }
+    }
+}
+
+/// The command menu of a project, shown over its details.
+#[derive(Clone, Debug)]
+pub(crate) struct MenuState {
+    pub(crate) project: Box<ProjectState>,
+    pub(crate) selected: usize,
+}
+
 /// What a VM confirmation is about.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VmChange {
@@ -687,6 +745,7 @@ pub(crate) enum Screen {
     Picker(PickerState),
     WorktreeDetails(DetailsState),
     ProjectDetails(Box<ProjectState>),
+    ProjectMenu(MenuState),
     TailorFlake(TailorState),
     NewWorktree(LaunchForm),
     ProjectForm(ProjectForm),
@@ -946,6 +1005,7 @@ impl App {
             Screen::Picker(_) => self.handle_picker_key(key),
             Screen::WorktreeDetails(_) => self.handle_details_key(key),
             Screen::ProjectDetails(_) => self.handle_project_key(key),
+            Screen::ProjectMenu(_) => self.handle_menu_key(key),
             Screen::TailorFlake(_) => self.handle_tailor_key(key),
             Screen::NewWorktree(_) => self.handle_new_worktree_key(key),
             Screen::ProjectForm(_) => self.handle_project_form_key(key),
@@ -962,6 +1022,7 @@ impl App {
             Screen::Picker(_) | Screen::NewWorktree(_) | Screen::ProjectForm(_) => false,
             Screen::WorktreeDetails(_)
             | Screen::ProjectDetails(_)
+            | Screen::ProjectMenu(_)
             | Screen::TailorFlake(_)
             | Screen::Confirm(_)
             | Screen::Result(_) => true,
@@ -1259,26 +1320,12 @@ impl App {
                 let status = state.status.clone();
                 return self.confirm_vm(&status, VmChange::Stop);
             }
-            KeyCode::Char('r') => {
-                let status = state.status.clone();
-                return self.confirm_vm(&status, VmChange::Restart);
-            }
-            KeyCode::Char('p') => return Effect::Prepare(Prepare::Prune(name)),
-            KeyCode::Char('f') => return Effect::Execute(Action::UpdateProjectFlake(name)),
-            KeyCode::Char('t') => {
-                let summary = format!(
-                    "Project {name}: {}/flake.nix",
-                    state.status.project.dir.display()
-                );
-                let back = Some(Box::new(Screen::ProjectDetails(state.clone())));
-                self.screen = Screen::TailorFlake(TailorState {
-                    project: NewProject { name, summary },
-                    agent: self.setup_agent.clone(),
-                    editor: self.editor.clone(),
-                    back,
+            KeyCode::Char('m') => {
+                self.screen = Screen::ProjectMenu(MenuState {
+                    project: state.clone(),
+                    selected: 0,
                 });
             }
-            KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
             KeyCode::Char('v') => return Effect::Execute(Action::ReviewProject(name, worktree)),
             KeyCode::Char('a') => return Effect::Prepare(Prepare::ProjectWorktree(name)),
             KeyCode::Enter | KeyCode::Char('c') => {
@@ -1300,6 +1347,69 @@ impl App {
             _ => {}
         }
         Effect::None
+    }
+
+    fn handle_menu_key(&mut self, key: KeyEvent) -> Effect {
+        let Screen::ProjectMenu(menu) = &mut self.screen else {
+            return Effect::None;
+        };
+        let count = ProjectCommand::ALL.len();
+        if list_key(key, &mut menu.selected, count) {
+            return Effect::None;
+        }
+        let command = match key.code {
+            KeyCode::Char('k') => {
+                move_selection(&mut menu.selected, count, -1);
+                return Effect::None;
+            }
+            KeyCode::Char('j') => {
+                move_selection(&mut menu.selected, count, 1);
+                return Effect::None;
+            }
+            KeyCode::Enter => ProjectCommand::ALL[menu.selected],
+            KeyCode::Char(ch) => {
+                match ProjectCommand::ALL
+                    .into_iter()
+                    .find(|command| command.key() == ch)
+                {
+                    Some(command) => command,
+                    None => return Effect::None,
+                }
+            }
+            KeyCode::Esc => {
+                self.screen = Screen::ProjectDetails(menu.project.clone());
+                return Effect::None;
+            }
+            _ => return Effect::None,
+        };
+        // Commands, their confirmations and forms return to the project, not
+        // the menu.
+        let state = menu.project.clone();
+        self.screen = Screen::ProjectDetails(state.clone());
+        self.project_command(state, command)
+    }
+
+    fn project_command(&mut self, state: Box<ProjectState>, command: ProjectCommand) -> Effect {
+        let name = state.status.project.name.clone();
+        match command {
+            ProjectCommand::Sync => Effect::Execute(Action::SyncProject(name)),
+            ProjectCommand::Restart => self.confirm_vm(&state.status, VmChange::Restart),
+            ProjectCommand::UpdateFlake => Effect::Execute(Action::UpdateProjectFlake(name)),
+            ProjectCommand::Prune => Effect::Prepare(Prepare::Prune(name)),
+            ProjectCommand::Tailor => {
+                let summary = format!(
+                    "Project {name}: {}/flake.nix",
+                    state.status.project.dir.display()
+                );
+                self.screen = Screen::TailorFlake(TailorState {
+                    project: NewProject { name, summary },
+                    agent: self.setup_agent.clone(),
+                    editor: self.editor.clone(),
+                    back: Some(Box::new(Screen::ProjectDetails(state))),
+                });
+                Effect::None
+            }
+        }
     }
 
     fn handle_tailor_key(&mut self, key: KeyEvent) -> Effect {
@@ -1971,8 +2081,6 @@ mod tests {
         for (ch, action) in [
             ('u', Action::StartProject("demo".into())),
             ('x', Action::StopProject("demo".into())),
-            ('r', Action::RestartProject("demo".into())),
-            ('s', Action::SyncProject("demo".into())),
             (
                 'v',
                 Action::ReviewProject("demo".into(), Some(first.clone())),
@@ -1988,10 +2096,35 @@ mod tests {
             app.handle_key(key(KeyCode::Char('a'))),
             Effect::Prepare(Prepare::ProjectWorktree("demo".into()))
         );
+        // The advanced commands are in the menu, not on keys of their own.
+        for ch in ['s', 'r', 'p', 'f', 't'] {
+            assert_eq!(app.handle_key(key(KeyCode::Char(ch))), Effect::None);
+            assert!(matches!(app.screen, Screen::ProjectDetails(_)));
+        }
+        for (ch, effect) in [
+            ('s', Effect::Execute(Action::SyncProject("demo".into()))),
+            ('r', Effect::Execute(Action::RestartProject("demo".into()))),
+            ('p', Effect::Prepare(Prepare::Prune("demo".into()))),
+        ] {
+            assert_eq!(app.handle_key(key(KeyCode::Char('m'))), Effect::None);
+            assert!(matches!(app.screen, Screen::ProjectMenu(_)));
+            assert_eq!(app.handle_key(key(KeyCode::Char(ch))), effect);
+            // Back to the project, with its worktree still selected.
+            let Screen::ProjectDetails(state) = &app.screen else {
+                panic!("expected the project");
+            };
+            assert_eq!(state.selected_worktree(), Some(&first));
+        }
+        // Enter runs the highlighted command and Esc closes the menu.
+        app.handle_key(key(KeyCode::Char('m')));
+        app.handle_key(key(KeyCode::Down));
         assert_eq!(
-            app.handle_key(key(KeyCode::Char('p'))),
-            Effect::Prepare(Prepare::Prune("demo".into()))
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::RestartProject("demo".into()))
         );
+        app.handle_key(key(KeyCode::Char('m')));
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), Effect::None);
+        assert!(matches!(app.screen, Screen::ProjectDetails(_)));
         // d asks whether to keep the branch.
         assert_eq!(app.handle_key(key(KeyCode::Char('d'))), Effect::None);
         let Screen::Confirm(confirm) = &app.screen else {
@@ -2179,11 +2312,18 @@ mod tests {
             ('x', Action::StopProject("demo".into())),
             ('r', Action::RestartProject("demo".into())),
         ] {
+            // Restart is in the details' command menu.
+            let press_in_details = |app: &mut App| {
+                if ch == 'r' {
+                    app.handle_key(key(KeyCode::Char('m')));
+                }
+                app.handle_key(key(KeyCode::Char(ch)))
+            };
             // From the list with Ctrl, and from the details.
             for details in [false, true] {
                 if details {
                     app.handle_key(key(KeyCode::Enter));
-                    assert_eq!(app.handle_key(key(KeyCode::Char(ch))), Effect::None);
+                    assert_eq!(press_in_details(&mut app), Effect::None);
                 } else {
                     assert_eq!(app.handle_key(ctrl(ch)), Effect::None);
                 }
@@ -2204,7 +2344,7 @@ mod tests {
                     "back to the {back}"
                 );
                 let confirmed = if details {
-                    app.handle_key(key(KeyCode::Char(ch)))
+                    press_in_details(&mut app)
                 } else {
                     app.handle_key(ctrl(ch))
                 };
@@ -2231,10 +2371,12 @@ mod tests {
             Ok(vec![Resource::Project(Box::new(project("demo", &[])))]),
         );
         app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('m')));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('f'))),
             Effect::Execute(Action::UpdateProjectFlake("demo".into()))
         );
+        app.handle_key(key(KeyCode::Char('m')));
         assert_eq!(app.handle_key(key(KeyCode::Char('t'))), Effect::None);
         assert!(matches!(&app.screen, Screen::TailorFlake(state) if state.back.is_some()));
         // No skip for an existing project; Esc goes back to it.

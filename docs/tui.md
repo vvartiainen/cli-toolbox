@@ -70,15 +70,24 @@ the highlighted project:
 | --- | --- |
 | `a` | Add a worktree, asking for its name, agent and first prompt ([New worktree](#new-worktree)) |
 | `u` | Start the VM and open every worktree in herdr |
-| `x` / `r` | Stop / restart the VM, after a [confirmation](#confirmations) |
-| `s` | Publish the agents' committed work as host review snapshot branches |
+| `x` | Stop the VM, after a [confirmation](#confirmations) |
 | `v` | Review the selected agent in lazygit in a separate host checkout (or pick a saved snapshot when the VM is stopped or the worktree removed) |
 | Enter, `c` | Show the selected worktree's `cd` command |
 | `D` | `agent project done`: save its work as snapshots, remove it, delete its branch when accepted |
 | `d` | Remove the selected worktree without saving its work; asks whether to keep its branch |
-| `p` | Prune review snapshots whose work is on the integration branch; shows a dry run first |
+| `m` | Open the command menu below |
+
+The less frequent commands are in the command menu (`m`). Press a command's key,
+or move to it and press Enter; Esc goes back to the project. A command, its
+confirmation or form returns to the project, not the menu.
+
+| Key | Command |
+| --- | --- |
+| `s` | Sync: publish the agents' committed work as host review snapshot branches |
+| `r` | Restart the VM, after a [confirmation](#confirmations) |
 | `t` | Tailor `flake.nix` again with a coding agent (`a`) or the editor (`e`); Esc goes back |
 | `f` | Update the flake's inputs (`nix flake update`) |
+| `p` | Prune review snapshots whose work is on the integration branch; shows a dry run first |
 
 Worktrees without an agent of their own get `CLI_TOOLBOX_AGENT` when the project
 enables it. The project's proxy and backlog setup is not a key; run
@@ -116,8 +125,8 @@ shows the keys. Enter creates the worktree once it has a name, and Esc goes back
 
 A git worktree starts the agent in its Herdr workspace right away, like
 `git worktree create NAME --agent KIND --prompt TEXT`. A sandbox project's worktree
-starts it when the VM opens the worktree: press `u` to start a stopped VM or `r` to
-restart a running one (see [agents.md](agents.md#agents-per-worktree)).
+starts it when the VM opens the worktree: press `u` to start a stopped VM or `m` `r`
+to restart a running one (see [agents.md](agents.md#agents-per-worktree)).
 
 ## New project
 
@@ -139,14 +148,14 @@ with `--name`, `--template`, `--no-proxy` and `--no-backlog`, and Esc goes back.
 
 Actions that are hard to undo ask first, and name what they affect:
 
-- Stopping or restarting a VM (`x`, `r`, Ctrl-X, Ctrl-R, and Enter in the VM
+- Stopping or restarting a VM (`x`, `m` `r`, Ctrl-X, Ctrl-R, and Enter in the VM
   list) lists the VM: its name, SSH port, project folder and worktree count.
   Restart is included because it also ends the VM's agent sessions.
 - Removing a git worktree shows its path and branch.
 - Removing a project worktree with `d` warns that uncommitted changes and unsynced
   guest commits are lost, and that its saved snapshots stay until prune. `k`
   keeps the branch and `d` deletes it.
-- Pruning with `p` shows the dry run: what would be deleted and what kept, and
+- Pruning with `m` `p` shows the dry run: what would be deleted and what kept, and
   why. `p` deletes the accepted snapshots and their review checkouts; `s` also the
   superseded ones; `F` force-deletes everything listed, also unaccepted snapshots
   and review checkouts with edits, whose work is then lost.

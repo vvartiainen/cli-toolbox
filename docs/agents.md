@@ -214,7 +214,7 @@ update or checkout the host counterpart of the agent branch: its Git index can
 remain stale even though workspace files are shared live.
 
 For snapshot-only publication and bidirectional history exchange, run this **on
-the host**, with the VM running (or press `s` in the TUI):
+the host**, with the VM running (or press `m` `s` in the TUI):
 
 ```sh
 cli-toolbox agent project sync
@@ -360,7 +360,7 @@ Merging the snapshot branch works as well.
 
 ### Sending accepted work back
 
-After accepting, run `sync` (`s` in the TUI). It sends your branches, `main`
+After accepting, run `sync` (`m` `s` in the TUI). It sends your branches, `main`
 included, to the agent as `host-review/<source>/main`. Ask the agent to rebase
 onto it, so the commits you already took drop out of its branch and its next
 snapshot holds only new work.
@@ -368,7 +368,7 @@ snapshot holds only new work.
 ### Cleanup
 
 Sync, review and `done` only ever add snapshot branches and review checkouts.
-`agent project prune` (`p` in the TUI) cleans them up once their work is on the
+`agent project prune` (`m` `p` in the TUI) cleans them up once their work is on the
 integration branch: `main` when it exists, else the main checkout's branch, or
 `--into BRANCH`.
 
@@ -388,7 +388,7 @@ cli-toolbox agent project prune --all --force # everything, also unaccepted work
 
 In a terminal, `prune` shows what it would delete and asks first; `--yes` skips
 the question, and without a terminal `--all` and `--force` need it. In the TUI,
-`p` shows the dry run, then `p` deletes the accepted snapshots, `s` also the
+`m` `p` shows the dry run, then `p` deletes the accepted snapshots, `s` also the
 superseded ones, and `F` force-deletes everything listed. `done` runs `prune` for
 its worktree with the safe defaults and prints what it kept.
 
