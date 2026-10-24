@@ -11,7 +11,7 @@ use crate::{Error, agent, git};
 /// The default agent kind for `--agent`.
 const AGENT_ENV: &str = "CLI_TOOLBOX_AGENT";
 
-const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # exchange host/guest history for review\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
+const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # publish agent review snapshot branches\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
 
 #[derive(Debug, Args)]
 #[command(subcommand_required = true, subcommand_value_name = "command")]
@@ -134,9 +134,9 @@ enum ProjectCommands {
         #[arg(long)]
         no_herdr: bool,
     },
-    /// Exchange host and VM commits for review, leaving active branches alone.
+    /// Publish agent work as host review branches, leaving the agent in control.
     #[command(
-        after_help = "Fetches named guest branches into sandbox-review/<source>/* on the host and sends the selected host branch to host-review/<source>/* in the VM. Files are already shared live; neither checkout, index nor active branch is changed. Divergence is a review status, not a sync error. Shows new patches separately from already cherry-picked patches. Uses the runner's SSH config; no flake update is required."
+        after_help = "Publishes committed agent work as ordinary host branches under agent-review/<worktree>/*. Changed guest tips get new snapshots; unchanged tips reuse existing ones. Output shows branch names and commands to view changes or open a separate review worktree. Existing branches, indexes and files are never changed. Normal host branches (excluding agent-review/*) are sent to host-review/<source>/* in the VM for the agent to integrate explicitly. Divergence is a review status, not a sync error. No VM rebuild or flake update is required."
     )]
     Sync {
         #[arg(conflicts_with = "all")]
@@ -148,9 +148,9 @@ enum ProjectCommands {
         #[arg(long)]
         all: bool,
     },
-    /// Sync a worktree, then remove it and keep its branch.
+    /// Save agent work as review snapshots, then remove its worktree.
     #[command(
-        after_help = "Fetches guest branches for review without moving the host branch. Refuses while guest commits remain outside the host branch (even cherry-picked equivalents), when the VM is stopped but has a guest home, or when the worktree has uncommitted changes. Integrate the work explicitly before done; --force removes anyway. The VM stops when its last worktree is done."
+        after_help = "Preserves committed guest history as host review snapshot branches before removing the worktree. Checks the guest's own index for uncommitted changes; its stale host counterpart does not need updating or merging. Refuses with dirty/detached guest work, failed snapshots, or an unavailable persistent VM. --force removes anyway without these safeguards. Snapshots remain for review after removal. The VM stops when its last worktree is done."
     )]
     Done {
         /// Worktree name or path; may be omitted when the project has only one.

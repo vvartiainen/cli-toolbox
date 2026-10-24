@@ -2,8 +2,8 @@
 //! central sandbox directory and mounting every agent worktree of the
 //! project's repository at `/workspace/<worktree>`. The VM is added to the
 //! host herdr as a machine, with a guest workspace per worktree. The agents'
-//! commits and host history are exchanged as review refs, without moving either
-//! side's active branches.
+//! work is published as host snapshot branches; host history is made available
+//! to the agent separately, without moving either side's active branch.
 //!
 //! The `vm_*` functions manage every running agent-sandbox VM from its
 //! runner state alone, also when its project directory is gone.
@@ -436,8 +436,8 @@ pub(crate) struct Synced {
     pub(crate) failures: Vec<String>,
 }
 
-/// Exchange committed history into review refs in both directions. Never
-/// advance an active branch or touch either checkout's index or working files.
+/// Publish agent history as host review snapshots and send normal host history
+/// to the guest's review refs. Never advance an existing branch or touch files.
 pub(crate) fn sync(project: &Project, worktree: Option<&AgentWorktree>) -> Result<Synced, Error> {
     let vm = sandbox::vm_for(&running_vms(), &project.dir).ok_or_else(|| {
         Error::msg(format!(
@@ -516,7 +516,7 @@ pub(crate) fn done(
     stderr: &mut dyn Write,
 ) -> Result<Vec<Step>, Error> {
     let vm = sandbox::vm_for(&running_vms(), &project.dir);
-    if let Some(problem) = done_blocker(project, worktree, vm.as_ref(), options.force)? {
+    if let Some(problem) = done_blocker(project, worktree, vm.as_ref(), options.force, stderr)? {
         return Err(Error::msg(format!(
             "{problem}\nPass --force to remove {} anyway; its branch {} stays.",
             worktree.name, worktree.branch
@@ -551,6 +551,7 @@ fn done_blocker(
     worktree: &AgentWorktree,
     vm: Option<&RunnerState>,
     force: bool,
+    report: &mut dyn Write,
 ) -> Result<Option<String>, Error> {
     if force {
         return Ok(None);
@@ -558,19 +559,11 @@ fn done_blocker(
     // A worktree added after the VM started has no guest commits to lose.
     if let Some(vm) = vm.filter(|_| project.mounts(&worktree.name)) {
         let review = sandbox::sync::Bridge::for_vm(vm, &worktree.name)?
-            .fetch(&worktree.path, &worktree.branch)?;
-        if !review.pending.is_empty() {
-            return Ok(Some(format!(
-                "{} still has guest commits outside its host branch; review and integrate them before done:\n{}",
-                worktree.name,
-                review
-                    .pending
-                    .iter()
-                    .map(|(reference, log)| format!("{reference}:\n{log}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )));
-        }
+            .prepare_done(&worktree.path, &worktree.branch)?;
+        write!(report, "{}", review.report)?;
+        // The guest's clean index is authoritative. Its committed work is now
+        // on ordinary host snapshot branches, independent of this stale index.
+        return Ok(None);
     } else if vm.is_none() && project.state_dir.join("home.img").exists() {
         return Ok(Some(format!(
             "the VM of {} is stopped, so the latest commits of {} cannot be synced; run `cli-toolbox agent project start {}` first",
@@ -732,7 +725,7 @@ pub(crate) fn sync_all(root: &Path, out: &mut dyn Write) -> Result<Vec<Step>, Er
         let synced = sync(project, None)?;
         writeln!(out, "{}:", project.name)?;
         write_synced(&synced, out)?;
-        Ok(vec![Step::Done("synced".into())])
+        Ok(vec![Step::Done("review snapshots published".into())])
     })
 }
 
@@ -975,12 +968,12 @@ mod tests {
         .unwrap();
         let worktree = created.worktree;
         assert_eq!(
-            done_blocker(&project, &worktree, None, false).unwrap(),
+            done_blocker(&project, &worktree, None, false, &mut Vec::new()).unwrap(),
             None
         );
 
         std::fs::write(worktree.path.join("wip.txt"), "wip\n").unwrap();
-        let blocker = done_blocker(&project, &worktree, None, false)
+        let blocker = done_blocker(&project, &worktree, None, false, &mut Vec::new())
             .unwrap()
             .unwrap();
         assert!(blocker.contains("?? wip.txt"), "{blocker}");
@@ -990,24 +983,40 @@ mod tests {
         std::fs::create_dir_all(&project.state_dir).unwrap();
         std::fs::write(project.state_dir.join("mounted-worktrees.nix"), "{\n}\n").unwrap();
         assert_eq!(
-            done_blocker(&project, &worktree, Some(&RunnerState::default()), false).unwrap(),
+            done_blocker(
+                &project,
+                &worktree,
+                Some(&RunnerState::default()),
+                false,
+                &mut Vec::new()
+            )
+            .unwrap(),
             None
         );
         std::fs::write(worktree.path.join("wip.txt"), "wip\n").unwrap();
 
         std::fs::create_dir_all(&project.state_dir).unwrap();
         std::fs::write(project.state_dir.join("home.img"), "home").unwrap();
-        let blocker = done_blocker(&project, &worktree, None, false)
+        let blocker = done_blocker(&project, &worktree, None, false, &mut Vec::new())
             .unwrap()
             .unwrap();
         assert!(blocker.contains("is stopped"), "{blocker}");
         // A live VM that never mounted this worktree has no history to fetch,
         // even when its persistent home already exists.
-        let blocker = done_blocker(&project, &worktree, Some(&RunnerState::default()), false)
-            .unwrap()
-            .unwrap();
+        let blocker = done_blocker(
+            &project,
+            &worktree,
+            Some(&RunnerState::default()),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap()
+        .unwrap();
         assert!(blocker.contains("uncommitted changes"), "{blocker}");
-        assert_eq!(done_blocker(&project, &worktree, None, true).unwrap(), None);
+        assert_eq!(
+            done_blocker(&project, &worktree, None, true, &mut Vec::new()).unwrap(),
+            None
+        );
 
         let forced = VmOptions {
             force: true,

@@ -411,11 +411,6 @@ pub(crate) fn status_lines(dir: &Path) -> Result<Vec<String>, Error> {
         .collect())
 }
 
-/// One line per commit in `range`, newest first.
-pub(crate) fn log_oneline(dir: &Path, range: &str) -> Result<String, Error> {
-    git_output(dir, &["log", "--oneline", range])
-}
-
 fn require_git() -> Result<(), Error> {
     exec::require("git").map(|_| ())
 }

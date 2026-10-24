@@ -312,11 +312,14 @@ impl Context {
             Action::SyncProject(name) => {
                 let synced = vm::sync(&load_project(name)?, None)?;
                 vm::write_synced(&synced, stdout)?;
-                Ok(Done::body(format!("Synced the worktrees of {name}")))
+                Ok(Done::body(format!("Review branches for {name}")))
             }
             Action::SyncAllProjects => {
                 let steps = vm::sync_all(&project::sandbox_dir()?, stdout)?;
-                Ok(steps_done("Synced every running project".into(), &steps))
+                Ok(steps_done(
+                    "Published review branches for running projects".into(),
+                    &steps,
+                ))
             }
             Action::RestartAllProjects => {
                 let options = vm_options();

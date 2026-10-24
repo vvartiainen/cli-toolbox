@@ -126,7 +126,7 @@ identifies it.
 cli-toolbox agent project create --ai             # in the repository, once
 cli-toolbox agent project start --agent claude    # VM + herdr workspace per worktree
 cli-toolbox agent project add --restart --agent codex --prompt "Add a --json flag"
-cli-toolbox agent project sync                    # exchange host/guest history for review
+cli-toolbox agent project sync                    # publish ordinary host review branches
 cli-toolbox agent project done cli-toolbox-agent-wt-2
 ```
 
@@ -138,8 +138,8 @@ cli-toolbox agent project done cli-toolbox-agent-wt-2
 | `agent project start [project]` | Writes `worktrees.nix`, runs the flake's `start` app (detached; waits for guest SSH), runs `herdr-add` and opens a herdr workspace at `/workspace/<worktree>` for every worktree, starting the worktree's own agent (see [Agents per worktree](#agents-per-worktree)), or else `--agent KIND` or `CLI_TOOLBOX_AGENT`, in each. |
 | `agent project stop\|restart [project]` | Stops or restarts the VM. Stopping signals the runner like `agent vm stop`, so it works without a worktree to mount (after the last `done`), and removes the VM's machine from the host herdr. Before shutdown it stops and deletes that machine's guest Herdr session, discarding the old terminal layout so the next start opens fresh workspaces instead of offering to resume obsolete sessions. Worktrees, guest home files and agent conversation history stay. If session cleanup fails (for example, SSH is unavailable), the failure is reported and shutdown still proceeds; the machine profile is kept so cleanup can be retried while the VM is running. A restart mounts worktrees added or removed since the start. `--all` stops or restarts the VM of every project whose VM is running, one after another; a project that fails does not stop the others. |
 | `agent project add [project]` | Creates the next agent worktree of the project's repository and prints its path. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). `--agent KIND` and `--prompt TEXT` choose its agent and first prompt; see [Agents per worktree](#agents-per-worktree). |
-| `agent project sync [project]` | Exchanges committed history into review refs on both host and VM, without changing active branches, indexes or working files. Divergence needs review, not a failed sync. Shows new guest patches separately from already cherry-picked ones. `--worktree NAME` selects one; `--all` syncs every running project. See [History exchange](#history-exchange). |
-| `agent project done [worktree]` | Fetches guest branches for review, then removes the worktree and keeps its branch. It refuses while any fetched guest branch has commits outside the host worktree branch (including cherry-picked equivalents), with detached guest HEAD, when the VM is stopped but has a guest home, or with uncommitted changes. Integrate the work explicitly first; `--force` removes anyway. The VM stops when its last worktree is done. |
+| `agent project sync [project]` | Publishes committed agent work as ordinary host snapshot branches under `agent-review/<worktree>/…`, ready to open in Git tools or a separate review worktree. Unchanged tips reuse snapshots; existing branches and agent files stay untouched. Normal host branches are sent to guest review refs separately. `--worktree NAME` selects one; `--all` syncs every running project. See [History exchange](#history-exchange). |
+| `agent project done [worktree]` | Preserves committed guest work as host snapshot branches, checks the guest's own index, then removes the agent worktree. Review branches remain; integration into the stale host counterpart is not required. Dirty/detached guest work, failed snapshots, or an unavailable persistent VM block cleanup. `--force` bypasses these safeguards. The VM stops when its last worktree is done. |
 
 `[project]` defaults to the project of the current repository, then to the only
 project. VM state comes from agent-sandbox's `runner.json` files under
@@ -147,62 +147,97 @@ project. VM state comes from agent-sandbox's `runner.json` files under
 
 ### History exchange
 
-Run this **on the host**, with the VM running:
+**The agent owns its worktree. You review snapshots on the host.** Do not manually
+update or checkout the host counterpart of the agent branch: its Git index can
+remain stale even though workspace files are shared live.
+
+Run this **on the host**, with the VM running (or press `s` in the TUI):
 
 ```sh
 cli-toolbox agent project sync
 # Or: cli-toolbox agent project sync --worktree cli-toolbox-agent-wt
 ```
 
-Files are already shared live. This command exchanges only committed Git history:
+Sync prominently prints an ordinary host branch, for example:
 
-- Guest → host: all named guest branches go into
-  `refs/remotes/sandbox-review/<source>/<branch>`.
-- Host → guest: the selected host worktree branch goes into
-  `refs/remotes/host-review/<source>/<branch>` in that guest repository.
-- `<source>` is a stable identifier for the project directory and workspace;
-  different workspaces cannot overwrite each other's review refs.
-- Neither active branch nor index is moved. No checkout, reset, merge or rebase
-  happens, even when a fast-forward would be possible. No tags are exported.
-  Review tips are refreshed, but deleted guest branches are not pruned.
-- The runner's `runtimeDir/ssh_config` supplies the VM connection and host key.
-  SSH must work noninteractively (load the authorized key in your SSH agent).
-  This does not require an updated external project flake or use legacy `git-pull`.
-
-Sync prints the exact review refs, inspection commands, and commit IDs. A
-diverged branch is a successful exchange, not an error. Transport/authentication
-failures still fail the command; other worktrees are attempted. Guest history is
-fetched first, so it remains on the host even if sending host history fails.
-Worktrees not mounted by the VM are skipped with a restart hint. Detached guest
-HEAD is rejected rather than silently omitting its unexported commits.
-
-On the host, review the printed `sandbox-review/…` ref and cherry-pick selected
-commits labelled **new**:
-
-```sh
-git show <commit-id>
-git cherry-pick <commit-id>
-cli-toolbox agent project sync
+```text
+Review branch: agent-review/cli-toolbox-agent-wt/20261024-143000-6aefb5b8dd2a-ab12cd34ef56
 ```
 
-After cherry-picking, sync labels patch-equivalent guest commits **already
-applied on host**, instead of repeatedly listing them as new work. This uses
-Git's patch-equivalence heuristic, not an assertion that branch histories match;
-merge commits remain separately visible for review.
+These appear in your normal Git GUI/branch picker. From your own host checkout,
+not the agent's worktree, you can also use:
 
-In the VM, the printed `host-review/…` ref makes host commits available to the
-agent without a restart. Inspect it with the printed `git log` command. Accepting
-those commits into the active guest branch is still explicit: pause the agent
-and coordinate with the host before merging or cherry-picking, because working
-files are shared. A clean, compatible checkout can use
-`git merge --ff-only <host-review-ref>`; if it refuses, do not force or reset the
-shared files. Keep the review refs and resolve the history deliberately.
+```sh
+git branch --list 'agent-review/*'
+git show <printed-review-branch>
+git diff main...<printed-review-branch>       # compare with your integration branch
+```
 
-`done` stays conservative: patch-equivalent commits are not Git ancestors.
-It checks every fetched guest branch, not just the initially assigned branch,
-and refuses until its history is integrated into the host worktree branch.
-After deliberately accepting equivalent patches you can choose `done --force`,
-but first verify there are no uncommitted changes or other unreviewed branches.
+To browse or build the complete files without disturbing the agent, use the
+separate detached worktree command printed by sync, for example:
+
+```sh
+git worktree add --detach ../cli-toolbox-review <printed-review-branch>
+```
+
+Choose an unused directory for a new review copy. An existing review copy stays
+on its original snapshot while the agent continues working. Accept work from
+your own host checkout with an explicit merge or selected cherry-picks, just as
+with any other branch; sync itself never merges or rebases.
+
+#### Snapshot behavior
+
+- Each changed guest tip gets a new `agent-review/<worktree>/…` branch. Repeated
+  syncs of the same tip reuse the previous branch. Rewritten guest history does
+  not overwrite earlier snapshots, even if a review branch is checked out.
+- Names include the guest commit's date, a project/workspace source identifier,
+  and the tip's short object ID. Collisions get a numeric suffix; sync never
+  moves or replaces an existing branch.
+- The primary guest branch is shown first. Independent extra guest branches
+  also get snapshots; duplicate tips and history already contained in the primary
+  snapshot do not create extra branches.
+- Snapshot branches are local to the host repository, not pushed upstream.
+  They survive `done` and are retained until you explicitly delete them.
+  No branches or tags are automatically pruned.
+- Existing host/guest branches, indexes and working files remain unchanged.
+  Snapshots contain **committed** work only; ask the agent to commit before sync
+  when you need its latest file edits.
+- Patch counts distinguish new guest patches from equivalents already accepted
+  on the host. They are hints relative to the host counterpart, not a requirement
+  to maintain or integrate that branch. Divergence is a successful sync.
+
+#### Host changes back to the agent
+
+Normal host branches, including `main` when present, are made available in the VM
+as `refs/remotes/host-review/<source>/<branch>`. This works even when the host's
+agent branch stays stale. The reserved `agent-review/*` snapshot branches, tags
+and submodule remotes are not exported, so review snapshots do not loop back.
+
+Ask the agent to inspect and integrate accepted host changes between tasks,
+for example `host-review/<source>/main`. That integration remains under the
+agent's control; sync never silently rewrites its active checkout.
+
+The underlying guest fetch refs are `refs/remotes/sandbox-review/<source>/*`;
+you do not need them for normal review. The runner's `runtimeDir/ssh_config`
+supplies the connection and host key. Load the authorized key in your SSH agent:
+SSH must work noninteractively. No VM rebuild or external flake update is needed.
+
+Transport/authentication failures still fail sync; other worktrees are attempted.
+Snapshots are created before sending host history, so they remain available even
+if that export fails. Unmounted worktrees get a restart hint. Detached guest HEAD
+is rejected rather than silently omitting unexported work.
+
+#### Finishing an agent worktree
+
+Finish or pause the agent, then run `agent project done`. It saves guest history
+into snapshot branches and checks for staged, unstaged and untracked changes
+against the **guest's index**. A stale/dirty-looking host counterpart does not
+block cleanup: you do not need to merge or cherry-pick into it first.
+
+Snapshots remain available for review and acceptance after the worktree is
+removed. Failed snapshots, dirty/detached guest work, or a stopped persistent VM
+block normal cleanup. Use `--force` only when deliberately discarding those
+safeguards.
 
 #### Trying a new CLI build
 
@@ -213,16 +248,18 @@ just fmt
 just test
 just build
 ./bin/cli-toolbox agent project sync --worktree cli-toolbox-agent-wt
+git branch --list 'agent-review/*'
 ```
 
-No VM rebuild is required. Confirm both review refs exist with
-`git show-ref` in their respective repositories and that each side's
-`git rev-parse HEAD` is unchanged. Repeat sync after cherry-picking a guest
-commit: it should be shown as already applied, with a successful exit status.
-Local regression tests cover real Git transfers between temporary repositories,
-dirty/staged/untracked files, equivalent patches, extra branches, merge commits,
-and transport/export failures. The host-to-VM SSH path still needs a live host
-test; running sync inside the sandbox is not a substitute.
+Open the printed branch in your Git tools, or use its separate-worktree command.
+Repeat sync without new agent commits: it should print the same branch and
+create no duplicates. After another agent commit, sync should print a new branch
+while the old branch and any review copy remain unchanged.
+
+Local regression tests cover real Git transfers, snapshot reuse, rewritten tips,
+branch collisions, checked-out review copies, dirty indexes, extra branches,
+cleanup preservation, and export failures. The live host-to-VM SSH path still
+needs a host test; running sync inside the sandbox is not a substitute.
 
 ### Agents per worktree
 
@@ -307,7 +344,7 @@ whose project or flake directory was removed while it ran, where
 | --- | --- |
 | agent-sandbox (Nix) | VM lifecycle for the directory it is started in: ports, state, home image, git bridging, herdr in the guest. Exposes the flake apps `start`, `stop`, `status`, `ssh`, `git-pull` and `herdr-add`, and `runner.json`. |
 | herdr | Agent sessions in the guest, and the host sidebar of machines. |
-| cli-toolbox | Projects, worktrees and the `worktrees.nix` that ties them together; orchestration of VM, herdr, bidirectional Git review-ref exchange over the runner's SSH connection, and cleanup, from the CLI and the TUI. |
+| cli-toolbox | Projects, worktrees and the `worktrees.nix` that ties them together; orchestration of VM, herdr, host review snapshot branches and bidirectional Git history exchange over the runner's SSH connection, and cleanup, from the CLI and the TUI. |
 
 - cli-toolbox never reads Nix internals. VM setup runs `nix run .#<app>` in the
   project directory and reads `runner.json`; history exchange runs ordinary Git

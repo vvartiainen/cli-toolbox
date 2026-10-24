@@ -249,8 +249,9 @@ mod tests {
         let (result, stdout, stderr) = run_args(&["agent", "project", "sync", "--help"]);
         result.unwrap();
         for text in [
-            "sandbox-review/<source>",
+            "agent-review/<worktree>",
             "host-review/<source>",
+            "unchanged tips reuse existing ones",
             "Divergence is a review status",
         ] {
             assert!(stdout.contains(text), "missing {text}: {stdout}");

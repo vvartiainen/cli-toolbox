@@ -1,4 +1,5 @@
-//! Host-owned Git exchange: review refs only, never a checkout or merge.
+//! Agent-owned worktrees, published as create-only host review branches.
+//! Sync never checks out, merges, or moves an existing branch.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -10,14 +11,15 @@ use crate::{Error, aws::shell_quote, exec, git};
 
 pub(crate) struct Review {
     pub(crate) report: String,
-    /// Exact ancestry, not patch equivalence: cleanup must remain conservative.
-    pub(crate) pending: Vec<(String, String)>,
+    pub(crate) snapshots: Vec<String>,
 }
 
 pub(crate) struct Bridge {
     remote: String,
     source: String,
     ssh_command: Option<String>,
+    ssh_args: Vec<String>,
+    workspace: String,
 }
 
 impl Bridge {
@@ -46,6 +48,21 @@ impl Bridge {
         Ok(Self {
             remote: format!("{}:/workspace/{worktree}", vm.name),
             source,
+            workspace: worktree.into(),
+            ssh_args: [
+                "-F",
+                config,
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "--",
+                &vm.name,
+            ]
+            .map(String::from)
+            .to_vec(),
             ssh_command: Some(format!(
                 "ssh -F {} -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes",
                 shell_quote(config)
@@ -59,6 +76,8 @@ impl Bridge {
             remote: remote.to_str().unwrap().into(),
             source: source.into(),
             ssh_command: None,
+            ssh_args: Vec::new(),
+            workspace: "demo-agent-wt".into(),
         }
     }
 
@@ -96,76 +115,105 @@ impl Bridge {
         // A detached tip is not part of refs/heads/*; never silently omit it
         // and then allow done to remove the worktree.
         let head = self.git(repo, &["ls-remote", "--symref", "--", &self.remote, "HEAD"])?;
-        if !head
-            .lines()
-            .any(|line| line.starts_with("ref: refs/heads/") && line.ends_with("\tHEAD"))
-        {
-            return Err(Error::msg(format!(
-                "guest HEAD is detached or unborn; put its work on a named branch before syncing (named branches were fetched into {})",
-                self.prefix()
-            )));
-        }
-        self.review(repo, host_branch)
+        let primary = head.lines().find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
+        });
+        let primary = primary.ok_or_else(|| Error::msg(format!(
+            "guest HEAD is detached or unborn; put its work on a named branch before syncing (named branches were fetched into {})",
+            self.prefix()
+        )))?;
+        self.review(repo, host_branch, &format!("{}{primary}", self.prefix()))
     }
 
     pub(crate) fn exchange(&self, repo: &Path, host_branch: &str) -> Result<String, Error> {
         // Fetch first, so a failed export never hides the guest's commits.
         let review = self.fetch(repo, host_branch)?;
-        let host_ref = format!("refs/heads/{host_branch}");
-        let guest_ref = format!("refs/remotes/host-review/{}/{host_branch}", self.source);
-        let refspec = format!("+{host_ref}:{guest_ref}");
-        self.git(
+        // The host's agent branch can stay stale forever. Export ordinary
+        // host branches (including main) so accepted changes still reach the
+        // agent's review refs. Never re-export our snapshot branches.
+        let heads = self.git(
             repo,
-            &[
-                "push",
-                "--porcelain",
-                "--no-verify",
-                "--no-follow-tags",
-                "--recurse-submodules=no",
-                "--",
-                &self.remote,
-                &refspec,
-            ],
-        )
-        .map_err(|err| {
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )?;
+        let refspecs: Vec<_> = heads
+            .lines()
+            .filter(|reference| !reference.starts_with("refs/heads/agent-review/"))
+            .map(|reference| {
+                format!(
+                    "+{reference}:refs/remotes/host-review/{}/{}",
+                    self.source,
+                    reference.strip_prefix("refs/heads/").unwrap()
+                )
+            })
+            .collect();
+        let mut args = vec![
+            "push",
+            "--atomic",
+            "--porcelain",
+            "--no-verify",
+            "--no-follow-tags",
+            "--recurse-submodules=no",
+            "--",
+            &self.remote,
+        ];
+        args.extend(refspecs.iter().map(String::as_str));
+        self.git(repo, &args).map_err(|err| {
             Error::msg(format!(
-                "guest commits fetched into {}; host export failed: {err}",
-                self.prefix()
+                "Review branches preserved: {}\nhost export failed: {err}",
+                review.snapshots.join(", ")
             ))
         })?;
         Ok(format!(
-            "{}host history available in VM as {guest_ref}\n  In VM, inspect: git log --oneline --left-right --cherry-mark {}\nActive branches, indexes and working files unchanged.\n",
-            review.report,
-            shell_quote(&format!("HEAD...{guest_ref}"))
+            "{}Host branches available in VM under host-review/{}/.\nAgent checkout and existing host branches unchanged.\n",
+            review.report, self.source
         ))
     }
 
-    fn review(&self, repo: &Path, host_branch: &str) -> Result<Review, Error> {
+    fn review(&self, repo: &Path, host_branch: &str, primary: &str) -> Result<Review, Error> {
         let host_ref = format!("refs/heads/{host_branch}");
         git::resolve_commit(repo, &host_ref)
             .ok_or_else(|| Error::msg(format!("missing host branch {host_branch}")))?;
+        let primary_tip = git::resolve_commit(repo, primary)
+            .ok_or_else(|| Error::msg("guest branch moved during sync; retry sync"))?;
         let prefix = self.prefix();
         let refs = self.git(repo, &["for-each-ref", "--format=%(refname)", &prefix])?;
-        if refs.trim().is_empty() {
-            return Err(Error::msg(
-                "no named guest branches to fetch; commit on a branch, not detached HEAD",
-            ));
-        }
+        let mut refs: Vec<_> = refs.lines().collect();
+        refs.sort_by_key(|reference| *reference != primary);
         let mut report = String::new();
-        let mut pending = Vec::new();
-        for guest_ref in refs.lines() {
+        let mut snapshots = Vec::new();
+        let mut tips = std::collections::HashSet::new();
+        let mut published = Vec::new();
+        for guest_ref in refs {
+            let tip = git::resolve_commit(repo, guest_ref)
+                .ok_or_else(|| Error::msg(format!("missing guest tip {guest_ref}")))?;
+            // The primary snapshot already preserves ancestral branches. Keep
+            // independent extra branches too, without publishing duplicate tips.
+            if (guest_ref != primary && git::is_ancestor(repo, &tip, &primary_tip))
+                || !tips.insert(tip.clone())
+            {
+                continue;
+            }
+            let branch = self.snapshot_tip(repo, &tip)?;
+            report.push_str(&format!(
+                "Review branch: {branch}\n  View: git show {}\n  Compare: git diff {}\n  Browse files separately: git worktree add --detach {} {}\n",
+                shell_quote(&branch),
+                shell_quote(&format!("{host_ref}...{branch}")),
+                shell_quote(&format!("../{}-review-{}", self.workspace, &tip[..12])),
+                shell_quote(&branch)
+            ));
+            snapshots.push(branch);
+            published.push(guest_ref.to_string());
+        }
+        for guest_ref in published {
             let branch = guest_ref
                 .strip_prefix(&prefix)
                 .ok_or_else(|| Error::msg("unexpected review ref"))?;
-            let short_ref = guest_ref.strip_prefix("refs/remotes/").unwrap_or(guest_ref);
-            if git::is_ancestor(repo, guest_ref, &host_ref) {
-                report.push_str(&format!(
-                    "guest {branch}: already contained on host ({short_ref})\n"
-                ));
+            if git::is_ancestor(repo, &guest_ref, &host_ref) {
+                report.push_str(&format!("guest {branch}: already contained on host\n"));
                 continue;
             }
-            let log = git::log_oneline(repo, &format!("{host_ref}..{guest_ref}"))?;
-            let cherry = self.git(repo, &["cherry", "-v", &host_ref, guest_ref])?;
+            let cherry = self.git(repo, &["cherry", "-v", &host_ref, &guest_ref])?;
             let new = cherry.lines().filter(|line| line.starts_with("+ ")).count();
             let applied = cherry.lines().filter(|line| line.starts_with("- ")).count();
             let merges = self.git(
@@ -184,20 +232,156 @@ impl Bridge {
                 "merge commits"
             };
             report.push_str(&format!(
-                "guest {branch}: {new} new {patches}, {applied} already applied on host, {} {merge_commits} to review\n  Review: {short_ref}\n  Inspect: git log --oneline --left-right --cherry-mark {}\n",
-                merges.trim(), shell_quote(&format!("{host_ref}...{guest_ref}"))
+                "guest {branch}: {new} new {patches}, {applied} already applied on host, {} {merge_commits} to review\n",
+                merges.trim()
             ));
             for line in cherry.lines() {
-                let label = if line.starts_with("+ ") {
-                    "new"
-                } else {
-                    "already applied"
-                };
-                report.push_str(&format!("    {label}: {}\n", &line[2..]));
+                if let Some(commit) = line.strip_prefix("+ ") {
+                    report.push_str(&format!("    new: {commit}\n"));
+                }
             }
-            pending.push((guest_ref.into(), log));
         }
-        Ok(Review { report, pending })
+        Ok(Review { report, snapshots })
+    }
+
+    /// Create-only ordinary branches: never advance even a previously published
+    /// snapshot, since the user may have it checked out for review.
+    fn snapshot_tip(&self, repo: &Path, tip: &str) -> Result<String, Error> {
+        let prefix = format!("refs/heads/agent-review/{}/", self.workspace);
+        let suffix = format!("-{}-{}", self.source, &tip[..12]);
+        let existing = self.git(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(objectname) %(refname) %(symref)",
+                &prefix,
+            ],
+        )?;
+        for line in existing.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() == 2
+                && fields[0] == tip
+                && fields[1]
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| name.contains(&suffix))
+            {
+                return Ok(fields[1].strip_prefix("refs/heads/").unwrap().into());
+            }
+        }
+        // Use the guest commit's date: no new dependency or wall-clock naming
+        // race, and rewritten/same-second commits still have distinct tip IDs.
+        let stamp = self.git(
+            repo,
+            &[
+                "show",
+                "-s",
+                "--format=%cd",
+                "--date=format:%Y%m%d-%H%M%S",
+                tip,
+            ],
+        )?;
+        let stem = format!("{prefix}{}{suffix}", stamp.trim());
+        self.git(repo, &["check-ref-format", &stem])?;
+        for attempt in 0..100 {
+            let reference = if attempt == 0 {
+                stem.clone()
+            } else {
+                format!("{stem}-{attempt}")
+            };
+            // Do not follow existing symbolic refs, including dangling ones.
+            if self.git(repo, &["symbolic-ref", "-q", &reference]).is_ok() {
+                continue;
+            }
+            if let Err(err) = self.git(repo, &["update-ref", "--no-deref", &reference, tip, ""]) {
+                // An existing or concurrently-created branch is never replaced.
+                if self
+                    .git(repo, &["show-ref", "--verify", &reference])
+                    .is_ok()
+                {
+                    if git::resolve_commit(repo, &reference).as_deref() == Some(tip)
+                        && self.git(repo, &["symbolic-ref", "-q", &reference]).is_err()
+                    {
+                        return Ok(reference.strip_prefix("refs/heads/").unwrap().into());
+                    }
+                    continue;
+                }
+                return Err(err);
+            }
+            return Ok(reference.strip_prefix("refs/heads/").unwrap().into());
+        }
+        Err(Error::msg("could not allocate a new agent review branch"))
+    }
+
+    /// The guest owns its index. A stale host index must not prevent cleanup
+    /// once every committed guest tip has been preserved as a host branch.
+    pub(crate) fn prepare_done(&self, repo: &Path, host_branch: &str) -> Result<Review, Error> {
+        let review = self.fetch(repo, host_branch)?;
+        let status = self.guest_status()?;
+        if !status.trim().is_empty() {
+            return Err(Error::msg(format!(
+                "uncommitted guest changes; commit them before done:\n{status}\nReview branches preserved: {}",
+                review.snapshots.join(", ")
+            )));
+        }
+        self.verify_guest_tips(repo, &review.snapshots)?;
+        Ok(review)
+    }
+
+    fn verify_guest_tips(&self, repo: &Path, snapshots: &[String]) -> Result<(), Error> {
+        let remote = self.git(
+            repo,
+            &[
+                "ls-remote",
+                "--symref",
+                "--",
+                &self.remote,
+                "HEAD",
+                "refs/heads/*",
+            ],
+        )?;
+        let attached = remote
+            .lines()
+            .any(|line| line.starts_with("ref: refs/heads/") && line.ends_with("\tHEAD"));
+        let preserved = remote
+            .lines()
+            .filter(|line| !line.starts_with("ref: "))
+            .all(|line| {
+                line.split_once('\t').is_some_and(|(tip, _)| {
+                    git::resolve_commit(repo, tip).is_some()
+                        && snapshots
+                            .iter()
+                            .any(|branch| git::is_ancestor(repo, tip, branch))
+                })
+            });
+        if !attached || !preserved {
+            return Err(Error::msg(format!(
+                "guest changed while saving review snapshots; finish/pause the agent and retry done\nReview branches preserved: {}",
+                snapshots.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    fn guest_status(&self) -> Result<String, Error> {
+        if self.ssh_args.is_empty() {
+            return self.git(
+                Path::new(&self.remote),
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+            );
+        }
+        let command = format!(
+            "git --no-optional-locks -C {} status --porcelain --untracked-files=all",
+            shell_quote(&format!("/workspace/{}", self.workspace))
+        );
+        let mut args: Vec<_> = self.ssh_args.iter().map(String::as_str).collect();
+        args.push(&command);
+        exec::captured_stdout("ssh", &args)
     }
 }
 
@@ -327,8 +511,11 @@ mod tests {
         let report = bridge.exchange(&host, &branch).unwrap();
         assert!(report.contains("0 new patches"), "{report}");
         assert!(report.contains("1 already applied"), "{report}");
-        // done remains conservative: equivalent patches are not ancestry.
-        assert!(!bridge.fetch(&host, &branch).unwrap().pending.is_empty());
+        // Snapshots preserve history without requiring cherry-pick ancestry.
+        assert_eq!(
+            bridge.prepare_done(&host, &branch).unwrap().snapshots.len(),
+            1
+        );
     }
 
     fn pair() -> (
@@ -351,6 +538,244 @@ mod tests {
         (temp, host, guest, branch)
     }
 
+    fn review_branches(repo: &Path) -> Vec<String> {
+        git(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/agent-review/",
+            ],
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
+    }
+
+    #[test]
+    fn changed_tips_get_new_branches_without_moving_checked_out_reviews() {
+        if skip_without_git() {
+            return;
+        }
+        let (temp, host, guest, branch) = pair();
+        std::fs::write(guest.join("fix.txt"), "first\n").unwrap();
+        commit_all(&guest);
+        let base = git(&guest, &["rev-parse", "HEAD~1"]);
+        let bridge = Bridge::local(guest.clone(), "source");
+        let report = bridge.exchange(&host, &branch).unwrap();
+        let first = review_branches(&host);
+        assert_eq!(first.len(), 1);
+        assert!(report.starts_with("Review branch: "), "{report}");
+        assert!(report.contains("git show"), "{report}");
+        assert!(report.contains("git worktree add --detach"), "{report}");
+        let old_tip = git(&host, &["rev-parse", &first[0]]);
+        let copy = temp.path().join("review-copy");
+        git(
+            &host,
+            &["worktree", "add", copy.to_str().unwrap(), &first[0]],
+        );
+        bridge.exchange(&host, &branch).unwrap();
+        assert_eq!(review_branches(&host), first);
+
+        std::fs::write(guest.join("fix.txt"), "second\n").unwrap();
+        commit_all(&guest);
+        bridge.exchange(&host, &branch).unwrap();
+        assert_eq!(review_branches(&host).len(), 2);
+        assert_eq!(git(&copy, &["rev-parse", "HEAD"]), old_tip);
+        assert_eq!(
+            std::fs::read_to_string(copy.join("fix.txt")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(git(&host, &["rev-parse", &first[0]]), old_tip);
+        // Rewritten agent history must not erase either earlier review point.
+        git(&guest, &["reset", "--hard", &base]);
+        std::fs::write(guest.join("fix.txt"), "rewritten\n").unwrap();
+        commit_all(&guest);
+        bridge.exchange(&host, &branch).unwrap();
+        assert_eq!(review_branches(&host).len(), 3);
+        assert_eq!(git(&copy, &["rev-parse", "HEAD"]), old_tip);
+        // A host-only commit is exported but does not create another guest snapshot.
+        std::fs::write(host.join("host-only.txt"), "host\n").unwrap();
+        commit_all(&host);
+        bridge.exchange(&host, &branch).unwrap();
+        assert_eq!(review_branches(&host).len(), 3);
+    }
+
+    #[test]
+    fn host_integration_branches_are_exported_but_snapshots_are_not() {
+        if skip_without_git() {
+            return;
+        }
+        let (_temp, host, guest, branch) = pair();
+        let guest_tip = git(&guest, &["rev-parse", "HEAD"]);
+        git(&host, &["checkout", "-b", "accepted"]);
+        std::fs::write(host.join("accepted.txt"), "accepted\n").unwrap();
+        commit_all(&host);
+        let accepted = git(&host, &["rev-parse", "HEAD"]);
+        git(&host, &["checkout", &branch]);
+        Bridge::local(guest.clone(), "source")
+            .exchange(&host, &branch)
+            .unwrap();
+        assert_eq!(
+            git(
+                &guest,
+                &["rev-parse", "refs/remotes/host-review/source/accepted"]
+            ),
+            accepted
+        );
+        assert_eq!(git(&guest, &["rev-parse", "HEAD"]), guest_tip);
+        assert!(
+            git(
+                &guest,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/remotes/host-review/source/agent-review/"
+                ]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn existing_snapshot_branches_are_never_overwritten() {
+        if skip_without_git() {
+            return;
+        }
+        let (_temp, host, guest, branch) = pair();
+        let base = git(&host, &["rev-parse", "HEAD"]);
+        std::fs::write(guest.join("fix.txt"), "fix\n").unwrap();
+        commit_all(&guest);
+        let bridge = Bridge::local(guest.clone(), "source");
+        bridge.exchange(&host, &branch).unwrap();
+        let original = review_branches(&host)[0].clone();
+        // Even if a user repurposes a snapshot branch, sync must leave it alone.
+        git(
+            &host,
+            &["update-ref", &format!("refs/heads/{original}"), &base],
+        );
+        bridge.exchange(&host, &branch).unwrap();
+        assert_eq!(git(&host, &["rev-parse", &original]), base);
+        assert_eq!(review_branches(&host).len(), 2);
+        assert_eq!(bridge.fetch(&host, &branch).unwrap().snapshots.len(), 1);
+        assert_eq!(review_branches(&host).len(), 2);
+        let mut other = Bridge::local(guest, "other-source");
+        other.workspace = bridge.workspace.clone();
+        other.exchange(&host, &branch).unwrap();
+        assert_eq!(review_branches(&host).len(), 3);
+    }
+
+    #[test]
+    fn cleanup_rechecks_guest_tips_after_saving_snapshots() {
+        if skip_without_git() {
+            return;
+        }
+        let (_temp, host, guest, branch) = pair();
+        let bridge = Bridge::local(guest.clone(), "source");
+        let saved = bridge.fetch(&host, &branch).unwrap();
+        bridge.verify_guest_tips(&host, &saved.snapshots).unwrap();
+        std::fs::write(guest.join("later.txt"), "later\n").unwrap();
+        commit_all(&guest);
+        let error = bridge
+            .verify_guest_tips(&host, &saved.snapshots)
+            .unwrap_err();
+        assert!(error.to_string().contains("guest changed"), "{error}");
+        bridge.prepare_done(&host, &branch).unwrap();
+        assert_eq!(review_branches(&host).len(), 2);
+    }
+
+    #[test]
+    fn snapshot_creation_failure_blocks_done_without_changing_checkouts() {
+        if skip_without_git() {
+            return;
+        }
+        let (_temp, host, guest, branch) = pair();
+        let host_tip = git(&host, &["rev-parse", "HEAD"]);
+        git(&host, &["branch", "agent-review/demo-agent-wt"]);
+        std::fs::write(guest.join("work.txt"), "work\n").unwrap();
+        commit_all(&guest);
+        let guest_tip = git(&guest, &["rev-parse", "HEAD"]);
+        let result = Bridge::local(guest.clone(), "source").prepare_done(&host, &branch);
+        assert!(result.is_err());
+        assert_eq!(git(&host, &["rev-parse", "HEAD"]), host_tip);
+        assert_eq!(git(&guest, &["rev-parse", "HEAD"]), guest_tip);
+        assert!(guest.join("work.txt").exists());
+    }
+
+    #[test]
+    fn review_branches_survive_removing_the_agent_worktree() {
+        if skip_without_git() {
+            return;
+        }
+        let (temp, host, guest, branch) = pair();
+        let agent = temp.path().join("agent-worktree");
+        git(
+            &host,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "agent-test",
+                agent.to_str().unwrap(),
+                &branch,
+            ],
+        );
+        std::fs::write(guest.join("agent.txt"), "committed\n").unwrap();
+        commit_all(&guest);
+        std::fs::copy(guest.join("agent.txt"), agent.join("agent.txt")).unwrap();
+        let review = Bridge::local(guest.clone(), "source")
+            .prepare_done(&agent, "agent-test")
+            .unwrap();
+        git(
+            &host,
+            &["worktree", "remove", "--force", agent.to_str().unwrap()],
+        );
+        assert!(!agent.exists());
+        assert_eq!(
+            git(&host, &["rev-parse", &review.snapshots[0]]),
+            git(&guest, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            git(
+                &host,
+                &["show", &format!("{}:agent.txt", review.snapshots[0])]
+            ),
+            "committed"
+        );
+    }
+
+    #[test]
+    fn done_uses_the_guest_index_not_the_stale_host_counterpart() {
+        if skip_without_git() {
+            return;
+        }
+        let (_temp, host, guest, branch) = pair();
+        std::fs::write(guest.join("agent.txt"), "committed\n").unwrap();
+        commit_all(&guest);
+        // Simulate shared files visible on the host, but absent from its index.
+        std::fs::copy(guest.join("agent.txt"), host.join("agent.txt")).unwrap();
+        let host_tip = git(&host, &["rev-parse", "HEAD"]);
+        let bridge = Bridge::local(guest.clone(), "source");
+        let review = bridge.prepare_done(&host, &branch).unwrap();
+        assert_eq!(review.snapshots.len(), 1);
+        assert_eq!(git(&host, &["rev-parse", "HEAD"]), host_tip);
+        assert!(git(&host, &["status", "--porcelain"]).contains("agent.txt"));
+        std::fs::write(guest.join("agent.txt"), "uncommitted\n").unwrap();
+        assert!(
+            bridge
+                .prepare_done(&host, &branch)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("uncommitted guest")
+        );
+        git(&guest, &["add", "agent.txt"]);
+        assert!(bridge.prepare_done(&host, &branch).is_err());
+        git(&guest, &["reset", "--hard", "HEAD"]);
+        std::fs::write(guest.join("untracked.txt"), "work\n").unwrap();
+        assert!(bridge.prepare_done(&host, &branch).is_err());
+    }
+
     #[test]
     fn merge_commits_remain_visible_even_when_their_patches_were_picked() {
         if skip_without_git() {
@@ -371,11 +796,14 @@ mod tests {
         git(&host, &["cherry-pick", &feature]);
         let report = bridge.exchange(&host, &branch).unwrap();
         assert!(report.contains("1 merge commit to review"), "{report}");
-        assert!(!bridge.fetch(&host, &branch).unwrap().pending.is_empty());
+        assert_eq!(
+            bridge.prepare_done(&host, &branch).unwrap().snapshots.len(),
+            1
+        );
     }
 
     #[test]
-    fn extra_guest_branches_are_included_in_cleanup_guard() {
+    fn extra_guest_branches_are_preserved_for_cleanup() {
         if skip_without_git() {
             return;
         }
@@ -384,11 +812,17 @@ mod tests {
         std::fs::write(guest.join("extra.txt"), "extra\n").unwrap();
         commit_all(&guest);
         git(&guest, &["checkout", &branch]);
-        let review = Bridge::local(guest, "source")
+        let review = Bridge::local(guest.clone(), "source")
             .fetch(&host, &branch)
             .unwrap();
-        assert_eq!(review.pending.len(), 1);
-        assert!(review.pending[0].0.ends_with("/extra"));
+        assert_eq!(review.snapshots.len(), 2);
+        let tip = git(&guest, &["rev-parse", "extra"]);
+        assert!(
+            review
+                .snapshots
+                .iter()
+                .any(|branch| git(&host, &["rev-parse", branch]) == tip)
+        );
     }
 
     #[test]
