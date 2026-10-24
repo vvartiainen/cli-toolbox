@@ -166,7 +166,7 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entry("F5", "refresh"),
                 entry("esc", "back"),
             ];
-            if picker.tool == ToolId::Worktrees {
+            if picker.tool == ToolId::GitWorktrees {
                 entries.extend([
                     entry("⏎", "worktree details"),
                     entry("^A", "new worktree (init + Herdr)"),
@@ -404,7 +404,7 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
         format!("{}/{}", visible.len(), picker.resources.len())
     };
     let help = match picker.tool {
-        ToolId::Worktrees => HELP_WORKTREES,
+        ToolId::GitWorktrees => HELP_WORKTREES,
         ToolId::SandboxProjects => HELP_PROJECTS,
         ToolId::SandboxVms => HELP_VMS,
         _ => HELP_PICKER,
@@ -424,8 +424,8 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
             "Reading {}…",
             picker.tool.picker_title().to_ascii_lowercase()
         ))
-    } else if picker.resources.is_empty() && picker.tool == ToolId::Worktrees {
-        Some("No agent worktrees yet. Press Ctrl-A to create one.".to_string())
+    } else if picker.resources.is_empty() && picker.tool == ToolId::GitWorktrees {
+        Some("No git worktrees yet. Press Ctrl-A to create one.".to_string())
     } else if picker.resources.is_empty() && picker.tool == ToolId::SandboxProjects {
         Some("No sandbox projects yet. Press Ctrl-A to create one for this repository.".to_string())
     } else if picker.resources.is_empty() && picker.tool == ToolId::SandboxVms {
@@ -542,7 +542,7 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
 fn draw_details(frame: &mut Frame<'_>, app: &App, details: &DetailsState) {
     let area = frame.area();
     let block = panel(
-        breadcrumb(ToolId::Worktrees.category(), "Worktree"),
+        breadcrumb(ToolId::GitWorktrees.category(), "Worktree"),
         String::new(),
         details_help(app),
     );
@@ -657,7 +657,7 @@ fn draw_tailor(frame: &mut Frame<'_>, state: &TailorState) {
 fn draw_new_worktree(frame: &mut Frame<'_>, app: &App, form: &LaunchForm) {
     let area = frame.area();
     let (category, context) = match &form.target {
-        NewWorktree::Local => (Category::Agents, app.cwd_display.clone()),
+        NewWorktree::Local => (Category::Git, app.cwd_display.clone()),
         NewWorktree::Project(name) => (Category::Sandbox, format!("project {name}")),
     };
     let block = panel(
@@ -734,7 +734,7 @@ fn field(name: &str, value: &str) -> Line<'static> {
 fn draw_confirmation(frame: &mut Frame<'_>, app: &App, confirm: &ConfirmState) {
     let area = frame.area();
     let block = panel(
-        breadcrumb(ToolId::Worktrees.category(), "Confirm cleanup"),
+        breadcrumb(ToolId::GitWorktrees.category(), "Confirm cleanup"),
         String::new(),
         HELP_CONFIRM,
     )
@@ -889,7 +889,7 @@ mod tests {
         let app = App::new("/tmp/project".into());
         let home = rendered(&app, 80, super::HEIGHT);
         assert!(home.contains("Select profile"));
-        assert!(home.contains(" i Agents"));
+        assert!(home.contains(" g Git"));
         assert!(home.contains("/tmp/project"));
 
         let mut result_app = App::new("/tmp/project".into());
@@ -914,7 +914,7 @@ mod tests {
                 branch: String::new(),
             },
             confirm: false,
-            return_picker: crate::tui::app::PickerState::new(ToolId::Worktrees),
+            return_picker: crate::tui::app::PickerState::new(ToolId::GitWorktrees),
         });
         let text = rendered(&app, 2, 1);
         assert_eq!(text.chars().count(), 2);
@@ -950,7 +950,7 @@ mod tests {
                 branch: "x-branch".into(),
             },
             confirm: false,
-            return_picker: crate::tui::app::PickerState::new(ToolId::Worktrees),
+            return_picker: crate::tui::app::PickerState::new(ToolId::GitWorktrees),
         });
         assert!(rendered(&app, 80, 12).contains("Remove this worktree and branch?"));
         app.herdr = true;
@@ -970,7 +970,7 @@ mod tests {
     fn worktrees_render_as_columns() {
         let mut app = App::new("/tmp/project".into());
         app.loaded(
-            ToolId::Worktrees,
+            ToolId::GitWorktrees,
             Ok(vec![Resource::Worktree(crate::git::Worktree {
                 name: "project-agent-wt".into(),
                 path: PathBuf::from("/tmp/project-agent-wt"),
@@ -988,7 +988,7 @@ mod tests {
     #[test]
     fn empty_worktree_list_points_to_create() {
         let mut app = App::new("/tmp/project".into());
-        app.loaded(ToolId::Worktrees, Ok(Vec::new()));
+        app.loaded(ToolId::GitWorktrees, Ok(Vec::new()));
         let text = rendered(&app, 80, super::HEIGHT);
         assert!(text.contains("Press Ctrl-A to create one"), "{text}");
     }
@@ -1072,9 +1072,9 @@ mod tests {
         app.herdr = true;
         app.agent_kinds = vec!["claude".into(), "codex".into()];
         app.default_agent = Some("codex".into());
-        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
-        app.loaded(ToolId::Worktrees, Ok(Vec::new()));
+        app.loaded(ToolId::GitWorktrees, Ok(Vec::new()));
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         let text = rendered(&app, 100, super::HEIGHT);
         for want in [

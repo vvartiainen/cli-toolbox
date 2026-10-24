@@ -24,7 +24,7 @@ const FALLBACK_AGENTS: [&str; 3] = ["claude", "codex", "pi"];
 pub(crate) enum Category {
     Aws,
     Azure,
-    Agents,
+    Git,
     Sandbox,
     Terminal,
 }
@@ -33,7 +33,7 @@ impl Category {
     pub(crate) const ALL: [Self; 5] = [
         Self::Aws,
         Self::Azure,
-        Self::Agents,
+        Self::Git,
         Self::Sandbox,
         Self::Terminal,
     ];
@@ -42,7 +42,7 @@ impl Category {
         match self {
             Self::Aws => "AWS",
             Self::Azure => "Azure",
-            Self::Agents => "Agents",
+            Self::Git => "Git",
             Self::Sandbox => "Sandbox",
             Self::Terminal => "Terminal",
         }
@@ -53,7 +53,7 @@ impl Category {
         match self {
             Self::Aws => 'a',
             Self::Azure => 'z',
-            Self::Agents => 'i',
+            Self::Git => 'g',
             Self::Sandbox => 's',
             Self::Terminal => 't',
         }
@@ -88,7 +88,7 @@ pub(crate) enum ToolId {
     AwsProfile,
     AzureSubscription,
     AzureAccount,
-    Worktrees,
+    GitWorktrees,
     SandboxProjects,
     SandboxVms,
     KittySession,
@@ -100,7 +100,7 @@ impl ToolId {
         Self::AwsProfile,
         Self::AzureSubscription,
         Self::AzureAccount,
-        Self::Worktrees,
+        Self::GitWorktrees,
         Self::SandboxProjects,
         Self::SandboxVms,
         Self::KittySession,
@@ -111,7 +111,7 @@ impl ToolId {
         match self {
             Self::AwsProfile => Category::Aws,
             Self::AzureSubscription | Self::AzureAccount => Category::Azure,
-            Self::Worktrees => Category::Agents,
+            Self::GitWorktrees => Category::Git,
             Self::SandboxProjects | Self::SandboxVms => Category::Sandbox,
             Self::KittySession | Self::SshConnect => Category::Terminal,
         }
@@ -124,7 +124,7 @@ impl ToolId {
             Self::AzureAccount => "Account",
             Self::KittySession => "Switch Kitty session",
             Self::SshConnect => "SSH connect",
-            Self::Worktrees => "Worktrees",
+            Self::GitWorktrees => "Worktrees",
             Self::SandboxProjects => "Projects",
             Self::SandboxVms => "VMs",
         }
@@ -139,7 +139,9 @@ impl ToolId {
             Self::AzureAccount => "Status, log in, log in again after PIM activation, log out",
             Self::KittySession => "Switch to a .kitty-session file from your home directory",
             Self::SshConnect => "Connect to a configured host with Kitty's SSH kitten",
-            Self::Worktrees => "Create, inspect, cd into or remove agent worktrees",
+            Self::GitWorktrees => {
+                "Create, inspect, cd into or remove git worktrees in ~/.worktrees"
+            }
             Self::SandboxProjects => {
                 "Project VMs in ~/.agent-sandbox: create, start, add worktrees, sync"
             }
@@ -154,7 +156,7 @@ impl ToolId {
             Self::AzureAccount => "Azure account",
             Self::KittySession => "Kitty sessions",
             Self::SshConnect => "SSH hosts",
-            Self::Worktrees => "Agent worktrees",
+            Self::GitWorktrees => "Git worktrees",
             Self::SandboxProjects => "Sandbox projects",
             Self::SandboxVms => "Running VMs",
         }
@@ -211,7 +213,7 @@ impl Resource {
                 | (ToolId::AzureAccount, Self::AzureAccount(_))
                 | (ToolId::KittySession, Self::Kitty(_))
                 | (ToolId::SshConnect, Self::Ssh(_))
-                | (ToolId::Worktrees, Self::Worktree(_))
+                | (ToolId::GitWorktrees, Self::Worktree(_))
                 | (ToolId::SandboxProjects, Self::Project(_))
                 | (ToolId::SandboxVms, Self::Vm(_))
         )
@@ -288,7 +290,7 @@ impl Action {
     pub(crate) fn return_tool(&self) -> Option<ToolId> {
         match self {
             Self::CreateWorktree(_) | Self::EnterWorktree(_) | Self::Cleanup(_) => {
-                Some(ToolId::Worktrees)
+                Some(ToolId::GitWorktrees)
             }
             Self::CreateProject
             | Self::StartProject(_)
@@ -841,11 +843,11 @@ impl App {
                         Effect::Execute(Action::Kitty(choice.path))
                     }
                     (ToolId::SshConnect, Resource::Ssh(host)) => Effect::Execute(Action::Ssh(host)),
-                    (ToolId::Worktrees, Resource::Worktree(worktree)) => {
+                    (ToolId::GitWorktrees, Resource::Worktree(worktree)) => {
                         let return_picker = self
                             .picker()
                             .cloned()
-                            .unwrap_or_else(|| PickerState::new(ToolId::Worktrees));
+                            .unwrap_or_else(|| PickerState::new(ToolId::GitWorktrees));
                         self.screen = Screen::WorktreeDetails(DetailsState {
                             worktree,
                             return_picker,
@@ -879,7 +881,7 @@ impl App {
     fn handle_worktree_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
         let picker = self
             .picker()
-            .filter(|picker| picker.tool == ToolId::Worktrees)?;
+            .filter(|picker| picker.tool == ToolId::GitWorktrees)?;
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
@@ -1265,13 +1267,13 @@ mod tests {
     /// Open the worktree manager with the given worktrees loaded.
     fn worktree_manager(worktrees: &[Worktree]) -> App {
         let mut app = App::new("/repo".into());
-        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('g')));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('1'))),
-            Effect::Load(ToolId::Worktrees)
+            Effect::Load(ToolId::GitWorktrees)
         );
         app.loaded(
-            ToolId::Worktrees,
+            ToolId::GitWorktrees,
             Ok(worktrees.iter().cloned().map(Resource::Worktree).collect()),
         );
         app
@@ -1369,7 +1371,7 @@ mod tests {
         let mut app = App::new("/repo".into());
         for expected in [
             Category::Azure,
-            Category::Agents,
+            Category::Git,
             Category::Sandbox,
             Category::Terminal,
             Category::Aws,
@@ -1382,15 +1384,15 @@ mod tests {
     }
 
     #[test]
-    fn agents_tab_opens_the_worktree_manager() {
+    fn git_tab_opens_the_worktree_manager() {
         let mut app = App::new("/repo".into());
-        app.handle_key(key(KeyCode::Char('i')));
-        assert_eq!(app.category, Category::Agents);
+        app.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(app.category, Category::Git);
         // Numbers beyond the category's actions do nothing.
         assert_eq!(app.handle_key(key(KeyCode::Char('2'))), Effect::None);
         assert_eq!(
             app.handle_key(key(KeyCode::Char('1'))),
-            Effect::Load(ToolId::Worktrees)
+            Effect::Load(ToolId::GitWorktrees)
         );
     }
 
@@ -1602,7 +1604,7 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Effect::None);
         assert!(matches!(
             &app.screen,
-            Screen::Picker(picker) if picker.tool == ToolId::Worktrees
+            Screen::Picker(picker) if picker.tool == ToolId::GitWorktrees
         ));
     }
 
@@ -1643,7 +1645,7 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(
             &app.screen,
-            Screen::Picker(picker) if picker.tool == ToolId::Worktrees
+            Screen::Picker(picker) if picker.tool == ToolId::GitWorktrees
         ));
     }
 
@@ -1704,7 +1706,7 @@ mod tests {
             app.finished(&action, "Done".into(), "done".into(), false);
             assert_eq!(
                 app.handle_key(key(KeyCode::Esc)),
-                Effect::Load(ToolId::Worktrees)
+                Effect::Load(ToolId::GitWorktrees)
             );
         }
         for action in [

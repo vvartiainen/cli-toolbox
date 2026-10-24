@@ -48,8 +48,7 @@ enum Commands {
     Agent(AgentCmd),
     /// Project MCP and skill selections through Rulesync.
     Agents(AgentsCmd),
-    /// Git helpers (hidden alias for `agent worktree`).
-    #[command(hide = true)]
+    /// Git helpers.
     Git(GitCmd),
     /// Kitty helpers.
     Kitty(KittyCmd),
@@ -202,7 +201,8 @@ mod tests {
             stdout.contains("Usage: cli-toolbox agent <command>"),
             "{stdout}"
         );
-        assert!(stdout.contains("worktree"), "{stdout}");
+        assert!(stdout.contains("project"), "{stdout}");
+        assert!(!stdout.contains("Manage git worktrees"), "{stdout}");
         assert!(stderr.is_empty(), "{stderr}");
     }
 
@@ -279,67 +279,39 @@ mod tests {
     }
 
     #[test]
-    fn prints_agent_worktree_help() {
-        let (result, stdout, stderr) = run_args(&["agent", "worktree", "--help"]);
+    fn prints_git_worktree_help() {
+        let (result, stdout, stderr) = run_args(&["git", "worktree", "--help"]);
         result.unwrap();
         assert!(
-            stdout.contains("Usage: cli-toolbox agent worktree"),
+            stdout.contains("Usage: cli-toolbox git worktree"),
             "{stdout}"
         );
-        for subcommand in ["create", "list", "cleanup"] {
-            assert!(stdout.contains(subcommand), "{stdout}");
+        for text in ["create", "list", "remove", "~/.worktrees/<repo>/<name>"] {
+            assert!(stdout.contains(text), "missing {text}: {stdout}");
         }
         assert!(stderr.is_empty(), "{stderr}");
-    }
 
-    #[test]
-    fn rejects_agent_worktree_without_subcommand() {
-        let (result, stdout, stderr) = run_args(&["agent", "worktree"]);
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("subcommand"), "{err}");
+        let (result, _, stderr) = run_args(&["git", "worktree"]);
+        assert!(result.unwrap_err().to_string().contains("subcommand"));
         assert!(
-            stderr.contains("Usage: cli-toolbox agent worktree <command>"),
+            stderr.contains("Usage: cli-toolbox git worktree <command>"),
             "{stderr}"
         );
-        assert!(stdout.is_empty(), "{stdout}");
-    }
 
-    #[test]
-    fn prints_agent_worktree_create_help() {
-        let (result, stdout, stderr) = run_args(&["agent", "worktree", "create", "--help"]);
-        result.unwrap();
-        assert!(
-            stdout.contains("Usage: cli-toolbox agent worktree create"),
-            "{stdout}"
-        );
-        assert!(
-            stdout.contains(r#"cd "$(cli-toolbox agent worktree create)""#),
-            "{stdout}"
-        );
-        assert!(stderr.is_empty(), "{stderr}");
-    }
-
-    #[test]
-    fn prints_agent_worktree_list_help() {
-        let (result, stdout, stderr) = run_args(&["agent", "worktree", "list", "--help"]);
-        result.unwrap();
-        assert!(
-            stdout.contains("Usage: cli-toolbox agent worktree list"),
-            "{stdout}"
-        );
-        assert!(stderr.is_empty(), "{stderr}");
-    }
-
-    #[test]
-    fn prints_agent_worktree_cleanup_help() {
-        let (result, stdout, stderr) = run_args(&["agent", "worktree", "cleanup", "--help"]);
-        result.unwrap();
-        assert!(
-            stdout.contains("Usage: cli-toolbox agent worktree cleanup"),
-            "{stdout}"
-        );
-        assert!(stdout.contains("--all"), "{stdout}");
-        assert!(stderr.is_empty(), "{stderr}");
+        let (_, stdout, _) = run_args(&["git", "worktree", "create", "--help"]);
+        for text in [
+            "<NAME>",
+            "feature-login",
+            r#"cd "$(cli-toolbox git worktree create feature/login)""#,
+        ] {
+            assert!(stdout.contains(text), "missing {text}: {stdout}");
+        }
+        let (_, stdout, _) = run_args(&["git", "worktree", "remove", "--help"]);
+        for text in ["--all", "--keep-branch", "--no-herdr"] {
+            assert!(stdout.contains(text), "missing {text}: {stdout}");
+        }
+        // A name is required.
+        assert!(run_args(&["git", "worktree", "create"]).0.is_err());
     }
 
     #[test]
@@ -355,19 +327,12 @@ mod tests {
     }
 
     #[test]
-    fn git_agent_worktree_alias_still_parses_and_is_hidden() {
-        let (result, stdout, stderr) = run_args(&["git", "agent-worktree", "cleanup", "--help"]);
-        result.unwrap();
-        assert!(
-            stdout.contains("Usage: cli-toolbox git agent-worktree cleanup"),
-            "{stdout}"
-        );
-        assert!(stderr.is_empty(), "{stderr}");
-
+    fn agent_worktree_and_its_git_alias_are_gone() {
+        assert!(run_args(&["agent", "worktree", "list"]).0.is_err());
+        assert!(run_args(&["git", "agent-worktree", "list"]).0.is_err());
         let (result, root_help, _) = run_args(&["--help"]);
         result.unwrap();
-        assert!(root_help.contains("agent"), "{root_help}");
-        assert!(!root_help.contains("Git helpers"), "{root_help}");
+        assert!(root_help.contains("Git helpers"), "{root_help}");
     }
 
     #[test]
@@ -472,11 +437,11 @@ mod tests {
     }
 
     #[test]
-    fn generated_completion_includes_agent_worktree_subcommands() {
+    fn generated_completion_includes_worktree_subcommands() {
         let stdout = generate_to_string("bash").unwrap();
         for command in [
-            "worktree", "create", "list", "cleanup", "project", "start", "restart", "add", "sync",
-            "done",
+            "git", "worktree", "create", "list", "remove", "project", "start", "restart", "add",
+            "sync", "done",
         ] {
             assert!(stdout.contains(command), "missing {command}: {stdout}");
         }

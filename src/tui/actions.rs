@@ -65,7 +65,7 @@ impl Context {
 
     pub fn load(&self, tool: ToolId) -> Result<Vec<Resource>, Error> {
         match tool {
-            ToolId::Worktrees => Ok(git::project_worktrees(
+            ToolId::GitWorktrees => Ok(git::project_worktrees(
                 self.working_dir()?,
                 &git::worktrees_root()?,
             )?
@@ -217,9 +217,13 @@ impl Context {
             Action::CreateWorktree(launch) => {
                 // The launcher has released the terminal, so git and the init
                 // command stream their progress to it directly.
+                let cwd = self.working_dir()?;
+                let root = git::git_worktrees_root()?;
+                let name = git::next_agent_worktree_name(cwd, &root)?;
                 let created = agent::create_worktree(
-                    self.working_dir()?,
-                    &git::worktrees_root()?,
+                    cwd,
+                    &root,
+                    &name,
                     agent::Options::default(),
                     launch.as_ref(),
                     &mut std::io::stderr(),
@@ -404,6 +408,7 @@ impl Context {
                 let steps = agent::remove_worktree(
                     self.working_dir()?,
                     worktree,
+                    false,
                     agent::Options::default(),
                     stderr,
                 )?;

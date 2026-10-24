@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::git::{self, Worktree};
-use crate::{Error, herdr, project};
+use crate::{Error, herdr, project, sandbox};
 
 pub(crate) mod review;
 pub(crate) mod vm;
@@ -141,18 +141,18 @@ pub(crate) struct Created {
     pub(crate) steps: Vec<Step>,
 }
 
-/// Create the next agent worktree of `cwd` under `root`, initialize it and
-/// open it in Herdr, starting `launch` there. Init output streams to
-/// `stderr`.
+/// Create the worktree `name` of `cwd` under `root` (see
+/// [`git::create_worktree`]), initialize it and open it in Herdr, starting
+/// `launch` there. Init output streams to `stderr`.
 pub(crate) fn create_worktree(
     cwd: &Path,
     root: &Path,
+    name: &str,
     options: Options,
     launch: Option<&Launch>,
     stderr: &mut dyn Write,
 ) -> Result<Created, Error> {
-    let name = git::next_agent_worktree_name(cwd, root)?;
-    let worktree = git::create_worktree(cwd, root, &name, stderr)?;
+    let worktree = git::create_worktree(cwd, root, name, stderr)?;
     let mut steps = Vec::new();
     if options.init {
         steps.push(init_step(cwd, &worktree.path, stderr)?);
@@ -212,12 +212,14 @@ fn start_in_worktree(repo: &Path, worktree: &Worktree, launch: &Launch) -> Resul
     start_agent(None, &worktree.name, &pane, launch)
 }
 
-/// Remove an agent worktree and its branch, then close its Herdr workspace.
+/// Remove a worktree and, unless `keep_branch`, its branch; then close its
+/// Herdr workspace.
 /// The workspace stays open when git refuses the removal, for example
 /// because the worktree has uncommitted changes.
 pub(crate) fn remove_worktree(
     cwd: &Path,
     worktree: &Worktree,
+    keep_branch: bool,
     options: Options,
     stderr: &mut dyn Write,
 ) -> Result<Vec<Step>, Error> {
@@ -225,7 +227,11 @@ pub(crate) fn remove_worktree(
     let lookup = options
         .herdr
         .then(|| herdr::available().then(|| herdr::worktree_workspace(cwd, &worktree.path)));
-    git::remove_worktree(cwd, worktree, git::RemoveOptions::default(), stderr)?;
+    let remove = git::RemoveOptions {
+        keep_branch,
+        force: false,
+    };
+    git::remove_worktree(cwd, worktree, remove, stderr)?;
     let Some(lookup) = lookup else {
         return Ok(Vec::new());
     };
@@ -241,35 +247,48 @@ pub(crate) fn remove_worktree(
     Ok(vec![step])
 }
 
-/// `agent worktree create`: print the path on stdout for `cd "$(…)"`, and
+/// The normal git worktrees of `cwd`: not those of sandbox projects, nor
+/// anything else in the sandbox directory such as review checkouts.
+pub(crate) fn git_worktrees(cwd: &Path) -> Result<Vec<Worktree>, Error> {
+    let excluded: Vec<_> = [sandbox::project::sandbox_dir(), git::worktrees_root()]
+        .into_iter()
+        .flatten()
+        .collect();
+    git::git_worktrees(cwd, &excluded)
+}
+
+/// `git worktree create`: print the path on stdout for `cd "$(…)"`, and
 /// the steps on stderr. The path is printed even when a step fails.
 pub(crate) fn create(
     cwd: &Path,
     root: &Path,
+    name: &str,
     options: Options,
     launch: Option<&Launch>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), Error> {
-    let created = create_worktree(cwd, root, options, launch, stderr)?;
+    let created = create_worktree(cwd, root, name, options, launch, stderr)?;
     report(&created.steps, stderr)?;
     writeln!(stdout, "{}", created.worktree.path.display())?;
     check_steps(&created.steps, "worktree created")
 }
 
-/// `agent worktree cleanup`: remove the named worktree, or all of them.
-pub(crate) fn cleanup(
+/// `git worktree remove`: remove the named one of `worktrees`, or all of them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove(
     cwd: &Path,
-    root: &Path,
+    worktrees: Vec<Worktree>,
     name: &str,
     all: bool,
+    keep_branch: bool,
     options: Options,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut steps = Vec::new();
-    for worktree in git::select_worktrees(git::project_worktrees(cwd, root)?, name, all)? {
-        let removed = remove_worktree(cwd, &worktree, options, stderr)?;
+    for worktree in git::select_worktrees(worktrees, name, all)? {
+        let removed = remove_worktree(cwd, &worktree, keep_branch, options, stderr)?;
         report(&removed, stderr)?;
         writeln!(stdout, "{}", worktree.path.display())?;
         steps.extend(removed);
@@ -320,6 +339,7 @@ mod tests {
         let created = create_worktree(
             &repo,
             &root.path().join("worktrees"),
+            "setup",
             NO_HERDR,
             None,
             &mut Vec::new(),
@@ -335,38 +355,77 @@ mod tests {
     }
 
     #[test]
-    fn create_skips_init_for_plain_projects_and_cleanup_removes() {
+    fn create_skips_init_for_plain_projects_and_remove_keeps_the_branch_on_request() {
         if skip_without_git() {
             return;
         }
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("demo");
         init_git_repo(&repo);
+        let wt_root = root.path().join("worktrees");
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        create(
-            &repo,
-            &root.path().join("worktrees"),
-            NO_HERDR,
-            None,
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-        let path = String::from_utf8(stdout).unwrap();
-        assert!(path.trim().ends_with("demo-agent-wt"), "{path}");
+        for name in ["feature/a", "b"] {
+            create(
+                &repo,
+                &wt_root,
+                name,
+                NO_HERDR,
+                None,
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap();
+        }
+        let paths = String::from_utf8(stdout).unwrap();
+        assert!(
+            paths.lines().next().unwrap().ends_with("demo/feature-a"),
+            "{paths}"
+        );
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("– init: no `worktree-init`"), "{stderr}");
 
-        let worktrees = git::project_worktrees(&repo, &root.path().join("worktrees")).unwrap();
-        let steps = remove_worktree(&repo, &worktrees[0], NO_HERDR, &mut Vec::new()).unwrap();
-        assert!(steps.is_empty());
+        let listed = || git::git_worktrees(&repo, &[]).unwrap();
+        let mut stdout = Vec::new();
+        remove(
+            &repo,
+            listed(),
+            "feature/a",
+            false,
+            true,
+            NO_HERDR,
+            &mut stdout,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(
-            git::project_worktrees(&repo, &root.path().join("worktrees"))
+            String::from_utf8(stdout)
                 .unwrap()
-                .is_empty()
+                .trim()
+                .ends_with("feature-a")
         );
+        remove(
+            &repo,
+            listed(),
+            "",
+            false,
+            false,
+            NO_HERDR,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(listed().is_empty());
+        let branches = crate::git::tests::must_git_output(
+            &repo,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        );
+        assert!(
+            branches.lines().any(|branch| branch == "feature/a"),
+            "{branches}"
+        );
+        assert!(!branches.lines().any(|branch| branch == "b"), "{branches}");
     }
 
     #[test]
@@ -397,6 +456,7 @@ mod tests {
         let created = create_worktree(
             &repo,
             &root.path().join("worktrees"),
+            "demo-agent-wt",
             options,
             Some(&launch),
             &mut Vec::new(),

@@ -13,6 +13,9 @@ const AGENT_WORKTREE_SUFFIX: &str = "-agent-wt";
 /// Overrides the directory that holds sandbox project worktrees.
 pub const WORKTREES_DIR_ENV: &str = "CLI_TOOLBOX_WORKTREES_DIR";
 
+/// Overrides the directory that holds normal git worktrees.
+pub const GIT_WORKTREES_DIR_ENV: &str = "CLI_TOOLBOX_GIT_WORKTREES_DIR";
+
 /// A linked worktree of a repository. `name` is its folder, `branch` the
 /// branch checked out in it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +54,17 @@ pub fn worktrees_root() -> Result<PathBuf, Error> {
         std::env::var_os(WORKTREES_DIR_ENV),
         dirs::home_dir(),
         Path::new(".agent-sandbox/worktrees"),
+    )
+}
+
+/// The directory that holds normal git worktrees, grouped by repository:
+/// `$CLI_TOOLBOX_GIT_WORKTREES_DIR`, or `~/.worktrees`.
+pub fn git_worktrees_root() -> Result<PathBuf, Error> {
+    resolve_root(
+        GIT_WORKTREES_DIR_ENV,
+        std::env::var_os(GIT_WORKTREES_DIR_ENV),
+        dirs::home_dir(),
+        Path::new(".worktrees"),
     )
 }
 
@@ -153,6 +167,25 @@ pub fn project_worktrees(cwd: &Path, root: &Path) -> Result<Vec<Worktree>, Error
                 .parent()
                 .is_some_and(|parent| parent == group || resolved(parent) == resolved_group)
         })
+        .map(Worktree::from)
+        .collect();
+    worktrees.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(worktrees)
+}
+
+/// The normal git worktrees of the repository at `cwd`: every linked
+/// worktree outside `excluded`, such as the sandbox project worktrees and
+/// review checkouts, sorted by name. The main checkout is not one.
+pub fn git_worktrees(cwd: &Path, excluded: &[PathBuf]) -> Result<Vec<Worktree>, Error> {
+    require_git()?;
+    let excluded: Vec<PathBuf> = excluded
+        .iter()
+        .flat_map(|root| [root.clone(), resolved(root)])
+        .collect();
+    let mut worktrees: Vec<Worktree> = list_git_worktrees(cwd)?
+        .into_iter()
+        .skip(1)
+        .filter(|worktree| !excluded.iter().any(|root| worktree.path.starts_with(root)))
         .map(Worktree::from)
         .collect();
     worktrees.sort_by(|a, b| a.name.cmp(&b.name));
@@ -539,6 +572,62 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn project_and_git_worktrees_are_told_apart_by_location() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("demo");
+        init_git_repo(&repo);
+        let projects = root.path().join("projects");
+        let normal = root.path().join("normal");
+        let sandbox = root.path().join("sandbox");
+
+        create_worktree(&repo, &projects, "custom-name", &mut io::sink()).unwrap();
+        create_worktree(&repo, &projects, "demo-agent-wt", &mut io::sink()).unwrap();
+        create_worktree(&repo, &normal, "feature/x", &mut io::sink()).unwrap();
+        // A detached review checkout in the sandbox state.
+        let review = sandbox.join("state/demo/reviews/abc");
+        fs::create_dir_all(review.parent().unwrap()).unwrap();
+        must_run_git(
+            &repo,
+            &["worktree", "add", "--detach", review.to_str().unwrap()],
+        );
+
+        let names = |worktrees: Vec<Worktree>| -> Vec<String> {
+            worktrees
+                .into_iter()
+                .map(|worktree| worktree.name)
+                .collect()
+        };
+        assert_eq!(
+            names(project_worktrees(&repo, &projects).unwrap()),
+            ["custom-name", "demo-agent-wt"]
+        );
+        // The same from inside a worktree.
+        let inside = projects.join("demo/custom-name");
+        assert_eq!(project_worktrees(&inside, &projects).unwrap().len(), 2);
+        assert_eq!(
+            names(git_worktrees(&repo, &[sandbox.clone(), projects.clone()]).unwrap()),
+            ["feature-x"]
+        );
+        assert_eq!(
+            git_worktrees(&repo, &[sandbox]).unwrap().len(),
+            3,
+            "only excluded roots are left out"
+        );
+        assert!(
+            project_worktrees(&repo, &normal.join("elsewhere"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            next_agent_worktree_name(&repo, &projects).unwrap(),
+            "demo-agent-wt-2"
+        );
+    }
+
+    #[test]
     fn same_named_repos_share_a_group_without_clashing() {
         if skip_without_git() {
             return;
@@ -583,6 +672,23 @@ pub(crate) mod tests {
         remove_worktree(&repo, &two, RemoveOptions::default(), &mut io::sink()).unwrap();
         assert!(!wt_root.join("demo").exists());
 
+        // A sibling worktree leaves its parent alone, even when it is empty.
+        let siblings = root.path().join("siblings");
+        let sibling = siblings.join("sibling");
+        fs::create_dir_all(&siblings).unwrap();
+        must_run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "sibling",
+                sibling.to_str().unwrap(),
+            ],
+        );
+        let listed = git_worktrees(&repo, &[]).unwrap();
+        remove_worktree(&repo, &listed[0], RemoveOptions::default(), &mut io::sink()).unwrap();
+        assert!(siblings.exists());
     }
 
     #[test]

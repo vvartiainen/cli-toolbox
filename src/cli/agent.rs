@@ -42,16 +42,6 @@ enum AgentCommands {
         #[command(subcommand)]
         command: VmCommands,
     },
-    /// Manage git worktrees for AI agents.
-    #[command(
-        subcommand_required = true,
-        subcommand_value_name = "command",
-        after_help = "Worktrees are created in ~/.agent-sandbox/worktrees/<repo>/ as <repo>-agent-wt, <repo>-agent-wt-2, and so on."
-    )]
-    Worktree {
-        #[command(subcommand)]
-        command: WorktreeCommands,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -213,44 +203,9 @@ struct BootArgs {
     no_herdr: bool,
 }
 
-#[derive(Debug, Subcommand)]
-pub(super) enum WorktreeCommands {
-    /// Create a git worktree and branch for AI agents, initialize it and open it in Herdr.
-    #[command(
-        after_help = "Creates a new worktree and branch and prints the path.\n\nThe worktree is then initialized: a `worktree-init` recipe in the project's justfile runs if there is one (with CLI_TOOLBOX_WORKTREE_SOURCE set to the source checkout), otherwise the install of the package manager whose lockfile is present (npm ci, pnpm install, yarn install, bun install). If herdr is installed, the worktree opens as a focused Herdr workspace. With --agent or --prompt, that agent starts there and gets the prompt.\n\nShell usage:\n\n  cd \"$(cli-toolbox agent worktree create)\"\n  cli-toolbox agent worktree create --agent codex --prompt \"Fix the flaky login test\""
-    )]
-    Create {
-        /// Skip the worktree-init recipe or package install.
-        #[arg(long)]
-        no_init: bool,
-        /// Do not open the worktree in Herdr.
-        #[arg(long, conflicts_with_all = ["agent", "prompt"])]
-        no_herdr: bool,
-        #[command(flatten)]
-        launch: LaunchArgs,
-    },
-    /// List agent worktrees for the current directory.
-    List,
-    /// Remove an agent worktree and its branch, and close its Herdr workspace.
-    #[command(
-        after_help = "Removes an agent worktree and its branch.\n\nIf name is omitted and only one agent worktree exists, that one is removed. A Herdr workspace that has the worktree open is closed after the removal succeeds."
-    )]
-    Cleanup {
-        /// Worktree name or path to remove.
-        name: Option<String>,
-        /// Remove all agent worktrees for the current directory.
-        #[arg(long)]
-        all: bool,
-        /// Do not close the worktree's Herdr workspace.
-        #[arg(long)]
-        no_herdr: bool,
-    },
-}
-
 impl AgentCmd {
     pub fn run(self, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<(), Error> {
         match self.command {
-            AgentCommands::Worktree { command } => run_worktree(command, stdout, stderr),
             AgentCommands::Project { command } => run_project(command, stdout, stderr),
             AgentCommands::Vm { command } => run_vm(command, stdout, stderr),
         }
@@ -411,61 +366,9 @@ fn resolve(root: &Path, name: Option<String>) -> Result<Project, Error> {
     project::resolve(root, name.as_deref(), repo.as_deref())
 }
 
-pub(super) fn run_worktree(
-    command: WorktreeCommands,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> Result<(), Error> {
-    match command {
-        WorktreeCommands::Create {
-            no_init,
-            no_herdr,
-            launch,
-        } => {
-            let options = agent::Options {
-                init: !no_init,
-                herdr: !no_herdr,
-            };
-            agent::create(
-                &working_dir()?,
-                &git::worktrees_root()?,
-                options,
-                launch.resolve()?.as_ref(),
-                stdout,
-                stderr,
-            )
-        }
-        WorktreeCommands::List => {
-            for worktree in git::project_worktrees(&working_dir()?, &git::worktrees_root()?)? {
-                writeln!(stdout, "{}", worktree.path.display())?;
-            }
-            Ok(())
-        }
-        WorktreeCommands::Cleanup {
-            name,
-            all,
-            no_herdr,
-        } => {
-            let options = agent::Options {
-                herdr: !no_herdr,
-                ..agent::Options::default()
-            };
-            agent::cleanup(
-                &working_dir()?,
-                &git::worktrees_root()?,
-                name.as_deref().unwrap_or(""),
-                all,
-                options,
-                stdout,
-                stderr,
-            )
-        }
-    }
-}
-
 impl LaunchArgs {
     /// The agent to start in the new worktree, if any.
-    fn resolve(self) -> Result<Option<Launch>, Error> {
+    pub(super) fn resolve(self) -> Result<Option<Launch>, Error> {
         launch(
             self.agent,
             self.prompt,
@@ -530,7 +433,7 @@ fn finish(steps: &[agent::Step], stderr: &mut dyn Write) -> Result<(), Error> {
     }
 }
 
-fn working_dir() -> Result<PathBuf, Error> {
+pub(super) fn working_dir() -> Result<PathBuf, Error> {
     std::env::current_dir().map_err(|err| Error::msg(format!("resolve working directory: {err}")))
 }
 
