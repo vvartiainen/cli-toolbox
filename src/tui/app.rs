@@ -248,6 +248,8 @@ pub(crate) enum Action {
     /// A worktree of the project by name, with the agent to start in it with
     /// the VM.
     AddProjectWorktree(String, String, Option<Launch>),
+    /// Run `nix flake update` for the project's flake.
+    UpdateProjectFlake(String),
     /// Delete the project's review snapshots and checkouts as the options say.
     PruneProject(String, PruneOptions),
     /// Save a project worktree's work as snapshots, then remove it.
@@ -287,7 +289,8 @@ impl Action {
             Self::TailorProject(name, _)
             | Self::ReviewProject(name, _)
             | Self::RemoveProjectWorktree(name, ..)
-            | Self::PruneProject(name, _) => Some(name),
+            | Self::PruneProject(name, _)
+            | Self::UpdateProjectFlake(name) => Some(name),
             _ => None,
         }
     }
@@ -304,6 +307,7 @@ impl Action {
             | Self::StopProject(_)
             | Self::RestartProject(_)
             | Self::PruneProject(..)
+            | Self::UpdateProjectFlake(_)
             | Self::SyncProject(_)
             | Self::ReviewProject(..)
             | Self::AddProjectWorktree(..)
@@ -490,6 +494,9 @@ pub(crate) struct TailorState {
     pub(crate) agent: String,
     /// The editor `e` opens, for the hint.
     pub(crate) editor: String,
+    /// Where Esc returns to for an existing project; a new one opens its
+    /// details instead.
+    pub(crate) back: Option<Box<Screen>>,
 }
 
 /// What a VM confirmation is about.
@@ -711,6 +718,10 @@ pub(crate) struct App {
     pub(crate) default_agent: Option<String>,
     /// Open this project's details once the project list has loaded.
     pub(crate) open_project: Option<String>,
+    /// The coding agent that tailors flakes.
+    pub(crate) setup_agent: String,
+    /// The editor that opens flakes, for hints.
+    pub(crate) editor: String,
 }
 
 impl App {
@@ -729,6 +740,8 @@ impl App {
             agent_kinds: Vec::new(),
             default_agent: None,
             open_project: None,
+            setup_agent: "claude".into(),
+            editor: "vi".into(),
         }
     }
 
@@ -887,6 +900,7 @@ impl App {
             project,
             agent,
             editor,
+            back: None,
         });
     }
 
@@ -1250,6 +1264,20 @@ impl App {
                 return self.confirm_vm(&status, VmChange::Restart);
             }
             KeyCode::Char('p') => return Effect::Prepare(Prepare::Prune(name)),
+            KeyCode::Char('f') => return Effect::Execute(Action::UpdateProjectFlake(name)),
+            KeyCode::Char('t') => {
+                let summary = format!(
+                    "Project {name}: {}/flake.nix",
+                    state.status.project.dir.display()
+                );
+                let back = Some(Box::new(Screen::ProjectDetails(state.clone())));
+                self.screen = Screen::TailorFlake(TailorState {
+                    project: NewProject { name, summary },
+                    agent: self.setup_agent.clone(),
+                    editor: self.editor.clone(),
+                    back,
+                });
+            }
             KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
             KeyCode::Char('v') => return Effect::Execute(Action::ReviewProject(name, worktree)),
             KeyCode::Char('a') => return Effect::Prepare(Prepare::ProjectWorktree(name)),
@@ -1285,7 +1313,11 @@ impl App {
                 Tailor::Agent(state.agent.clone()),
             )),
             KeyCode::Char('e') => Effect::Execute(Action::TailorProject(name, Tailor::Editor)),
-            KeyCode::Char('s') | KeyCode::Esc => self.load_project(name),
+            KeyCode::Esc if state.back.is_some() => {
+                self.screen = state.back.as_deref().cloned().unwrap_or(Screen::Home);
+                Effect::None
+            }
+            KeyCode::Char('s') | KeyCode::Esc if state.back.is_none() => self.load_project(name),
             _ => Effect::None,
         }
     }
@@ -2188,6 +2220,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn existing_projects_can_be_tailored_again_and_updated() {
+        let mut app = App::new("/repo".into());
+        app.setup_agent = "codex".into();
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(project("demo", &[])))]),
+        );
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('f'))),
+            Effect::Execute(Action::UpdateProjectFlake("demo".into()))
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('t'))), Effect::None);
+        assert!(matches!(&app.screen, Screen::TailorFlake(state) if state.back.is_some()));
+        // No skip for an existing project; Esc goes back to it.
+        assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Effect::None);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Effect::Execute(Action::TailorProject(
+                "demo".into(),
+                Tailor::Agent("codex".into())
+            ))
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), Effect::None);
+        assert!(matches!(app.screen, Screen::ProjectDetails(_)));
+        let update = Action::UpdateProjectFlake("demo".into());
+        assert_eq!(update.project_to_open(), Some("demo"));
     }
 
     #[test]

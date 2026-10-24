@@ -21,6 +21,7 @@ const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
+const HELP_RETAILOR: &str = "a agent · e edit · ? help · esc back";
 const HELP_NEW_WORKTREE: &str = "tab name/prompt · ←→ agent · ⏎ create · F1 help · esc back";
 const HELP_PROJECT_FORM: &str = "tab ↑↓ field · ←→ space change · ⏎ create · F1 help · esc back";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
@@ -135,7 +136,7 @@ fn details_help(app: &App) -> &'static str {
 
 fn project_help(state: &ProjectState) -> &'static str {
     if state.status.worktrees.is_empty() {
-        "a add · v review saved · ? help · esc back"
+        "a add · t tailor · f update · v review saved · ? help · esc back"
     } else if state.status.vm.is_some() {
         "v review · s sync · x stop · r restart · a add · ⏎ cd · D done · d remove · ? help"
     } else {
@@ -224,6 +225,11 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             entry("u", "start the VM and open the worktrees in herdr"),
             entry("x r", "stop / restart the VM (asks first)"),
             entry(
+                "t",
+                "tailor flake.nix again with a coding agent or the editor",
+            ),
+            entry("f", "update the flake's inputs (nix flake update)"),
+            entry(
                 "p",
                 "prune review snapshots whose work is on main, and their checkouts (asks)",
             ),
@@ -257,7 +263,8 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 "a coding agent tailors flake.nix (agent-sandbox setup instructions)",
             ),
             entry("e", "edit flake.nix in $VISUAL or $EDITOR"),
-            entry("s esc", "skip and open the project"),
+            entry("s esc", "skip and open the project (new projects)"),
+            entry("esc", "back to the project (existing projects)"),
         ],
         Screen::NewWorktree(_) => vec![
             entry("type", "the name (the branch), or the agent's first prompt"),
@@ -660,10 +667,24 @@ fn draw_project(frame: &mut Frame<'_>, app: &App, state: &ProjectState) {
 
 fn draw_tailor(frame: &mut Frame<'_>, state: &TailorState) {
     let area = frame.area();
+    let existing = state.back.is_some();
+    let (context, help, question) = if existing {
+        (
+            "project",
+            HELP_RETAILOR,
+            "Tailor flake.nix again for changes in the repository?",
+        )
+    } else {
+        (
+            "new project",
+            HELP_TAILOR,
+            "Tailor flake.nix to the repository before the first start?",
+        )
+    };
     let block = panel(
         breadcrumb(Category::Sandbox, &state.project.name),
-        "new project".into(),
-        HELP_TAILOR,
+        context.into(),
+        help,
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -681,7 +702,7 @@ fn draw_tailor(frame: &mut Frame<'_>, state: &TailorState) {
         .collect();
     lines.extend([
         Line::default(),
-        Line::from("Tailor flake.nix to the repository before the first start?".bold()),
+        Line::from(question.bold()),
         Line::default(),
         option(
             "a",
@@ -691,8 +712,10 @@ fn draw_tailor(frame: &mut Frame<'_>, state: &TailorState) {
             ),
         ),
         option("e", format!("edit it in {}", state.editor)),
-        option("s", "skip; edit it later".into()),
     ]);
+    if !existing {
+        lines.push(option("s", "skip; edit it later".into()));
+    }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1229,6 +1252,43 @@ mod tests {
         ] {
             assert!(text.contains(want), "missing {want}: {text}");
         }
+    }
+
+    #[test]
+    fn renders_the_tailor_prompt_of_an_existing_project_without_skip() {
+        let mut app = App::new("/tmp/project".into());
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(
+                crate::agent::vm::ProjectStatus {
+                    project: crate::sandbox::project::Project {
+                        name: "demo".into(),
+                        dir: PathBuf::from("/sandbox/projects/demo"),
+                        repo: Some(PathBuf::from("/p/demo")),
+                        state_dir: PathBuf::from("/sandbox/state/demo"),
+                        worktrees_root: PathBuf::from("/wt"),
+                    },
+                    worktrees: Vec::new(),
+                    vm: None,
+                    restart_needed: false,
+                    error: None,
+                },
+            ))]),
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let details = rendered(&app, 100, super::HEIGHT);
+        assert!(details.contains("a add · t tailor · f update"), "{details}");
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let text = rendered(&app, 100, super::HEIGHT);
+        for want in [
+            "Project demo: /sandbox/projects/demo/flake.nix",
+            "Tailor flake.nix again",
+            "a  with claude",
+            "esc back",
+        ] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
+        assert!(!text.contains("s  skip"), "{text}");
     }
 
     #[test]

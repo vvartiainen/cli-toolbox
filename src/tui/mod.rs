@@ -32,6 +32,8 @@ pub(crate) fn run(
         app.agent_kinds = crate::herdr::agent_kinds();
     }
     app.default_agent = actions::default_agent();
+    app.setup_agent = actions::setup_agent();
+    app.editor = crate::sandbox::project::editor().join(" ");
     let mut session = Some(TerminalSession::inline(ui::HEIGHT)?);
     let result = event_loop(&context, &mut app, &mut session, stderr);
     let restoration = session.as_mut().map(Session::restore).transpose();
@@ -118,11 +120,10 @@ fn event_loop(
                     return Ok(Some(command));
                 }
                 match outcome.project {
-                    Some(project) if !outcome.failed => app.tailor_prompt(
-                        project,
-                        actions::setup_agent(),
-                        crate::sandbox::project::editor().join(" "),
-                    ),
+                    Some(project) if !outcome.failed => {
+                        let (agent, editor) = (app.setup_agent.clone(), app.editor.clone());
+                        app.tailor_prompt(project, agent, editor)
+                    }
                     _ => app.finished(&action, outcome.title, outcome.body, outcome.failed),
                 }
             }

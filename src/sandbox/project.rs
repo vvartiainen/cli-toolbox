@@ -632,12 +632,20 @@ pub(crate) fn run_setup_agent(
     let instructions = fs::read_to_string(source_dir(&source)?.join(SETUP_PROMPT))
         .map_err(|err| Error::msg(format!("read {SETUP_PROMPT} from {source}: {err}")))?;
     let prompt = format!(
-        "{instructions}\n\nThe flake to tailor is {}/flake.nix, kept centrally. It is shared by every agent worktree of this repository: `vm.workspaces` comes from the generated ./{WORKTREES_FILE} (worktree name → path, mounted at /workspace/<name>), so write guest paths and init steps for every worktree without naming any: `guestPaths = [ \"*/target\" ];` and init steps with `eachWorkspace = true;` (their `directory` is then relative to each worktree). The guest system then stays the same when worktrees come and go. Do not edit {WORKTREES_FILE} or use it outside `vm.workspaces`. Leave the cli-toolbox defaults module (proxy, ai) and `vm.backlogDir` as they are; cli-toolbox sets up the host side of both.",
+        "{instructions}\n\nThe flake to tailor is {}/flake.nix, kept centrally. It is shared by every agent worktree of this repository: `vm.workspaces` comes from the generated ./{WORKTREES_FILE} (worktree name → path, mounted at /workspace/<name>), so write guest paths and init steps for every worktree without naming any: `guestPaths = [ \"*/target\" ];` and init steps with `eachWorkspace = true;` (their `directory` is then relative to each worktree). The guest system then stays the same when worktrees come and go. Do not edit {WORKTREES_FILE} or use it outside `vm.workspaces`. Leave the cli-toolbox defaults module (proxy, ai) and `vm.backlogDir` as they are; cli-toolbox sets up the host side of both. The flake may already be tailored: then update it for what changed in the repository rather than starting over.",
         project.dir.display()
     );
     exec::require(agent)?;
     writeln!(stderr, "Starting {agent} to tailor the sandbox flake")?;
     exec::run_on_stderr_in(agent, &[&prompt], Some(repo), &[])
+}
+
+/// Update the project's flake inputs with `nix flake update`, whose output
+/// streams to stderr, and let git track the new `flake.lock`.
+pub(crate) fn update_flake(project: &Project) -> Result<(), Error> {
+    exec::run_on_stderr_in("nix", &["flake", "update"], Some(&project.dir), &[])?;
+    track_in_git(&project.dir, &["flake.lock"]);
+    Ok(())
 }
 
 /// The editor command: `$VISUAL`, then `$EDITOR`, then `vi`, split into

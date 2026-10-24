@@ -206,6 +206,22 @@ pub(crate) fn add_worktree(
     Ok(Created { worktree, steps })
 }
 
+/// Update the inputs of the project's flake, such as agent-sandbox. A
+/// running VM uses them after a restart.
+pub(crate) fn update_flake(project: &Project) -> Result<Vec<Step>, Error> {
+    project::update_flake(project)?;
+    let mut steps = vec![Step::Done(format!(
+        "flake: updated {}",
+        project.dir.join("flake.lock").display()
+    ))];
+    if sandbox::vm_for(&running_vms(), &project.dir).is_some() {
+        steps.push(Step::Skipped(
+            "vm: running; restart it to use the update".into(),
+        ));
+    }
+    Ok(steps)
+}
+
 /// The name a new worktree of the project gets unless named otherwise:
 /// the next free `<repo>-agent-wt-N`.
 pub(crate) fn suggested_worktree_name(project: &Project) -> Result<String, Error> {

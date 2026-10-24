@@ -210,7 +210,7 @@ mod tests {
     fn prints_sandbox_project_help() {
         for command in [
             "list", "create", "setup", "start", "stop", "restart", "add", "sync", "review", "done",
-            "remove", "prune",
+            "remove", "prune", "tailor", "update",
         ] {
             let (result, stdout, stderr) = run_args(&["agent", "project", command, "--help"]);
             result.unwrap();

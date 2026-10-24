@@ -84,6 +84,24 @@ enum ProjectCommands {
         after_help = "When flake.nix takes its credentials from agent-proxy (caCert = ./agent-proxy-ca.pem), runs agent-sandbox's scripts/agent-proxy-setup.sh for the services claude-code and codex: it stores missing secrets (prompting for them), creates the client named after the project with its token in the login keychain, and writes agent-proxy-ca.pem next to the flake. agent-proxy must be running, and on PATH or in $AGENT_PROXY_FLAKE.\n\nWhen flake.nix sets vm.backlogDir, creates that folder and runs `backlog init` in it unless it already has a backlog.\n\nSafe to re-run; `agent project create` runs it."
     )]
     Setup { project: Option<String> },
+    /// Tailor the project's flake to its repository again.
+    #[command(
+        after_help = "Starts a coding agent in the repository with agent-sandbox's docs/setup-agent.md, told that the flake may already be tailored, so it updates the flake for repository changes rather than starting over. --edit opens flake.nix in $VISUAL or $EDITOR instead. A running VM uses the changed flake after a restart."
+    )]
+    Tailor {
+        project: Option<String>,
+        /// The coding agent to run (default: $CLI_TOOLBOX_AGENT or claude).
+        #[arg(long, value_name = "KIND", conflicts_with = "edit")]
+        ai: Option<String>,
+        /// Edit flake.nix in $VISUAL or $EDITOR instead.
+        #[arg(long)]
+        edit: bool,
+    },
+    /// Update the inputs of the project's flake, such as agent-sandbox.
+    #[command(
+        after_help = "Runs `nix flake update` in the project directory and lets git track flake.lock when the sandbox directory is a repository. A running VM uses the update after a restart."
+    )]
+    Update { project: Option<String> },
     /// Start the project's VM and open its worktrees in herdr.
     Start {
         project: Option<String>,
@@ -300,6 +318,27 @@ fn run_project(
             finish(&steps, stderr)?;
             writeln!(stdout, "{}", project.dir.display())?;
             Ok(())
+        }
+        ProjectCommands::Tailor { project, ai, edit } => {
+            let project = resolve(&root, project)?;
+            if edit {
+                project::edit_flake(&project)?;
+            } else {
+                let agent = ai
+                    .filter(|kind| !kind.is_empty())
+                    .or_else(default_agent)
+                    .unwrap_or_else(|| "claude".into());
+                project::run_setup_agent(&project, None, &agent, stderr)?;
+            }
+            writeln!(
+                stderr,
+                "A running VM uses the changed flake after `cli-toolbox agent project restart {}`.",
+                project.name
+            )?;
+            Ok(())
+        }
+        ProjectCommands::Update { project } => {
+            finish(&vm::update_flake(&resolve(&root, project)?)?, stderr)
         }
         ProjectCommands::Setup { project } => finish(&vm::setup(&resolve(&root, project)?), stderr),
         ProjectCommands::Start { project, boot } => {

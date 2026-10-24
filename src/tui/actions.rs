@@ -284,7 +284,7 @@ impl Context {
                     }
                 };
                 Ok(Done::body(format!(
-                    "{done}\n\nNext, open the project and press u to start the VM. The first start builds the guest, which takes a while; `nix build` in the project directory does it ahead of time."
+                    "{done}\n\nNext, open the project, add a worktree with a, and press u to start the VM. The first start builds the guest, which takes a while; `nix build` in the project directory does it ahead of time. A running VM uses a changed flake after a restart (r)."
                 )))
             }
             Action::StartProject(name) => {
@@ -301,6 +301,11 @@ impl Context {
                 let project = load_project(name)?;
                 let steps = vm::restart(&project, &vm_options(), &mut std::io::stderr())?;
                 Ok(steps_done(format!("VM of {name}"), &steps))
+            }
+            Action::UpdateProjectFlake(name) => {
+                // Nix streams its progress to the released terminal.
+                let steps = vm::update_flake(&load_project(name)?)?;
+                Ok(steps_done(format!("Flake of {name}"), &steps))
             }
             Action::PruneProject(name, options) => {
                 let report = prune::prune(&load_project(name)?, options)?;
