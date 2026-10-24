@@ -108,10 +108,10 @@ choice into the TUI's start action (`src/tui/actions.rs`) if it is useful there.
   agents in new workspaces, so this should not happen. Confirm the error text
   and turn it into a skipped step if it still does.
 - **Which workspaces are ours:** matching by label alone could close a
-  workspace the user named after a removed worktree. Safer options: only close
-  workspaces whose label has the `<repo>-agent-wt` prefix, or whose panes'
-  cwd is under `/workspace/<label>`. The prefix check is simpler; choose
-  one before implementing.
+  workspace the user named after a removed worktree. Project worktrees can
+  have any name now, so a `<repo>-agent-wt` prefix check no longer tells them
+  apart: only close workspaces whose panes' cwd is under
+  `/workspace/<label>`.
 - **Renamed workspaces:** if the user renames a workspace in herdr, the label
   no longer matches and a duplicate is created. Matching on the root pane's
   cwd (`/workspace/<worktree>`) as a fallback would cover that.

@@ -1,37 +1,40 @@
-# Agent worktrees and sandboxed agents
+# Git worktrees and sandboxed agents
 
 For the `agents` command that manages project MCP servers and skills, see
 [Project MCP and skills](agent-tools.md).
 
-## `agent worktree`
+## Git worktrees
 
-Manage git worktrees for AI agents. Running the command without a subcommand prints
-help. The older `git agent-worktree …` commands still work as a hidden alias.
+`git worktree` manages the ordinary git worktrees of a repository, with project
+init, Herdr and optionally an agent. Running the command without a subcommand
+prints help. Sandbox projects have worktrees of their own, made with
+`agent project add` (see [Sandbox projects](#sandbox-projects)); `git worktree`
+leaves those, and the review checkouts of sandbox projects, alone.
 
-Worktrees live in one place, grouped by repository, so they are easy to find and to
-run in [agent-sandbox](https://github.com/vvartiainen/agent-sandbox-setup):
+New worktrees live in one place, grouped by repository:
 
 ```text
-~/.agent-sandbox/worktrees/<repo>/<repo>-agent-wt
-~/.agent-sandbox/worktrees/<repo>/<repo>-agent-wt-2
+~/.worktrees/<repo>/<name>
 ```
 
 `<repo>` is the name of the main checkout, so the commands work the same from the
-repository and from any of its worktrees. Set `CLI_TOOLBOX_WORKTREES_DIR` to use
-another directory. Worktrees made by older versions next to the repository are still
-listed and cleaned up.
+repository and from any of its worktrees. Set `CLI_TOOLBOX_GIT_WORKTREES_DIR` to
+use another directory. Worktrees made elsewhere, for example with plain
+`git worktree add`, are listed and removed too.
 
-### `agent worktree create`
+### `git worktree create NAME`
 
-Create a new worktree and branch, set it up, then print the worktree path.
+Create a worktree on the branch `NAME`, set it up, then print the worktree path.
 
 ```sh
-cd "$(cli-toolbox agent worktree create)"
+cd "$(cli-toolbox git worktree create feature/login)"
 ```
 
-In `/path/to/cli-toolbox`, the first call creates
-`~/.agent-sandbox/worktrees/cli-toolbox/cli-toolbox-agent-wt` on branch
-`cli-toolbox-agent-wt`. Later calls allocate the next free numbered name.
+In `/path/to/cli-toolbox`, this creates `~/.worktrees/cli-toolbox/feature-login`
+on the branch `feature/login`. The folder is the name with `/` replaced by `-`, and
+any other character outside letters, digits, `.`, `_` and `-` too. An existing
+local branch is checked out; otherwise the branch is created from the current
+commit. The command refuses when the folder already exists.
 
 The new worktree is then made ready to work in:
 
@@ -60,8 +63,8 @@ prompt with `--prompt TEXT`. The agent then starts in the new Herdr workspace an
 the prompt:
 
 ```sh
-cli-toolbox agent worktree create --agent codex --prompt "Fix the flaky login test"
-cli-toolbox agent worktree create --agent claude --prompt - < task.md
+cli-toolbox git worktree create fix-login --agent codex --prompt "Fix the flaky login test"
+cli-toolbox git worktree create docs --agent claude --prompt - < task.md
 ```
 
 `KIND` is any kind `herdr agent start` supports, such as `claude`, `codex` or `pi`.
@@ -70,40 +73,44 @@ reads the prompt from stdin. Short one-line prompts go to Claude Code and Codex 
 their initial prompt argument, so they still run after a startup question such as
 folder trust. Other prompts are sent with `herdr agent prompt` once the agent is ready.
 
-### `agent worktree list`
+### `git worktree list`
 
-List agent worktrees for the current directory.
+List the git worktrees of the current repository, without the main checkout.
 
 ```sh
-cli-toolbox agent worktree list
+cli-toolbox git worktree list
 ```
 
-### `agent worktree cleanup`
+### `git worktree remove`
 
-Remove an agent worktree and its branch. Pass a worktree name or path to remove one
-of several, omit the name when only one exists, or use `--all` to remove every agent
-worktree for this directory. The repository's directory under the worktrees root is
-removed once it is empty.
+Remove a worktree and its branch. Pass the worktree's folder, branch or path to
+remove one of several, omit it when only one exists, or use `--all` to remove every
+git worktree of the repository. `--keep-branch` keeps the branch. The repository's
+folder under `~/.worktrees` is removed once it is empty.
 
 If a Herdr workspace has the worktree open, it is closed once the removal succeeds.
 Git refuses to remove a worktree with uncommitted changes, and the workspace then
 stays open. Use `--no-herdr` to leave Herdr alone.
 
 ```sh
-cli-toolbox agent worktree cleanup
-cli-toolbox agent worktree cleanup cli-toolbox-agent-wt-2
-cli-toolbox agent worktree cleanup --all
+cli-toolbox git worktree remove
+cli-toolbox git worktree remove feature/login --keep-branch
+cli-toolbox git worktree remove --all
 ```
+
+`agent worktree` and the hidden `git agent-worktree` alias are gone: use
+`git worktree` for these, and `agent project add` for an agent in a sandbox.
 
 ## Sandbox projects
 
 A sandbox project runs one
 [agent-sandbox](https://github.com/vvartiainen/agent-sandbox-setup) microVM for a
-repository, and that VM mounts every agent worktree of the repository at
+repository, and that VM mounts every project worktree of the repository at
 `/workspace/<worktree>`. herdr runs in the VM, and your herdr adds it as the machine
 `agent-<project>`, with a guest workspace per worktree, so the host herdr is the
-control plane for every agent. The agents' commits come back as the worktrees'
-branches, which you review and merge yourself.
+control plane for every agent. The agents' commits come back as
+`agent-review/<worktree>/*` snapshot branches, which you review and accept
+yourself; the worktrees' own host branches stay where they were.
 
 Projects live centrally, out of the agents' reach, where cli-toolbox discovers them:
 
@@ -114,33 +121,43 @@ Projects live centrally, out of the agents' reach, where cli-toolbox discovers t
     worktrees.nix    # written by cli-toolbox: worktree name -> path
     project.json     # the repository's main checkout
     agents.json      # written by cli-toolbox: worktree name -> agent and first prompt
-  state/<project>/   # home.img (/home/agent), logs
-  worktrees/<repo>/<repo>-agent-wt[-N]
+  state/<project>/   # home.img (/home/agent), logs, reviews/ (review checkouts)
+  worktrees/<repo>/<worktree>
 ```
 
-Set `CLI_TOOLBOX_SANDBOX_DIR` to use another directory than `~/.agent-sandbox`.
-The VM is always started from the project directory, which is how agent-sandbox
-identifies it.
+A project's worktrees are the repository's git worktrees in
+`worktrees/<repo>/`, whatever their name; `CLI_TOOLBOX_WORKTREES_DIR` moves that
+folder. Set `CLI_TOOLBOX_SANDBOX_DIR` to use another directory than
+`~/.agent-sandbox`. The VM is always started from the project directory, which is
+how agent-sandbox identifies it.
+
+The workflow is create, add, start, review, accept, done, prune:
 
 ```sh
-cli-toolbox agent project create --ai             # in the repository, once
-cli-toolbox agent project start --agent claude    # VM + herdr workspace per worktree
-cli-toolbox agent project add --restart --agent codex --prompt "Add a --json flag"
+cli-toolbox agent project create --ai             # in the repository, once; no worktree yet
+cli-toolbox agent project add --name feature/login --agent claude --prompt "Add OAuth login"
+cli-toolbox agent project start                   # VM + herdr workspace per worktree
 cli-toolbox agent project review                  # fetch agent work and open lazygit
-cli-toolbox agent project done cli-toolbox-agent-wt-2
+# accept: cherry-pick or merge the snapshot into main, see "Accepting work"
+cli-toolbox agent project done feature-login      # save snapshots, remove, prune what is accepted
+cli-toolbox agent project prune                   # clean up the remaining accepted snapshots
 ```
 
 | Command | What it does |
 | --- | --- |
 | `agent project list` | Projects with VM state and SSH port, and their worktrees. |
-| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes your SSH public key and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Adds a cli-toolbox defaults module (see [Shared setup](#shared-setup)). Then creates the first agent worktree (with `--agent`/`--prompt` for its agent; see [Agents per worktree](#agents-per-worktree)) and runs `agent project setup`. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
+| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes your SSH public key and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Adds a cli-toolbox defaults module (see [Shared setup](#shared-setup)). Then runs `agent project setup` (`--no-proxy` and `--no-backlog` leave those out). The project has no worktree yet: add one with `agent project add`. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
+| `agent project tailor [project]` | Tailors an existing project's flake again: a coding agent (`--ai [KIND]`, default `CLI_TOOLBOX_AGENT` or claude) with agent-sandbox's `docs/setup-agent.md`, told that the flake may already be tailored so it updates it for repository changes rather than starting over, or the editor with `--edit`. A running VM uses the change after a restart. |
+| `agent project update [project]` | Runs `nix flake update` in the project directory, updating inputs such as agent-sandbox, and lets git track `flake.lock`. A running VM uses the update after a restart. |
 | `agent project setup [project]` | Sets up the host side of the flake's proxy credentials and backlog; see [Shared setup](#shared-setup). Safe to re-run. |
 | `agent project start [project]` | Writes `worktrees.nix`, runs the flake's `start` app (detached; waits for guest SSH), runs `herdr-add` and opens a herdr workspace at `/workspace/<worktree>` for every worktree, starting the worktree's own agent (see [Agents per worktree](#agents-per-worktree)), or else `--agent KIND` or `CLI_TOOLBOX_AGENT`, in each. |
 | `agent project stop\|restart [project]` | Stops or restarts the VM. Stopping signals the runner like `agent vm stop`, so it works without a worktree to mount (after the last `done`), and removes the VM's machine from the host herdr. Before shutdown it stops that machine's guest Herdr session and deletes it (for the guest's `default` session, which Herdr cannot delete, it removes its saved `session.json`), discarding the old terminal layout so the next start opens fresh workspaces instead of offering to resume obsolete sessions. Worktrees, guest home files and agent conversation history stay. If session cleanup fails (for example, SSH is unavailable), the failure is reported and shutdown still proceeds; the machine profile is kept so cleanup can be retried while the VM is running. A restart mounts worktrees added or removed since the start. `--all` stops or restarts the VM of every project whose VM is running, one after another; a project that fails does not stop the others. |
-| `agent project add [project]` | Creates the next agent worktree of the project's repository and prints its path. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). `--agent KIND` and `--prompt TEXT` choose its agent and first prompt; see [Agents per worktree](#agents-per-worktree). |
+| `agent project add [project]` | Creates a worktree of the project's repository and prints its path: `--name NAME` is its branch (an existing local branch is checked out, otherwise it is created), and its folder, `/workspace/<folder>` mount and herdr label are the name with `/` replaced by `-`. Without `--name`, the next free `<repo>-agent-wt-N`. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). `--agent KIND` and `--prompt TEXT` choose its agent and first prompt; the agent must be one the project's flake enables. See [Agents per worktree](#agents-per-worktree). |
 | `agent project sync [project]` | Publishes committed agent work as ordinary host snapshot branches under `agent-review/<worktree>/…`, ready to open in Git tools or a separate review worktree. Unchanged tips reuse snapshots; existing branches and agent files stay untouched. Normal host branches are sent to guest review refs separately. `--worktree NAME` selects one; `--all` syncs every running project. See [History exchange](#history-exchange). |
 | `agent project review [project]` | Fetches the selected agent's snapshot, prepares a separate host review worktree, and opens lazygit directly in its commits view. No manual Git commands or checkouts. `--worktree NAME` selects an agent; otherwise a picker handles multiple choices. When the VM/worktree is unavailable, offers saved snapshots. Requires host `lazygit` and a terminal. See [Review in lazygit](#review-in-lazygit). |
-| `agent project done [worktree]` | Preserves committed guest work as host snapshot branches, checks the guest's own index, then removes the agent worktree. Review branches remain; integration into the stale host counterpart is not required. Dirty/detached guest work, failed snapshots, or an unavailable persistent VM block cleanup. `--force` bypasses these safeguards. The VM stops when its last worktree is done. |
+| `agent project done [worktree]` | Preserves committed guest work as host snapshot branches, checks the guest's own index, then removes the worktree. Review branches remain; integration into the stale host counterpart is not required. Dirty/detached guest work, failed snapshots, or an unavailable persistent VM block cleanup. `--force` bypasses these safeguards. The worktree's host branch is deleted when all its commits are already on the integration branch, and kept with the reason otherwise ("branch kept: 2 commits not on main"); `--keep-branch` always keeps it. Then it prunes the worktree's accepted snapshots (see [Cleanup](#cleanup)); a failed prune is reported but does not fail `done`. The VM stops when its last worktree is done. |
+| `agent project remove [worktree]` | Removes a worktree without saving its work, also with the VM stopped: force-removes it, deletes its branch (`--keep-branch` keeps it) and rewrites `worktrees.nix`. Uncommitted changes and guest commits that no sync or `done` saved are lost; saved snapshots stay. A running VM mounts it until its next restart. |
+| `agent project prune [project]` | Deletes review snapshots whose work is on the integration branch, their review checkouts, and the stale fetch refs of removed worktrees; keeps and reports the rest. `--worktree NAME`, `--into BRANCH`, `--superseded`, `--all`, `--force`, `--dry-run`. See [Cleanup](#cleanup). |
 
 `[project]` defaults to the project of the current repository, then to the only
 project. VM state comes from agent-sandbox's `runner.json` files under
@@ -243,8 +260,8 @@ with any other branch; sync itself never merges or rebases.
   also get snapshots; duplicate tips and history already contained in the primary
   snapshot do not create extra branches.
 - Snapshot branches are local to the host repository, not pushed upstream.
-  They survive `done` and are retained until you explicitly delete them.
-  No branches or tags are automatically pruned.
+  They survive `done` and stay until their work is on your integration branch,
+  when `done` and `prune` delete them (see [Cleanup](#cleanup)).
 - Existing host/guest branches, indexes and working files remain unchanged.
   Snapshots contain **committed** work only; ask the agent to commit before sync
   when you need its latest file edits.
@@ -285,6 +302,16 @@ removed. Failed snapshots, dirty/detached guest work, or a stopped persistent VM
 block normal cleanup. Use `--force` only when deliberately discarding those
 safeguards.
 
+`done` deletes the worktree's host branch when all its commits are already on
+the integration branch, which they usually are, since the agent's commits come
+back as snapshots instead. Otherwise it keeps the branch and says why, such as
+"branch kept: 2 commits not on main". `--keep-branch` always keeps it. It then
+prunes that worktree's accepted snapshots.
+
+To drop a worktree without saving its work, for example an experiment, use
+`agent project remove` (`d` in the TUI). It works with the VM stopped, and its
+saved snapshots stay, so `v` still opens them.
+
 #### Trying a new CLI build
 
 On the host, cherry-pick the implementation commit, then run:
@@ -310,24 +337,89 @@ cleanup preservation, and export failures. Review launch tests use an injected
 viewer; lazygit is not installed in the guest. The live host-to-VM SSH path and
 real lazygit UI still need a host test; a sandbox test is not a substitute.
 
+### Accepting work
+
+Accept an agent's work from your **main checkout**, not from the review
+checkout: Git does not check out `main` in two places. In lazygit in your main
+checkout:
+
+1. In Branches, select the snapshot `agent-review/<worktree>/…` and press Enter
+   to see its commits.
+2. Select the commits to take, the whole chain for all of it, and press `C` to
+   copy them.
+3. Go back to `main` and press `V` to cherry-pick them there.
+
+To see which of a snapshot's commits are actually new to `main`, ask git cherry:
+`+` lines are new, `-` lines are already applied, also when cherry-picked:
+
+```sh
+git cherry -v main agent-review/<worktree>/<snapshot>
+```
+
+Merging the snapshot branch works as well.
+
+### Sending accepted work back
+
+After accepting, run `sync` (`s` in the TUI). It sends your branches, `main`
+included, to the agent as `host-review/<source>/main`. Ask the agent to rebase
+onto it, so the commits you already took drop out of its branch and its next
+snapshot holds only new work.
+
+### Cleanup
+
+Sync, review and `done` only ever add snapshot branches and review checkouts.
+`agent project prune` (`p` in the TUI) cleans them up once their work is on the
+integration branch: `main` when it exists, else the main checkout's branch, or
+`--into BRANCH`.
+
+| Item | Deleted when | Kept, and reported, when |
+| --- | --- | --- |
+| Snapshot `agent-review/<worktree>/*` | `git cherry <into> <snapshot>` shows no new commit: cherry-picked or merged work counts | Any commit is not on the integration branch; the report gives the count and the first subject. `--all` deletes it anyway. |
+| Superseded snapshot: an older snapshot of a removed worktree whose newest snapshot is accepted | `--superseded` | By default, because an older tip can hold a commit the agent later dropped when it rebased or amended. The newest snapshot stays with them, since it is what marks them superseded. |
+| Review checkout in `state/<project>/reviews/` | Its snapshot is deleted, or gone | It has local edits or commits; `--force` removes it anyway. |
+| Fetch ref `refs/remotes/sandbox-review/<source>/*` of a removed worktree, left behind because sync never prunes | Its tip is on the integration branch or in a kept snapshot | Neither; `--all` deletes it anyway. |
+
+```sh
+cli-toolbox agent project prune --dry-run     # what would go and what stays, and why
+cli-toolbox agent project prune               # accepted snapshots and their checkouts
+cli-toolbox agent project prune --superseded  # also superseded snapshots
+cli-toolbox agent project prune --all --force # everything, also unaccepted work
+```
+
+In a terminal, `prune` shows what it would delete and asks first; `--yes` skips
+the question, and without a terminal `--all` and `--force` need it. In the TUI,
+`p` shows the dry run, then `p` deletes the accepted snapshots, `s` also the
+superseded ones, and `F` force-deletes everything listed. `done` runs `prune` for
+its worktree with the safe defaults and prints what it kept.
+
+A snapshot whose changes reached `main` in a different form, for example
+rebased onto other changes, is not accepted by `git cherry`. Check it with
+`git range-diff` or the review, then delete it with `--all` (`F`).
+
+A later worktree with the same name in the same project shares the snapshot
+namespace, so `v` lists the old worktree's saved snapshots next to the new ones.
+Prune keeps that list short.
+
 ### Agents per worktree
 
-Each worktree can run its own agent. `agent project add` and `agent project create`
-take `--agent KIND` and `--prompt TEXT` for the new worktree, just like
-[`agent worktree create`](#agent-worktree-create). The worktree is not mounted until
+Each worktree can run its own agent. `agent project add` takes `--agent KIND`
+and `--prompt TEXT` for the new worktree, just like
+[`git worktree create`](#git-worktree-create-name). The agent must be one the
+project's flake enables (`ai.<kind>.enable = true`, such as `claude` and
+`codex`); the TUI only offers those. The worktree is not mounted until
 the VM starts or restarts, so cli-toolbox saves the choice in the project's
 `agents.json`, next to the flake and out of the agents' reach. When the VM next opens
 the worktree in herdr, it starts that agent and sends the prompt:
 
 ```sh
-cli-toolbox agent project add --agent codex --prompt "Add a --json flag to list"
+cli-toolbox agent project add --name json-flag --agent codex --prompt "Add a --json flag to list"
 cli-toolbox agent project restart       # codex starts in the new worktree with the prompt
 ```
 
 The prompt is sent only once. Later restarts start the same agent without it, and
-worktrees without an agent of their own get `--agent` or `CLI_TOOLBOX_AGENT`. A
-worktree's entry is dropped once the worktree is gone, so a later worktree that
-reuses the name starts clean.
+worktrees without an agent of their own get `--agent` or `CLI_TOOLBOX_AGENT`, when
+the project enables it. A worktree's entry is dropped once the worktree is gone, so
+a later worktree that reuses the name starts clean.
 
 ### Shared setup
 
@@ -356,7 +448,8 @@ at the top of the flake's `environment`:
   unless it already has a backlog.
 
 Run it again after fixing a failed step, or for a project whose flake you added
-these settings to by hand.
+these settings to by hand. After changing the flake, `agent project tailor` tailors it again
+and `agent project update` updates its inputs.
 
 ### Running VMs
 

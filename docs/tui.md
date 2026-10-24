@@ -5,8 +5,8 @@ cli-toolbox tui
 ```
 
 Select AWS profiles and Azure subscriptions, switch Kitty sessions, connect to SSH hosts, create, inspect,
-enter, and remove agent worktrees, run sandbox project VMs, or stop any running
-sandbox VM. Worktree operations use
+enter, and remove git worktrees, run sandbox project VMs, or stop any running
+sandbox VM. Git worktree operations use
 the directory from which you launched the toolbox.
 
 The launcher opens in a compact panel below your prompt instead of taking over the
@@ -16,61 +16,73 @@ login temporarily take over the terminal; the launcher resumes when they finish.
 
 ## Keys
 
-Actions are grouped into tabs: **AWS** (`a`), **Azure** (`z`, subscriptions and account login/logout), **Agents** (`i`, agent worktrees),
+Actions are grouped into tabs: **AWS** (`a`), **Azure** (`z`, subscriptions and account login/logout), **Git** (`g`, git worktrees),
 **Sandbox** (`s`, sandbox projects and running VMs) and **Terminal** (`t`, Kitty sessions and SSH).
 
 | Key | Action |
 | --- | --- |
-| `a` / `i` / `s` / `t` | Switch to a tab |
+| `a` / `z` / `g` / `s` / `t` | Switch to a tab |
 | `[` / `]`, Left/Right, Tab, `h`/`l` | Previous / next tab |
-| `1`–`9` | Run that action directly, e.g. `i` `1` |
+| `1`–`9` | Run that action directly, e.g. `g` `1` |
 | Up/Down, `j`/`k`, Ctrl-P/Ctrl-N | Move |
 | PageUp/PageDown, Home/End | Page, first, last |
 | `/` | Search actions across all tabs |
-| `?` (F1 in lists) | Show every key of the current screen |
+| `?` (F1 in lists and forms) | Show every key of the current screen |
 | `q`, Esc | Exit (Ctrl-C exits at any point) |
 
 In resource lists (profiles, hosts, sessions, worktrees), type to filter. Backspace
 edits the query and Ctrl-U clears it. F5 refreshes the list and Esc goes back.
 
-## Agents › Worktrees
+## Git › Worktrees
 
-Manages the agent worktrees of the current directory (see [agents.md](agents.md)):
+Manages the git worktrees of the current directory, the ones in
+`~/.worktrees/<repo>/` and any others you made, but not sandbox project worktrees or
+review checkouts (see [agents.md](agents.md#git-worktrees)):
 
 - Enter opens a worktree's details. There, Enter (or `c`) shows the `cd` command and
   `d` removes the worktree.
-- Ctrl-A creates a new worktree, initializes it and opens it in Herdr. Init output
-  streams to the terminal while it runs. With Herdr installed, it first asks which
-  agent to start there and its first prompt (see [New worktree](#new-worktree)).
-  Ctrl-D removes the selected worktree and closes its Herdr workspace.
-- Removal asks for confirmation: `y` removes and `n` or Esc cancels. Tab or
-  Left/Right with Enter also works.
+- Ctrl-A asks for the new worktree's name, and with Herdr for its agent and
+  first prompt (see [New worktree](#new-worktree)). It then creates the worktree,
+  initializes it and opens it in Herdr. Init output streams to the terminal while
+  it runs.
+- Ctrl-D removes the selected worktree and its branch, and closes its Herdr
+  workspace, after a [confirmation](#confirmations).
 
 ## Sandbox › Projects
 
 Lists the sandbox projects in `~/.agent-sandbox/projects/` with their VM state and
-worktree count (see [agents.md](agents.md#sandbox-projects)):
+worktree count (see [agents.md](agents.md#sandbox-projects)). The Ctrl keys act on
+the highlighted project:
 
-- Ctrl-A creates a project for the launch directory's repository, with its first
-  worktree (`agent project create`). It then asks how to tailor `flake.nix` to the
-  repository before the first start: `a` runs a coding agent with agent-sandbox's
-  setup instructions (`CLI_TOOLBOX_AGENT`, default claude; like `--ai`), `e` opens
-  it in `$VISUAL` or `$EDITOR` (default vi), and `s` skips. Either way the
-  project's details open next, ready for `u`. The VM does not start by itself.
-- Enter opens a project: its repository, VM state and worktrees. There, `u` starts
-  the VM and opens every worktree in herdr, `x` stops it, `r` restarts it to mount
-  worktree changes, `p` sets up its agent-proxy credentials and backlog
-  (`agent project setup`), `s` publishes ordinary host review snapshot branches
-  without disturbing the agent, **`v` reviews the selected agent in lazygit** in
-  a separate host checkout (or picks a saved snapshot when stopped/removed), and
-  `a` adds a worktree,
-  asking for its agent and first prompt (see [New worktree](#new-worktree)). Up/Down
-  select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
-  `agent project done` on it. Worktrees without an agent of their own get
-  `CLI_TOOLBOX_AGENT`.
-- Ctrl-S syncs, Ctrl-R restarts and Ctrl-X stops every project whose VM is
-  running (`agent project sync|restart|stop --all`). A failing project does not
-  stop the others.
+- Ctrl-A creates a project for the launch directory's repository (see
+  [New project](#new-project)). It has no worktree yet. Next it asks how to tailor
+  `flake.nix` to the repository before the first start: `a` runs a coding agent
+  with agent-sandbox's setup instructions (`CLI_TOOLBOX_AGENT`, default claude;
+  like `--ai`), `e` opens it in `$VISUAL` or `$EDITOR` (default vi), and `s` skips.
+  Either way the project's details open next, ready for `a` to add a worktree. The
+  VM does not start by itself.
+- Ctrl-S syncs the project, Ctrl-R restarts its VM and Ctrl-X stops it. Restart
+  and stop ask first while the VM runs.
+- Enter opens a project: its repository, VM state and worktrees. Up/Down select a
+  worktree. The keys there:
+
+| Key | Action |
+| --- | --- |
+| `a` | Add a worktree, asking for its name, agent and first prompt ([New worktree](#new-worktree)) |
+| `u` | Start the VM and open every worktree in herdr |
+| `x` / `r` | Stop / restart the VM, after a [confirmation](#confirmations) |
+| `s` | Publish the agents' committed work as host review snapshot branches |
+| `v` | Review the selected agent in lazygit in a separate host checkout (or pick a saved snapshot when the VM is stopped or the worktree removed) |
+| Enter, `c` | Show the selected worktree's `cd` command |
+| `D` | `agent project done`: save its work as snapshots, remove it, delete its branch when accepted |
+| `d` | Remove the selected worktree without saving its work; asks whether to keep its branch |
+| `p` | Prune review snapshots whose work is on the integration branch; shows a dry run first |
+| `t` | Tailor `flake.nix` again with a coding agent (`a`) or the editor (`e`); Esc goes back |
+| `f` | Update the flake's inputs (`nix flake update`) |
+
+Worktrees without an agent of their own get `CLI_TOOLBOX_AGENT` when the project
+enables it. The project's proxy and backlog setup is not a key; run
+`agent project setup` after fixing a failed step.
 
 ## Sandbox › VMs
 
@@ -79,26 +91,69 @@ directory, including VMs whose project directory was removed, which are marked
 `(directory gone)` (see [agents.md](agents.md#running-vms)):
 
 - Enter or Ctrl-X stops the selected VM and removes its herdr machine
-  (`agent vm stop`).
+  (`agent vm stop`), after a [confirmation](#confirmations).
 - Ctrl-D removes the runtime directories of stopped VMs whose start directory is
   gone (`agent vm prune`).
 
 ## New worktree
 
-When Herdr is installed, creating a worktree (Ctrl-A in Agents › Worktrees, `a` in a
-sandbox project) first opens a short form:
+Creating a worktree (Ctrl-A in Git › Worktrees, `a` in a sandbox project) opens a
+short form:
 
-- Left/Right (also Up/Down, Tab) choose the agent from the kinds Herdr supports,
-  or none. It starts as `CLI_TOOLBOX_AGENT`, or none if that is not set.
-- Typing writes the agent's first prompt, which is optional. Backspace, Ctrl-W and
-  Ctrl-U delete a character, a word or everything. `?` is part of the prompt here;
-  F1 shows the keys.
-- Enter creates the worktree and Esc goes back.
+- **Name**: the branch, such as `feature/login`. The folder is the name with `/`
+  replaced by `-` (`feature-login`), shown next to it when they differ. For a git
+  worktree it starts empty; for a sandbox project it suggests the next
+  `<repo>-agent-wt-N`. An existing branch is checked out, otherwise it is created.
+- **Agent** (with Herdr): Left/Right choose the agent, or none. A git worktree
+  offers the kinds Herdr supports; a sandbox project only offers the agents its
+  `flake.nix` enables (`ai.<kind>.enable = true`). It starts as
+  `CLI_TOOLBOX_AGENT` when that is on offer, or none.
+- **Prompt** (with Herdr): the agent's first prompt, which is optional.
 
-A local worktree starts the agent in its Herdr workspace right away, like
-`agent worktree create --agent KIND --prompt TEXT`. A sandbox project's worktree
+Tab and Up/Down switch between the name and the prompt. Backspace, Ctrl-W and
+Ctrl-U delete a character, a word or everything of the field. `?` is text here; F1
+shows the keys. Enter creates the worktree once it has a name, and Esc goes back.
+
+A git worktree starts the agent in its Herdr workspace right away, like
+`git worktree create NAME --agent KIND --prompt TEXT`. A sandbox project's worktree
 starts it when the VM opens the worktree: press `u` to start a stopped VM or `r` to
 restart a running one (see [agents.md](agents.md#agents-per-worktree)).
+
+## New project
+
+Ctrl-A in Sandbox › Projects opens the project form for the launch directory's
+repository:
+
+- **Name**: the project and guest host name `agent-<name>`, from the checkout
+  folder.
+- **Template**: `nodejs`, `rust` or `go`, from the repository's files.
+- **Proxy**: agent credentials from agent-proxy on the host.
+- **Backlog**: a Backlog.md folder for the agents; on when there is a backlog
+  root.
+
+Tab and Up/Down move between the fields; Left/Right or Space change the template or
+turn a switch on or off. Enter creates the project, like `agent project create`
+with `--name`, `--template`, `--no-proxy` and `--no-backlog`, and Esc goes back.
+
+## Confirmations
+
+Actions that are hard to undo ask first, and name what they affect:
+
+- Stopping or restarting a VM (`x`, `r`, Ctrl-X, Ctrl-R, and Enter in the VM
+  list) lists the VM: its name, SSH port, project folder and worktree count.
+  Restart is included because it also ends the VM's agent sessions.
+- Removing a git worktree shows its path and branch.
+- Removing a project worktree with `d` warns that uncommitted changes and unsynced
+  guest commits are lost, and that its saved snapshots stay until prune. `k`
+  keeps the branch and `d` deletes it.
+- Pruning with `p` shows the dry run: what would be deleted and what kept, and
+  why. `p` deletes the accepted snapshots and their review checkouts; `s` also the
+  superseded ones; `F` force-deletes everything listed, also unaccepted snapshots
+  and review checkouts with edits, whose work is then lost.
+
+A choice's key runs it right away. Tab or Left/Right with Enter also picks one;
+Cancel is selected first, so Enter alone does nothing. `n` or Esc cancels.
+Up/Down scroll a long report.
 
 ## Applying exports and directory changes
 

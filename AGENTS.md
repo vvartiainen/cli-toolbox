@@ -29,8 +29,10 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 - `src/lib.rs`: library root exposing `run()`
 - `src/cli/`: clap command adapters for each top-level CLI area
 - `src/aws`, `src/azure`, `src/git`, `src/herdr`, `src/kitty`, `src/project`, `src/sandbox`, `src/ssh`: domain logic and integrations; keep non-trivial behavior here rather than in the command modules
-- `src/agent`: agent worktree workflows that combine git, project init and Herdr; shared by the CLI and the TUI
-  - `src/agent/vm.rs`: sandbox projects (one agent-sandbox VM per project mounting its worktrees, + herdr machine): create, add, start, stop, restart, sync, done, list
+- `src/agent`: git and project worktree workflows that combine git, project init and Herdr; shared by the CLI and the TUI
+  - `src/agent/vm.rs`: sandbox projects (one agent-sandbox VM per project mounting its worktrees, + herdr machine): create, add, remove, start, stop, restart, sync, done, update, list
+  - `src/agent/review.rs`: review snapshots and their lazygit review checkouts
+  - `src/agent/prune.rs`: cleanup of accepted review snapshots, their review checkouts and stale fetch refs
 - `src/sandbox`: agent-sandbox integration through the project flake's apps and `runner.json`; `project.rs` discovers and creates the central projects in `~/.agent-sandbox/projects` and writes their `worktrees.nix`; `setup.rs` holds the shared proxy and backlog setup
 - `src/select.rs`: shared interactive picker (`fzf` when available, ratatui otherwise)
 - `src/exec.rs`: PATH lookup and process helpers

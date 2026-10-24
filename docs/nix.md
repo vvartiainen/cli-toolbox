@@ -46,7 +46,7 @@ This package only installs the `cli-toolbox` binary itself. Runtime tools used b
 - `kitty`
 - `aws`
 - `git`
-- `herdr` and `nix` for agent worktrees and sandboxed agents
+- `herdr` and `nix` for git worktrees and sandboxed agents
 
 That matches setups where those tools are already provided via Homebrew, Home Manager, or some other package source.
 
