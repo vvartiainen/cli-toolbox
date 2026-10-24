@@ -151,7 +151,7 @@ enum ProjectCommands {
     },
     /// Save agent work as review snapshots, then remove its worktree.
     #[command(
-        after_help = "Preserves committed guest history as host review snapshot branches before removing the worktree. Checks the guest's own index for uncommitted changes; its stale host counterpart does not need updating or merging. Refuses with dirty/detached guest work, failed snapshots, or an unavailable persistent VM. --force removes anyway without these safeguards. Snapshots remain for review after removal. The VM stops when its last worktree is done."
+        after_help = "Preserves committed guest history as host review snapshot branches before removing the worktree. Checks the guest's own index for uncommitted changes; its stale host counterpart does not need updating or merging. Refuses with dirty/detached guest work, failed snapshots, or an unavailable persistent VM. --force removes anyway without these safeguards. Snapshots remain for review after removal. The VM stops when its last worktree is done.\n\nThe worktree's host branch is deleted when all of its commits are already on the integration branch (main, or else the main checkout's branch), as `git cherry` sees it; otherwise it is kept and the reason printed. --keep-branch always keeps it. Prints the branch when it is kept."
     )]
     Done {
         /// Worktree name or path; may be omitted when the project has only one.
@@ -161,6 +161,22 @@ enum ProjectCommands {
         /// Remove even if commits or changes would be lost.
         #[arg(long)]
         force: bool,
+        /// Keep the worktree's branch even when its commits are on the integration branch.
+        #[arg(long)]
+        keep_branch: bool,
+    },
+    /// Remove a worktree without saving its work first, also with the VM stopped.
+    #[command(
+        after_help = "Force-removes the worktree and deletes its branch (--keep-branch keeps it), then rewrites worktrees.nix. Uncommitted changes and guest commits that no sync or done saved are lost. Saved agent-review/<worktree>/* snapshots stay, and `agent project review` still opens them. A running VM keeps mounting the worktree until its next restart."
+    )]
+    Remove {
+        /// Worktree name, branch or path; may be omitted when the project has only one.
+        worktree: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        /// Keep the worktree's branch.
+        #[arg(long)]
+        keep_branch: bool,
     },
 }
 
@@ -322,16 +338,35 @@ fn run_project(
             worktree,
             project,
             force,
+            keep_branch,
         } => {
             let project = resolve(&root, project)?;
             let worktree = vm::select_worktree(&project, &worktree.unwrap_or_default())?;
             let options = VmOptions {
                 force,
+                keep_branch,
                 ..VmOptions::default()
             };
             let steps = vm::done(&project, &worktree, &options, stderr)?;
-            writeln!(stdout, "{}", worktree.branch)?;
+            let branch = format!("refs/heads/{}", worktree.branch);
+            if !worktree.branch.is_empty()
+                && git::resolve_commit(project.repo()?, &branch).is_some()
+            {
+                writeln!(stdout, "{}", worktree.branch)?;
+            }
             finish(&steps, stderr)
+        }
+        ProjectCommands::Remove {
+            worktree,
+            project,
+            keep_branch,
+        } => {
+            let project = resolve(&root, project)?;
+            let worktree = vm::select_worktree(&project, &worktree.unwrap_or_default())?;
+            finish(
+                &vm::remove_worktree(&project, &worktree, keep_branch, stderr)?,
+                stderr,
+            )
         }
     }
 }
@@ -408,7 +443,7 @@ fn boot_options(boot: BootArgs) -> VmOptions {
     VmOptions {
         agent: boot.agent.or_else(default_agent),
         herdr: !boot.no_herdr,
-        force: false,
+        ..VmOptions::default()
     }
 }
 

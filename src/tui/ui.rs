@@ -137,9 +137,9 @@ fn project_help(state: &ProjectState) -> &'static str {
     if state.status.worktrees.is_empty() {
         "a add · v review saved · ? help · esc back"
     } else if state.status.vm.is_some() {
-        "v review · s sync · x stop · r restart · a add · ⏎ cd · D done · ? help · esc back"
+        "v review · s sync · x stop · r restart · a add · ⏎ cd · D done · d remove · ? help"
     } else {
-        "v review saved · u start · a add · ⏎ cd · D done · ? help · esc back"
+        "v review saved · u start · a add · ⏎ cd · D done · d remove · ? help · esc back"
     }
 }
 
@@ -238,7 +238,14 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                     "show the cd command"
                 },
             ),
-            entry("D", "done: sync and remove the worktree; keep its branch"),
+            entry(
+                "D",
+                "done: save its work as snapshots and remove it (branch kept unless accepted)",
+            ),
+            entry(
+                "d",
+                "remove the worktree without saving (asks; keep or delete the branch)",
+            ),
             entry("esc", "back to the list"),
         ],
         Screen::TailorFlake(_) => vec![

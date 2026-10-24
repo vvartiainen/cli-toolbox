@@ -33,6 +33,8 @@ pub(crate) struct VmOptions {
     pub(crate) herdr: bool,
     /// `done`: remove even with unsynced commits or local changes.
     pub(crate) force: bool,
+    /// `done`: keep the worktree's branch even when its work is accepted.
+    pub(crate) keep_branch: bool,
 }
 
 /// A project with its worktrees and VM, for lists.
@@ -537,8 +539,10 @@ pub(crate) fn select_worktree(project: &Project, name: &str) -> Result<Worktree,
     Ok(selected.remove(0))
 }
 
-/// Sync a worktree, then remove it and keep its branch for review. Refuses
-/// to lose work unless forced. Stops the VM when it was the last worktree.
+/// Save a worktree's committed guest work as review snapshots, then remove
+/// it. Refuses to lose work unless forced. Its branch is deleted when its
+/// commits are already on the integration branch, and kept otherwise or with
+/// `keep_branch`. Stops the VM when it was the last worktree.
 pub(crate) fn done(
     project: &Project,
     worktree: &Worktree,
@@ -548,31 +552,97 @@ pub(crate) fn done(
     let vm = sandbox::vm_for(&running_vms(), &project.dir);
     if let Some(problem) = done_blocker(project, worktree, vm.as_ref(), options.force, stderr)? {
         return Err(Error::msg(format!(
-            "{problem}\nPass --force to remove {} anyway; its branch {} stays.",
-            worktree.name, worktree.branch
+            "{problem}\nPass --force to remove {} anyway.",
+            worktree.name
         )));
     }
-    let remove = git::RemoveOptions {
-        keep_branch: true,
-        // Uncommitted and untracked files were checked above.
-        force: true,
+    let kept = if options.keep_branch {
+        Some("--keep-branch".to_string())
+    } else {
+        unaccepted(project.repo()?, &worktree.branch)
     };
-    git::remove_worktree(project.repo()?, worktree, remove, stderr)?;
-    let mut steps = vec![Step::Done(format!(
-        "worktree: removed {}; branch {} kept for review",
-        worktree.name, worktree.branch
-    ))];
-    let remaining = write_worktrees(project)?;
+    let (mut steps, remaining) = remove(project, worktree, kept.is_some(), stderr)?;
+    if let Some(reason) = kept.filter(|_| !worktree.branch.is_empty()) {
+        steps.push(Step::Skipped(format!(
+            "branch {} kept: {reason}",
+            worktree.branch
+        )));
+    }
     if vm.is_some() {
         if remaining.is_empty() {
             steps.extend(stop(project)?);
         } else {
-            steps.push(Step::Skipped(
-                "vm: still mounts it until the next restart".into(),
-            ));
+            steps.push(still_mounted());
         }
     }
     Ok(steps)
+}
+
+/// Why `branch` must stay, if it must: commits whose changes the
+/// integration branch lacks, or no integration branch to compare with.
+fn unaccepted(repo: &Path, branch: &str) -> Option<String> {
+    if branch.is_empty() {
+        return None;
+    }
+    let into = match git::integration_branch(repo) {
+        Ok(into) => into,
+        Err(err) => return Some(err.to_string()),
+    };
+    if into == branch {
+        return Some("it is the integration branch".into());
+    }
+    match git::unapplied_commits(repo, &into, branch) {
+        Ok(commits) if commits.is_empty() => None,
+        Ok(commits) => Some(format!(
+            "{} commit{} not on {into}",
+            commits.len(),
+            if commits.len() == 1 { "" } else { "s" }
+        )),
+        Err(err) => Some(format!("compare with {into}: {err}")),
+    }
+}
+
+/// Remove the project's worktree without saving its work first: uncommitted
+/// changes and guest commits that no sync saved are lost. Saved review
+/// snapshots stay. Its branch is deleted unless `keep_branch`. Works with the
+/// VM stopped; a running VM mounts it until its next restart.
+pub(crate) fn remove_worktree(
+    project: &Project,
+    worktree: &Worktree,
+    keep_branch: bool,
+    stderr: &mut dyn Write,
+) -> Result<Vec<Step>, Error> {
+    let (mut steps, _) = remove(project, worktree, keep_branch, stderr)?;
+    if sandbox::vm_for(&running_vms(), &project.dir).is_some() {
+        steps.push(still_mounted());
+    }
+    Ok(steps)
+}
+
+/// Force-remove the worktree and rewrite `worktrees.nix`. Returns the steps
+/// and the worktrees left.
+fn remove(
+    project: &Project,
+    worktree: &Worktree,
+    keep_branch: bool,
+    stderr: &mut dyn Write,
+) -> Result<(Vec<Step>, Vec<Worktree>), Error> {
+    let options = git::RemoveOptions {
+        keep_branch,
+        force: true,
+    };
+    git::remove_worktree(project.repo()?, worktree, options, stderr)?;
+    let removed = match (keep_branch, worktree.branch.as_str()) {
+        (_, "") => format!("worktree: removed {}", worktree.name),
+        (true, branch) => format!("worktree: removed {}; branch {branch} kept", worktree.name),
+        (false, branch) => format!("worktree: removed {} and branch {branch}", worktree.name),
+    };
+    let remaining = write_worktrees(project)?;
+    Ok((vec![Step::Done(removed)], remaining))
+}
+
+fn still_mounted() -> Step {
+    Step::Skipped("vm: still mounts it until the next restart".into())
 }
 
 /// Why `done` would lose work, if it would.
@@ -1009,6 +1079,116 @@ mod tests {
         let project = project(&temp.path().join("sandbox"), &repo);
         let err = start(&project, &VmOptions::default(), &mut Vec::new()).unwrap_err();
         assert!(err.to_string().contains("no agent worktrees"), "{err}");
+    }
+
+    fn branches(repo: &Path) -> Vec<String> {
+        crate::git::tests::must_git_output(
+            repo,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        )
+        .lines()
+        .map(String::from)
+        .collect()
+    }
+
+    #[test]
+    fn worktrees_are_removed_without_saving_also_with_the_vm_stopped() {
+        if skip_without_git() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("demo");
+        init_git_repo(&repo);
+        let project = project(&temp.path().join("sandbox"), &repo);
+        // A persistent home would make done refuse; removal does not care.
+        std::fs::create_dir_all(&project.state_dir).unwrap();
+        std::fs::write(project.state_dir.join("home.img"), "home").unwrap();
+        let add = |name: &str| {
+            add_worktree(
+                &project,
+                Some(name),
+                false,
+                None,
+                &VmOptions::default(),
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .worktree
+        };
+        let kept = add("kept");
+        let gone = add("gone");
+        std::fs::write(kept.path.join("wip.txt"), "lost\n").unwrap();
+
+        let steps = remove_worktree(&project, &kept, true, &mut Vec::new()).unwrap();
+        assert_eq!(
+            steps,
+            [Step::Done(
+                "worktree: removed kept; branch kept kept".into()
+            )]
+        );
+        remove_worktree(&project, &gone, false, &mut Vec::new()).unwrap();
+        assert!(project.worktrees().unwrap().is_empty());
+        assert!(!kept.path.exists());
+        let branches = branches(&repo);
+        assert!(branches.contains(&"kept".to_string()), "{branches:?}");
+        assert!(!branches.contains(&"gone".to_string()), "{branches:?}");
+        let mounted = std::fs::read_to_string(project.dir.join("worktrees.nix")).unwrap();
+        assert!(!mounted.contains("kept"), "{mounted}");
+    }
+
+    #[test]
+    fn done_deletes_the_branch_only_when_its_work_is_accepted() {
+        if skip_without_git() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("demo");
+        init_git_repo(&repo);
+        let project = project(&temp.path().join("sandbox"), &repo);
+        let add = |name: &str| {
+            add_worktree(
+                &project,
+                Some(name),
+                false,
+                None,
+                &VmOptions::default(),
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .worktree
+        };
+        let accepted = add("accepted");
+        let pending = add("pending");
+        let asked = add("asked");
+        for worktree in [&accepted, &pending] {
+            std::fs::write(worktree.path.join(&worktree.name), "work\n").unwrap();
+            crate::git::tests::commit_all(&worktree.path);
+        }
+        crate::git::tests::must_run_git(&repo, &["cherry-pick", "accepted"]);
+
+        let done = |worktree: &Worktree, keep_branch: bool| {
+            let options = VmOptions {
+                keep_branch,
+                ..VmOptions::default()
+            };
+            super::done(&project, worktree, &options, &mut Vec::new()).unwrap()
+        };
+        assert_eq!(
+            done(&accepted, false),
+            [Step::Done(
+                "worktree: removed accepted and branch accepted".into()
+            )]
+        );
+        assert_eq!(
+            done(&pending, false)[1],
+            Step::Skipped("branch pending kept: 1 commit not on main".into())
+        );
+        assert_eq!(
+            done(&asked, true)[1],
+            Step::Skipped("branch asked kept: --keep-branch".into())
+        );
+        let branches = branches(&repo);
+        assert_eq!(branches, ["asked", "main", "pending"]);
     }
 
     #[test]

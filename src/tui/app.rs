@@ -249,8 +249,11 @@ pub(crate) enum Action {
     /// A worktree of the project by name, with the agent to start in it with
     /// the VM.
     AddProjectWorktree(String, String, Option<Launch>),
-    /// Sync and remove a project's worktree, keeping its branch.
+    /// Save a project worktree's work as snapshots, then remove it.
     DoneProjectWorktree(String, Worktree),
+    /// Remove a project's worktree without saving its work; the flag keeps
+    /// its branch.
+    RemoveProjectWorktree(String, Worktree, bool),
     EnterProjectWorktree(Worktree),
     /// Tailor a new project's flake to its repository.
     TailorProject(String, Tailor),
@@ -280,7 +283,9 @@ impl Action {
     /// The project whose details open after the result screen, if any.
     fn project_to_open(&self) -> Option<&str> {
         match self {
-            Self::TailorProject(name, _) | Self::ReviewProject(name, _) => Some(name),
+            Self::TailorProject(name, _)
+            | Self::ReviewProject(name, _)
+            | Self::RemoveProjectWorktree(name, ..) => Some(name),
             _ => None,
         }
     }
@@ -301,6 +306,7 @@ impl Action {
             | Self::ReviewProject(..)
             | Self::AddProjectWorktree(..)
             | Self::DoneProjectWorktree(..)
+            | Self::RemoveProjectWorktree(..)
             | Self::EnterProjectWorktree(_)
             | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
@@ -1252,6 +1258,11 @@ impl App {
                     return Effect::Execute(Action::DoneProjectWorktree(name, worktree));
                 }
             }
+            KeyCode::Char('d') => {
+                if let Some(worktree) = worktree {
+                    self.confirm_remove_project_worktree(name, worktree);
+                }
+            }
             KeyCode::Esc => self.screen = Screen::Picker(state.return_picker.clone()),
             _ => {}
         }
@@ -1442,6 +1453,34 @@ impl App {
         let choices = vec![Choice::new('y', label, change.action(name))];
         self.confirm(ConfirmState::new(title, vec![line, effect.into()], choices));
         Effect::None
+    }
+
+    /// Ask before removing a project worktree without saving its work, and
+    /// whether to keep its branch.
+    fn confirm_remove_project_worktree(&mut self, project: String, worktree: Worktree) {
+        let lines = vec![
+            format!("Path: {}", worktree.path.display()),
+            format!("Branch: {}", branch_label(&worktree)),
+            "Uncommitted changes and unsynced guest commits are lost.".into(),
+            format!(
+                "Saved agent-review/{}/* snapshots stay until prune; v still opens them.",
+                worktree.name
+            ),
+        ];
+        let title = format!("Remove {} without saving its work?", worktree.name);
+        let choices = vec![
+            Choice::new(
+                'k',
+                "Keep branch",
+                Action::RemoveProjectWorktree(project.clone(), worktree.clone(), true),
+            ),
+            Choice::new(
+                'd',
+                "Delete branch",
+                Action::RemoveProjectWorktree(project, worktree, false),
+            ),
+        ];
+        self.confirm(ConfirmState::new(title, lines, choices));
     }
 
     /// Ask before stopping the VM with `runtime_dir`, described by `line`.
@@ -1860,6 +1899,34 @@ mod tests {
             app.handle_key(key(KeyCode::Char('a'))),
             Effect::Prepare(Prepare::ProjectWorktree("demo".into()))
         );
+        // d asks whether to keep the branch.
+        assert_eq!(app.handle_key(key(KeyCode::Char('d'))), Effect::None);
+        let Screen::Confirm(confirm) = &app.screen else {
+            panic!("expected a confirmation");
+        };
+        assert!(confirm.lines.iter().any(|line| line.contains("are lost")));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('k'))),
+            Effect::Execute(Action::RemoveProjectWorktree(
+                "demo".into(),
+                first.clone(),
+                true
+            ))
+        );
+        // The action runs from the confirmation; cancel it to try the other.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::ProjectDetails(_)));
+        app.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('d'))),
+            Effect::Execute(Action::RemoveProjectWorktree(
+                "demo".into(),
+                first.clone(),
+                false
+            ))
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::ProjectDetails(_)));
         app.handle_key(key(KeyCode::Down));
         let review = Action::ReviewProject("demo".into(), Some(second.clone()));
         assert_eq!(review.return_tool(), Some(ToolId::SandboxProjects));

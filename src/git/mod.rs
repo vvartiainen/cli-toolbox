@@ -407,6 +407,49 @@ pub(crate) fn main_checkout(cwd: &Path) -> Result<PathBuf, Error> {
         .ok_or_else(|| Error::msg("git worktree list: no main worktree"))
 }
 
+/// The branch accepted work goes to: `main` when it exists, else the branch
+/// checked out in the main checkout.
+pub(crate) fn integration_branch(repo: &Path) -> Result<String, Error> {
+    if resolve_commit(repo, "refs/heads/main").is_some() {
+        return Ok("main".into());
+    }
+    let main = main_checkout(repo)?;
+    exec::captured_stdout_in(
+        "git",
+        &["symbolic-ref", "--short", "-q", "HEAD"],
+        Some(&main),
+        &[],
+    )
+    .map(|branch| branch.trim().to_string())
+    .ok()
+    .filter(|branch| !branch.is_empty())
+    .ok_or_else(|| {
+        Error::msg(format!(
+            "no main branch, and {} has no branch checked out to integrate into",
+            main.display()
+        ))
+    })
+}
+
+/// The subjects of the commits of `branch` whose changes `into` lacks, as
+/// `git cherry` sees them: a cherry-picked commit counts as applied.
+pub(crate) fn unapplied_commits(
+    repo: &Path,
+    into: &str,
+    branch: &str,
+) -> Result<Vec<String>, Error> {
+    let cherry = exec::captured_stdout_in("git", &["cherry", "-v", into, branch], Some(repo), &[])?;
+    Ok(cherry
+        .lines()
+        .filter_map(|line| line.strip_prefix("+ "))
+        .map(|line| {
+            line.split_once(' ')
+                .map_or(line, |(_, subject)| subject)
+                .to_string()
+        })
+        .collect())
+}
+
 /// The commit `rev` names in `dir`, if any.
 pub(crate) fn resolve_commit(dir: &Path, rev: &str) -> Option<String> {
     let spec = format!("{rev}^{{commit}}");
@@ -773,6 +816,39 @@ pub(crate) mod tests {
             &repo,
             &["worktree", "remove", "--force", other.to_str().unwrap()],
         );
+    }
+
+    #[test]
+    fn cherry_picked_and_merged_commits_count_as_applied() {
+        if skip_without_git() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("demo");
+        init_git_repo(&repo);
+        assert_eq!(integration_branch(&repo).unwrap(), "main");
+        must_run_git(&repo, &["checkout", "-q", "-b", "work"]);
+        for file in ["one", "two"] {
+            fs::write(repo.join(file), file).unwrap();
+            must_run_git(&repo, &["add", file]);
+            must_run_git(&repo, &["commit", "-q", "-m", &format!("add {file}")]);
+        }
+        must_run_git(&repo, &["checkout", "-q", "main"]);
+        assert_eq!(
+            unapplied_commits(&repo, "main", "work").unwrap(),
+            ["add one", "add two"]
+        );
+        must_run_git(&repo, &["cherry-pick", "work~1"]);
+        assert_eq!(
+            unapplied_commits(&repo, "main", "work").unwrap(),
+            ["add two"]
+        );
+        must_run_git(&repo, &["merge", "-q", "--no-edit", "work"]);
+        assert!(unapplied_commits(&repo, "main", "work").unwrap().is_empty());
+
+        // Without main, the main checkout's branch is the integration branch.
+        must_run_git(&repo, &["branch", "-q", "-m", "main", "trunk"]);
+        assert_eq!(integration_branch(&repo).unwrap(), "trunk");
     }
 
     #[test]

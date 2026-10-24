@@ -349,11 +349,15 @@ impl Context {
             Action::DoneProjectWorktree(name, worktree) => {
                 let steps = vm::done(&load_project(name)?, worktree, &vm_options(), stderr)?;
                 Ok(steps_done(
-                    format!(
-                        "Removed {}; branch {} kept for review",
-                        worktree.path.display(),
-                        worktree.branch
-                    ),
+                    format!("Saved and removed {}", worktree.path.display()),
+                    &steps,
+                ))
+            }
+            Action::RemoveProjectWorktree(name, worktree, keep_branch) => {
+                let steps =
+                    vm::remove_worktree(&load_project(name)?, worktree, *keep_branch, stderr)?;
+                Ok(steps_done(
+                    format!("Removed {}", worktree.path.display()),
                     &steps,
                 ))
             }
