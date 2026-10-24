@@ -718,6 +718,12 @@ fn herdr_steps(
     steps
 }
 
+/// How many worktrees the project in `dir` mounts, from its `worktrees.nix`.
+pub(crate) fn worktree_count(dir: &Path) -> Option<usize> {
+    let text = std::fs::read_to_string(dir.join("worktrees.nix")).ok()?;
+    Some(text.lines().filter(|line| line.contains(" = ")).count())
+}
+
 /// Where a worktree is mounted in the guest.
 pub(crate) fn guest_dir(worktree: &str) -> String {
     format!("/workspace/{worktree}")

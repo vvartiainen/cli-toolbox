@@ -9,7 +9,7 @@ use crossterm::event::{self, Event};
 
 use crate::{Error, terminal::TerminalSession};
 use actions::{Context, Outcome};
-use app::{App, Effect, Prepare};
+use app::{App, Effect, Prepare, ToolId};
 
 /// Run the launcher. With `print_shell`, a successful shell action (an AWS
 /// export or a `cd`) exits the launcher and is printed to `stdout` for `eval`.
@@ -88,6 +88,12 @@ fn event_loop(
             }
             Effect::Prepare(Prepare::Project) => {
                 app.project_form(context.project_defaults().map_err(|err| err.to_string()));
+            }
+            Effect::Prepare(Prepare::StopVm(runtime_dir)) => {
+                match actions::vm_stop_line(&runtime_dir) {
+                    Ok(line) => app.confirm_vm_stop(runtime_dir, line),
+                    Err(err) => app.loaded(ToolId::SandboxVms, Err(err.to_string())),
+                }
             }
             Effect::Execute(action) => {
                 let outcome = handoff(

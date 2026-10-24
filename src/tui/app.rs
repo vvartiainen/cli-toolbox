@@ -7,7 +7,7 @@ use crate::agent::vm::ProjectStatus;
 use crate::aws::Profile;
 use crate::azure::{AccountAction, Subscription};
 use crate::git::Worktree;
-use crate::kitty::Choice;
+use crate::kitty::Choice as KittyChoice;
 use crate::sandbox::RunnerState;
 use crate::sandbox::project::{CreateOptions, TEMPLATES};
 use crate::select;
@@ -170,7 +170,7 @@ pub(crate) enum Resource {
     Aws(Profile),
     AzureSubscription(Subscription),
     AzureAccount(AccountAction),
-    Kitty(Choice),
+    Kitty(KittyChoice),
     Ssh(Host),
     Worktree(Worktree),
     Project(Box<ProjectStatus>),
@@ -254,10 +254,6 @@ pub(crate) enum Action {
     EnterProjectWorktree(Worktree),
     /// Tailor a new project's flake to its repository.
     TailorProject(String, Tailor),
-    /// The following act on every project whose VM is running.
-    SyncAllProjects,
-    RestartAllProjects,
-    StopAllProjects,
     /// Stop the running VM with this runtime directory.
     StopVm(PathBuf),
     /// Remove the runtime directories of stopped VMs whose start directory is gone.
@@ -306,10 +302,7 @@ impl Action {
             | Self::AddProjectWorktree(..)
             | Self::DoneProjectWorktree(..)
             | Self::EnterProjectWorktree(_)
-            | Self::TailorProject(..)
-            | Self::SyncAllProjects
-            | Self::RestartAllProjects
-            | Self::StopAllProjects => Some(ToolId::SandboxProjects),
+            | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
             Self::Aws(_)
             | Self::AzureSubscription(_)
@@ -330,6 +323,9 @@ pub(crate) enum Prepare {
     /// The project form's defaults for the launch directory's repository, for
     /// [`App::project_form`].
     Project,
+    /// What the VM with this runtime directory mounts, for
+    /// [`App::confirm_vm_stop`].
+    StopVm(PathBuf),
 }
 
 /// Work requested by the state machine's owner.
@@ -395,11 +391,64 @@ impl PickerState {
     }
 }
 
+/// One way to answer a confirmation.
+#[derive(Clone, Debug)]
+pub(crate) struct Choice {
+    /// Picks it right away.
+    pub(crate) key: char,
+    pub(crate) label: String,
+    pub(crate) action: Action,
+}
+
+/// A question before an action that is hard to undo. Cancel comes first and
+/// is selected, so Enter alone does nothing.
 #[derive(Clone, Debug)]
 pub(crate) struct ConfirmState {
-    pub(crate) worktree: Worktree,
-    pub(crate) confirm: bool,
-    pub(crate) return_picker: PickerState,
+    pub(crate) title: String,
+    pub(crate) lines: Vec<String>,
+    pub(crate) choices: Vec<Choice>,
+    /// 0 is Cancel, then the choices.
+    pub(crate) selected: usize,
+    /// Lines scrolled past, for long reports.
+    pub(crate) scroll: u16,
+    /// Where Cancel returns to.
+    pub(crate) back: Box<Screen>,
+}
+
+impl ConfirmState {
+    pub(crate) fn new(title: impl Into<String>, lines: Vec<String>, choices: Vec<Choice>) -> Self {
+        Self {
+            title: title.into(),
+            lines,
+            choices,
+            selected: 0,
+            scroll: 0,
+            back: Box::new(Screen::Home),
+        }
+    }
+}
+
+impl Choice {
+    pub(crate) fn new(key: char, label: impl Into<String>, action: Action) -> Self {
+        Self {
+            key,
+            label: label.into(),
+            action,
+        }
+    }
+}
+
+/// One line about a VM for confirmations: its name, SSH port, project folder
+/// and how many worktrees it mounts.
+pub(crate) fn vm_line(vm: &RunnerState, worktrees: Option<usize>) -> String {
+    let port = vm
+        .ssh_port
+        .map(|port| format!("SSH port {port}"))
+        .unwrap_or_else(|| "no SSH port".into());
+    let worktrees = worktrees
+        .map(|count| format!(", {count} worktree(s)"))
+        .unwrap_or_default();
+    format!("{}: {port}, {}{worktrees}", vm.name, vm.dir.display())
 }
 
 #[derive(Clone, Debug)]
@@ -430,6 +479,22 @@ pub(crate) struct TailorState {
     pub(crate) agent: String,
     /// The editor `e` opens, for the hint.
     pub(crate) editor: String,
+}
+
+/// What a VM confirmation is about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VmChange {
+    Stop,
+    Restart,
+}
+
+impl VmChange {
+    fn action(self, project: String) -> Action {
+        match self {
+            Self::Stop => Action::StopProject(project),
+            Self::Restart => Action::RestartProject(project),
+        }
+    }
 }
 
 /// Where the new worktree of the form goes.
@@ -607,7 +672,7 @@ pub(crate) enum Screen {
     TailorFlake(TailorState),
     NewWorktree(LaunchForm),
     ProjectForm(ProjectForm),
-    ConfirmCleanup(ConfirmState),
+    Confirm(ConfirmState),
     Result(ResultState),
 }
 
@@ -859,7 +924,7 @@ impl App {
             Screen::TailorFlake(_) => self.handle_tailor_key(key),
             Screen::NewWorktree(_) => self.handle_new_worktree_key(key),
             Screen::ProjectForm(_) => self.handle_project_form_key(key),
-            Screen::ConfirmCleanup(_) => self.handle_confirm_key(key),
+            Screen::Confirm(_) => self.handle_confirm_key(key),
             Screen::Result(_) => self.handle_result_key(key),
         }
     }
@@ -873,7 +938,7 @@ impl App {
             Screen::WorktreeDetails(_)
             | Screen::ProjectDetails(_)
             | Screen::TailorFlake(_)
-            | Screen::ConfirmCleanup(_)
+            | Screen::Confirm(_)
             | Screen::Result(_) => true,
         }
     }
@@ -1047,7 +1112,7 @@ impl App {
                         Effect::None
                     }
                     (ToolId::SandboxVms, Resource::Vm(vm)) => {
-                        Effect::Execute(Action::StopVm(vm.runtime_dir))
+                        Effect::Prepare(Prepare::StopVm(vm.runtime_dir))
                     }
                     _ => Effect::None,
                 }
@@ -1075,13 +1140,8 @@ impl App {
                 let Some(worktree) = picker.selected_worktree() else {
                     return Some(Effect::None);
                 };
-                let return_picker = picker.clone();
                 self.loading = None;
-                self.screen = Screen::ConfirmCleanup(ConfirmState {
-                    worktree,
-                    confirm: false,
-                    return_picker,
-                });
+                self.confirm_cleanup(worktree);
                 Some(Effect::None)
             }
             _ => None,
@@ -1101,11 +1161,8 @@ impl App {
                 return Effect::Execute(Action::EnterWorktree(details.worktree.clone()));
             }
             KeyCode::Char('d') => {
-                self.screen = Screen::ConfirmCleanup(ConfirmState {
-                    worktree: details.worktree.clone(),
-                    confirm: false,
-                    return_picker: details.return_picker.clone(),
-                });
+                let worktree = details.worktree.clone();
+                self.confirm_cleanup(worktree);
             }
             KeyCode::Esc => self.screen = Screen::Picker(details.return_picker.clone()),
             _ => {}
@@ -1115,23 +1172,28 @@ impl App {
 
     /// Ctrl shortcuts of the project list. Plain keys filter the list.
     fn handle_project_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
-        self.picker()
+        let picker = self
+            .picker()
             .filter(|picker| picker.tool == ToolId::SandboxProjects)?;
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
-        if key.code == KeyCode::Char('a') {
-            self.loading = None;
-            return Some(Effect::Prepare(Prepare::Project));
-        }
-        let action = match key.code {
-            KeyCode::Char('s') => Action::SyncAllProjects,
-            KeyCode::Char('r') => Action::RestartAllProjects,
-            KeyCode::Char('x') => Action::StopAllProjects,
+        let status = match picker.selected_resource() {
+            Some(Resource::Project(status)) => Some(status.as_ref().clone()),
+            _ => None,
+        };
+        let effect = match (key.code, status) {
+            (KeyCode::Char('a'), _) => Effect::Prepare(Prepare::Project),
+            (KeyCode::Char('s'), Some(status)) => {
+                Effect::Execute(Action::SyncProject(status.project.name))
+            }
+            (KeyCode::Char('r'), Some(status)) => self.confirm_vm(&status, VmChange::Restart),
+            (KeyCode::Char('x'), Some(status)) => self.confirm_vm(&status, VmChange::Stop),
+            (KeyCode::Char('s' | 'r' | 'x'), None) => Effect::None,
             _ => return None,
         };
         self.loading = None;
-        Some(Effect::Execute(action))
+        Some(effect)
     }
 
     /// Ctrl shortcuts of the VM list. Plain keys filter the list.
@@ -1144,7 +1206,7 @@ impl App {
         }
         let effect = match key.code {
             KeyCode::Char('x') => match picker.selected_resource() {
-                Some(Resource::Vm(vm)) => Effect::Execute(Action::StopVm(vm.runtime_dir.clone())),
+                Some(Resource::Vm(vm)) => Effect::Prepare(Prepare::StopVm(vm.runtime_dir.clone())),
                 _ => Effect::None,
             },
             KeyCode::Char('d') => Effect::Execute(Action::PruneVms),
@@ -1168,8 +1230,14 @@ impl App {
             KeyCode::Char('k') => move_selection(&mut state.selected, count, -1),
             KeyCode::Char('j') => move_selection(&mut state.selected, count, 1),
             KeyCode::Char('u') => return Effect::Execute(Action::StartProject(name)),
-            KeyCode::Char('x') => return Effect::Execute(Action::StopProject(name)),
-            KeyCode::Char('r') => return Effect::Execute(Action::RestartProject(name)),
+            KeyCode::Char('x') => {
+                let status = state.status.clone();
+                return self.confirm_vm(&status, VmChange::Stop);
+            }
+            KeyCode::Char('r') => {
+                let status = state.status.clone();
+                return self.confirm_vm(&status, VmChange::Restart);
+            }
             KeyCode::Char('p') => return Effect::Execute(Action::SetupProject(name)),
             KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
             KeyCode::Char('v') => return Effect::Execute(Action::ReviewProject(name, worktree)),
@@ -1277,24 +1345,113 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Effect {
-        let Screen::ConfirmCleanup(confirm) = &mut self.screen else {
+        let Screen::Confirm(confirm) = &mut self.screen else {
             return Effect::None;
         };
-        let remove = match key.code {
-            KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-                confirm.confirm = !confirm.confirm;
+        let count = confirm.choices.len() + 1;
+        let picked = match key.code {
+            KeyCode::Up => {
+                confirm.scroll = confirm.scroll.saturating_sub(1);
                 return Effect::None;
             }
-            KeyCode::Char('y') => true,
-            KeyCode::Char('n') | KeyCode::Esc => false,
-            KeyCode::Enter => confirm.confirm,
+            KeyCode::Down => {
+                confirm.scroll = confirm.scroll.saturating_add(1);
+                return Effect::None;
+            }
+            KeyCode::PageUp => {
+                confirm.scroll = confirm.scroll.saturating_sub(10);
+                return Effect::None;
+            }
+            KeyCode::PageDown => {
+                confirm.scroll = confirm.scroll.saturating_add(10);
+                return Effect::None;
+            }
+            KeyCode::Tab | KeyCode::Right => {
+                confirm.selected = (confirm.selected + 1) % count;
+                return Effect::None;
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                confirm.selected = (confirm.selected + count - 1) % count;
+                return Effect::None;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => None,
+            KeyCode::Enter => confirm
+                .selected
+                .checked_sub(1)
+                .and_then(|index| confirm.choices.get(index)),
+            KeyCode::Char(ch) => match confirm.choices.iter().find(|choice| choice.key == ch) {
+                Some(choice) => Some(choice),
+                None => return Effect::None,
+            },
             _ => return Effect::None,
         };
-        if remove {
-            return Effect::Execute(Action::Cleanup(confirm.worktree.clone()));
+        if let Some(choice) = picked {
+            return Effect::Execute(choice.action.clone());
         }
-        self.screen = Screen::Picker(confirm.return_picker.clone());
+        self.screen = (*confirm.back).clone();
         Effect::None
+    }
+
+    /// Ask before running a choice; Cancel returns to the current screen.
+    pub(crate) fn confirm(&mut self, confirm: ConfirmState) {
+        self.loading = None;
+        let back = Box::new(self.screen.clone());
+        self.screen = Screen::Confirm(ConfirmState { back, ..confirm });
+    }
+
+    fn confirm_cleanup(&mut self, worktree: Worktree) {
+        let (title, branch) = if worktree.branch.is_empty() {
+            (
+                "Remove this worktree?",
+                "Branch: (none; only the worktree will be removed)".to_string(),
+            )
+        } else {
+            (
+                "Remove this worktree and branch?",
+                format!("Branch: {}", worktree.branch),
+            )
+        };
+        let mut lines = vec![format!("Path: {}", worktree.path.display()), branch];
+        if self.herdr {
+            lines.push("Herdr: an open workspace for it is closed too".into());
+        }
+        let choices = vec![Choice::new('y', "Remove", Action::Cleanup(worktree))];
+        self.confirm(ConfirmState::new(title, lines, choices));
+    }
+
+    /// Ask before stopping or restarting the project's running VM, which ends
+    /// its agent sessions. A stopped VM has nothing to confirm.
+    fn confirm_vm(&mut self, status: &ProjectStatus, change: VmChange) -> Effect {
+        let name = status.project.name.clone();
+        let Some(vm) = &status.vm else {
+            return Effect::Execute(change.action(name));
+        };
+        let line = vm_line(vm, Some(status.worktrees.len()));
+        let (title, label, effect) = match change {
+            VmChange::Stop => (
+                format!("Stop the VM of {name}?"),
+                "Stop",
+                "Its agent sessions end; worktrees and the guest home stay.",
+            ),
+            VmChange::Restart => (
+                format!("Restart the VM of {name}?"),
+                "Restart",
+                "Its agent sessions end, then start again with the current worktrees.",
+            ),
+        };
+        let choices = vec![Choice::new('y', label, change.action(name))];
+        self.confirm(ConfirmState::new(title, vec![line, effect.into()], choices));
+        Effect::None
+    }
+
+    /// Ask before stopping the VM with `runtime_dir`, described by `line`.
+    pub(crate) fn confirm_vm_stop(&mut self, runtime_dir: PathBuf, line: String) {
+        let choices = vec![Choice::new('y', "Stop", Action::StopVm(runtime_dir))];
+        let lines = vec![
+            line,
+            "Its agent sessions end and its herdr machine is removed.".into(),
+        ];
+        self.confirm(ConfirmState::new("Stop this VM?", lines, choices));
     }
 
     fn handle_result_key(&mut self, key: KeyEvent) -> Effect {
@@ -1628,7 +1785,7 @@ mod tests {
             Effect::Execute(Action::EnterWorktree(tree.clone()))
         );
         app.handle_key(key(KeyCode::Char('d')));
-        assert!(matches!(app.screen, Screen::ConfirmCleanup(_)));
+        assert!(matches!(app.screen, Screen::Confirm(_)));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('y'))),
             Effect::Execute(Action::Cleanup(tree))
@@ -1671,9 +1828,10 @@ mod tests {
         );
         assert_eq!(app.handle_key(ctrl('a')), Effect::Prepare(Prepare::Project));
         for (ch, action) in [
-            ('s', Action::SyncAllProjects),
-            ('r', Action::RestartAllProjects),
-            ('x', Action::StopAllProjects),
+            // The hovered project; its VM is stopped, so nothing to confirm.
+            ('s', Action::SyncProject("demo".into())),
+            ('r', Action::RestartProject("demo".into())),
+            ('x', Action::StopProject("demo".into())),
         ] {
             assert_eq!(action.return_tool(), Some(ToolId::SandboxProjects));
             assert_eq!(app.handle_key(ctrl(ch)), Effect::Execute(action));
@@ -1842,6 +2000,69 @@ mod tests {
     }
 
     #[test]
+    fn stopping_or_restarting_a_running_vm_asks_first_and_names_it() {
+        let mut app = App::new("/repo".into());
+        let running = ProjectStatus {
+            vm: Some(RunnerState {
+                name: "agent-demo".into(),
+                ssh_port: Some(2300),
+                dir: "/sandbox/projects/demo".into(),
+                ..RunnerState::default()
+            }),
+            ..project("demo", &[worktree("demo-agent-wt")])
+        };
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(running))]),
+        );
+        for (ch, action) in [
+            ('x', Action::StopProject("demo".into())),
+            ('r', Action::RestartProject("demo".into())),
+        ] {
+            // From the list with Ctrl, and from the details.
+            for details in [false, true] {
+                if details {
+                    app.handle_key(key(KeyCode::Enter));
+                    assert_eq!(app.handle_key(key(KeyCode::Char(ch))), Effect::None);
+                } else {
+                    assert_eq!(app.handle_key(ctrl(ch)), Effect::None);
+                }
+                let Screen::Confirm(confirm) = &app.screen else {
+                    panic!("expected a confirmation");
+                };
+                assert_eq!(
+                    confirm.lines[0],
+                    "agent-demo: SSH port 2300, /sandbox/projects/demo, 1 worktree(s)"
+                );
+                assert_eq!(app.handle_key(key(KeyCode::Esc)), Effect::None);
+                let back = if details { "details" } else { "list" };
+                assert!(
+                    matches!(
+                        (&app.screen, details),
+                        (Screen::ProjectDetails(_), true) | (Screen::Picker(_), false)
+                    ),
+                    "back to the {back}"
+                );
+                let confirmed = if details {
+                    app.handle_key(key(KeyCode::Char(ch)))
+                } else {
+                    app.handle_key(ctrl(ch))
+                };
+                assert_eq!(confirmed, Effect::None);
+                app.handle_key(key(KeyCode::Tab));
+                assert_eq!(
+                    app.handle_key(key(KeyCode::Enter)),
+                    Effect::Execute(action.clone())
+                );
+                app.handle_key(key(KeyCode::Esc));
+                if details {
+                    app.handle_key(key(KeyCode::Esc));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn vm_list_stops_and_prunes() {
         let mut app = App::new("/repo".into());
         app.handle_key(key(KeyCode::Char('s')));
@@ -1863,13 +2084,26 @@ mod tests {
         );
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
-            Effect::Execute(Action::StopVm("/state/vms/a".into()))
+            Effect::Prepare(Prepare::StopVm("/state/vms/a".into()))
         );
         app.handle_key(key(KeyCode::Down));
         assert_eq!(
             app.handle_key(ctrl('x')),
+            Effect::Prepare(Prepare::StopVm("/state/vms/b".into()))
+        );
+        // The runtime describes the VM; stopping it takes a confirmation.
+        app.confirm_vm_stop("/state/vms/b".into(), "agent-b: SSH port 2301".into());
+        let Screen::Confirm(confirm) = &app.screen else {
+            panic!("expected a confirmation");
+        };
+        assert_eq!(confirm.lines[0], "agent-b: SSH port 2301");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None, "cancel");
+        app.confirm_vm_stop("/state/vms/b".into(), "agent-b".into());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
             Effect::Execute(Action::StopVm("/state/vms/b".into()))
         );
+        app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.handle_key(ctrl('d')), Effect::Execute(Action::PruneVms));
         assert_eq!(Action::PruneVms.return_tool(), Some(ToolId::SandboxVms));
     }
@@ -1892,7 +2126,7 @@ mod tests {
         );
         app.handle_key(key(KeyCode::Esc));
         app.handle_key(ctrl('d'));
-        assert!(matches!(app.screen, Screen::ConfirmCleanup(_)));
+        assert!(matches!(app.screen, Screen::Confirm(_)));
         assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Effect::None);
         assert!(matches!(
             &app.screen,

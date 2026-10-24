@@ -18,13 +18,12 @@ const HELP_SEARCH: &str = "↑↓ move · ⏎ run · F1 help · esc back";
 const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help · esc back";
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
 const HELP_PROJECTS: &str =
-    "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop all · F1 help · esc back";
+    "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
 const HELP_NEW_WORKTREE: &str = "tab name/prompt · ←→ agent · ⏎ create · F1 help · esc back";
 const HELP_PROJECT_FORM: &str = "tab ↑↓ field · ←→ space change · ⏎ create · F1 help · esc back";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
-const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
 const HELP_OVERLAY: &str = "any key closes help";
 
 /// Update viewport-dependent state before drawing, including after a resize.
@@ -41,6 +40,12 @@ pub(super) fn update_scroll_bounds(app: &mut App, area: Rect) {
             details.scroll = details
                 .scroll
                 .min(max_scroll(&details_paragraph(details), inner));
+        }
+        Screen::Confirm(confirm) => {
+            let [body, _] = confirm_layout(inner);
+            confirm.scroll = confirm
+                .scroll
+                .min(max_scroll(&confirm_paragraph(confirm), body));
         }
         _ => {}
     }
@@ -72,7 +77,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         Screen::TailorFlake(tailor) => draw_tailor(frame, tailor),
         Screen::NewWorktree(form) => draw_new_worktree(frame, app, form),
         Screen::ProjectForm(form) => draw_project_form(frame, form),
-        Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, app, confirm),
+        Screen::Confirm(confirm) => draw_confirmation(frame, confirm),
         Screen::Result(result) => draw_result(frame, result),
     }
 }
@@ -181,13 +186,16 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entries.extend([
                     entry("⏎", "project details"),
                     entry("^A", "new project for the launch directory's repository"),
-                    entry("^S", "sync every project whose VM is running"),
-                    entry("^R", "restart every running project VM"),
-                    entry("^X", "stop every running project VM"),
+                    entry("^S", "sync the highlighted project"),
+                    entry("^R", "restart the highlighted project's VM (asks first)"),
+                    entry("^X", "stop the highlighted project's VM (asks first)"),
                 ]);
             } else if picker.tool == ToolId::SandboxVms {
                 entries.extend([
-                    entry("⏎ ^X", "stop the VM and remove its herdr machine"),
+                    entry(
+                        "⏎ ^X",
+                        "stop the VM and remove its herdr machine (asks first)",
+                    ),
                     entry(
                         "^D",
                         "prune runtime directories of VMs whose directory is gone",
@@ -214,7 +222,7 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
         Screen::ProjectDetails(_) => vec![
             entry("↑↓ j k", "select a worktree"),
             entry("u", "start the VM and open the worktrees in herdr"),
-            entry("x r", "stop / restart the VM"),
+            entry("x r", "stop / restart the VM (asks first)"),
             entry("p", "set up agent-proxy credentials and the backlog"),
             entry("s", "publish agent work as host review branches"),
             entry(
@@ -259,12 +267,20 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             entry("⏎", "create the project (no worktree yet)"),
             entry("esc", "back without creating"),
         ],
-        Screen::ConfirmCleanup(_) => vec![
-            entry("y", "remove"),
-            entry("n esc", "cancel"),
-            entry("←→ tab", "choose a button"),
-            entry("⏎", "accept the choice"),
-        ],
+        Screen::Confirm(confirm) => {
+            let mut entries: Vec<_> = confirm
+                .choices
+                .iter()
+                .map(|choice| (choice.key.to_string(), "the choice of that name"))
+                .collect();
+            entries.extend([
+                entry("n esc", "cancel"),
+                entry("←→ tab", "choose a button"),
+                entry("⏎", "accept the choice"),
+                entry("↑↓ PgUp PgDn", "scroll"),
+            ]);
+            entries
+        }
         Screen::Result(_) => vec![entry("↑↓ PgUp PgDn", "scroll"), entry("⏎ esc", "back")],
     };
     entries.push(entry("^C", "quit at any point"));
@@ -842,42 +858,65 @@ fn field(name: &str, value: &str) -> Line<'static> {
     ])
 }
 
-fn draw_confirmation(frame: &mut Frame<'_>, app: &App, confirm: &ConfirmState) {
+/// The key hints of a confirmation: its choices' keys, then cancel.
+fn confirm_help(confirm: &ConfirmState) -> String {
+    let mut keys: Vec<String> = confirm
+        .choices
+        .iter()
+        .map(|choice| format!("{} {}", choice.key, choice.label.to_lowercase()))
+        .collect();
+    keys.extend(["n cancel".into(), "←→ ⏎ choose".into(), "? help".into()]);
+    keys.join(" · ")
+}
+
+fn confirm_layout(inner: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+        .spacing(1)
+        .areas(inner)
+}
+
+/// The question and its lines. `Label: value` lines with a one-word label
+/// line up like fields.
+fn confirm_paragraph(confirm: &ConfirmState) -> Paragraph<'static> {
+    let mut content = vec![
+        Line::from(clean_text(&confirm.title).bold()),
+        Line::default(),
+    ];
+    content.extend(
+        confirm
+            .lines
+            .iter()
+            .map(|line| match line.split_once(": ") {
+                Some((label, value)) if label.len() < 8 && !label.contains(' ') => {
+                    field(label, value)
+                }
+                _ => Line::from(clean_text(line)),
+            }),
+    );
+    Paragraph::new(content).wrap(Wrap { trim: false })
+}
+
+fn draw_confirmation(frame: &mut Frame<'_>, confirm: &ConfirmState) {
     let area = frame.area();
+    let help = confirm_help(confirm);
     let block = panel(
-        breadcrumb(ToolId::GitWorktrees.category(), "Confirm cleanup"),
+        vec![
+            Span::styled("cli-toolbox", Style::new().fg(ACCENT).bold()),
+            " › ".dark_gray(),
+            Span::styled("Confirm", Style::new().bold()),
+        ],
         String::new(),
-        HELP_CONFIRM,
+        &help,
     )
     .border_style(Style::new().fg(Color::Red));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [body, buttons] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
-        .spacing(1)
-        .areas(inner);
-    let (question, branch) = if confirm.worktree.branch.is_empty() {
-        (
-            "Remove this worktree?",
-            field("Branch", "(none; only the worktree will be removed)"),
-        )
-    } else {
-        (
-            "Remove this worktree and branch?",
-            field("Branch", &confirm.worktree.branch),
-        )
-    };
-    let mut content = vec![
-        Line::from(question.bold()),
-        Line::default(),
-        field("Path", &confirm.worktree.path.display().to_string()),
-        branch,
-    ];
-    if app.herdr {
-        content.push(field("Herdr", "an open workspace for it is closed too"));
-    }
-    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), body);
+    let [body, buttons] = confirm_layout(inner);
+    let paragraph = confirm_paragraph(confirm);
+    let scroll = confirm.scroll.min(max_scroll(&paragraph, body));
+    frame.render_widget(paragraph.scroll((scroll, 0)), body);
 
-    let button = |label: &'static str, active: bool, color: Color| {
+    let button = |label: String, active: bool, color: Color| {
         if active {
             Span::styled(
                 format!(" {label} "),
@@ -887,14 +926,16 @@ fn draw_confirmation(frame: &mut Frame<'_>, app: &App, confirm: &ConfirmState) {
             Span::styled(format!(" {label} "), Style::new().fg(Color::DarkGray))
         }
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            button("Cancel", !confirm.confirm, Color::White),
-            Span::raw("  "),
-            button("Remove", confirm.confirm, Color::Red),
-        ])),
-        buttons,
-    );
+    let mut spans = vec![button("Cancel".into(), confirm.selected == 0, Color::White)];
+    for (index, choice) in confirm.choices.iter().enumerate() {
+        spans.push(Span::raw("  "));
+        spans.push(button(
+            clean_text(&choice.label),
+            confirm.selected == index + 1,
+            Color::Red,
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), buttons);
 }
 
 fn draw_result(frame: &mut Frame<'_>, result: &ResultState) {
@@ -1018,15 +1059,11 @@ mod tests {
     #[test]
     fn renders_confirmation_and_tiny_terminal_without_panicking() {
         let mut app = App::new("/tmp/project".into());
-        app.screen = Screen::ConfirmCleanup(crate::tui::app::ConfirmState {
-            worktree: crate::git::Worktree {
-                name: "x".into(),
-                path: PathBuf::from("/tmp/x"),
-                branch: String::new(),
-            },
-            confirm: false,
-            return_picker: crate::tui::app::PickerState::new(ToolId::GitWorktrees),
-        });
+        app.confirm(crate::tui::app::ConfirmState::new(
+            "Remove?",
+            vec!["Path: /tmp/x".into()],
+            Vec::new(),
+        ));
         let text = rendered(&app, 2, 1);
         assert_eq!(text.chars().count(), 2);
     }
@@ -1052,20 +1089,27 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_mentions_branch_removal() {
+    fn confirmations_show_their_lines_and_choices() {
+        let worktree = crate::git::Worktree {
+            name: "x".into(),
+            path: PathBuf::from("/tmp/x"),
+            branch: "x-branch".into(),
+        };
         let mut app = App::new("/tmp/project".into());
-        app.screen = Screen::ConfirmCleanup(crate::tui::app::ConfirmState {
-            worktree: crate::git::Worktree {
-                name: "x".into(),
-                path: PathBuf::from("/tmp/x"),
-                branch: "x-branch".into(),
-            },
-            confirm: false,
-            return_picker: crate::tui::app::PickerState::new(ToolId::GitWorktrees),
-        });
-        assert!(rendered(&app, 80, 12).contains("Remove this worktree and branch?"));
         app.herdr = true;
-        assert!(rendered(&app, 80, 12).contains("workspace for it is closed too"));
+        app.loaded(ToolId::GitWorktrees, Ok(vec![Resource::Worktree(worktree)]));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let text = rendered(&app, 80, 12);
+        for want in [
+            "Remove this worktree and branch?",
+            "Path    /tmp/x",
+            "Branch  x-branch",
+            "workspace for it is closed too",
+            " Cancel    Remove ",
+            "y remove · n cancel",
+        ] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
     }
 
     #[test]
@@ -1135,7 +1179,7 @@ mod tests {
             "{list}"
         );
         assert!(list.contains("^A new"), "{list}");
-        assert!(list.contains("^S/^R/^X sync/restart/stop all"), "{list}");
+        assert!(list.contains("^S/^R/^X sync/restart/stop "), "{list}");
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let details = rendered(&app, 100, super::HEIGHT);

@@ -325,24 +325,6 @@ impl Context {
                     None => "Review cancelled".into(),
                 }))
             }
-            Action::SyncAllProjects => {
-                let steps = vm::sync_all(&project::sandbox_dir()?, stdout)?;
-                Ok(steps_done(
-                    "Published review branches for running projects".into(),
-                    &steps,
-                ))
-            }
-            Action::RestartAllProjects => {
-                let options = vm_options();
-                let steps = vm::each_running(&project::sandbox_dir()?, |project| {
-                    vm::restart(project, &options, &mut std::io::stderr())
-                })?;
-                Ok(steps_done("Restarted every running VM".into(), &steps))
-            }
-            Action::StopAllProjects => Ok(steps_done(
-                "Stopped every running VM".into(),
-                &vm::each_running(&project::sandbox_dir()?, vm::stop)?,
-            )),
             Action::AddProjectWorktree(project, name, launch) => {
                 let created = vm::add_worktree(
                     &load_project(project)?,
@@ -464,6 +446,15 @@ fn project_defaults(cwd: &Path) -> Result<CreateOptions, Error> {
         backlog: crate::sandbox::setup::backlog_root().is_some(),
         repo,
     })
+}
+
+/// The confirmation line of the running VM with `runtime_dir`.
+pub(super) fn vm_stop_line(runtime_dir: &Path) -> Result<String, Error> {
+    let vm = vm::running_vms()
+        .into_iter()
+        .find(|vm| vm.runtime_dir == runtime_dir)
+        .ok_or_else(|| Error::msg("the VM is no longer running"))?;
+    Ok(super::app::vm_line(&vm, vm::worktree_count(&vm.dir)))
 }
 
 /// What the new worktree form of a project starts with.
