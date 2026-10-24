@@ -38,7 +38,7 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 - `src/exec.rs`: PATH lookup and process helpers
 - Tests live next to the module they cover
 - `README.md`: overview, command list and development commands
-- `docs/`: detailed user docs (`tui.md`, `agents.md`, `nix.md`) and `todo.md`
+- `docs/`: detailed user docs (`tui.md`, `agents.md`, `nix.md`); ideas and open work are in the Backlog.md backlog, not the repo
 - `justfile`: common local development commands
 - `flake.nix`: Nix packaging for the CLI
 

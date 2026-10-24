@@ -89,4 +89,3 @@ just fmt
 - [docs/agents.md](docs/agents.md): git worktrees and sandboxed agents
 - [docs/agent-tools.md](docs/agent-tools.md): project MCP and skill choices, library, adoption and ownership
 - [docs/nix.md](docs/nix.md): consuming the package from a Nix flake / `nix-darwin`
-- [docs/todo.md](docs/todo.md): ideas and open work
