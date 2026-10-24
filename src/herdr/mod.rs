@@ -165,38 +165,53 @@ fn kinds_in(help: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Remove the saved machine labelled `label` from Herdr. Returns whether one
-/// was saved.
+/// Reset the saved machine's remote session, then remove its profile. Call
+/// before shutting down the VM: removing a profile alone leaves the guest's
+/// persistent session available for restoration. Returns whether one was saved.
 pub(crate) fn remove_machine(label: &str) -> Result<bool, Error> {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    exec::run_captured(
-        "herdr",
-        &["machine", "list", "--json"],
-        None,
-        &mut stdout,
-        &mut stderr,
-    )?;
-    let Some(id) = machine_id(&String::from_utf8_lossy(&stdout), label)? else {
+    remove_machine_with(label, exec::captured_stdout)
+}
+
+fn remove_machine_with(
+    label: &str,
+    mut run: impl FnMut(&str, &[&str]) -> Result<String, Error>,
+) -> Result<bool, Error> {
+    let json = run("herdr", &["machine", "list", "--json"])?;
+    let Some(machine) = saved_machine(&json, label)? else {
         return Ok(false);
     };
-    exec::combined_output("herdr", &["machine", "remove", &id], None)?;
+    // Session management is not forwarded by `herdr --machine`. Use the
+    // profile's SSH target and session, not the caller's local Herdr context.
+    let session = crate::aws::shell_quote(&machine.session);
+    let reset = format!("herdr session stop {session} && herdr session delete {session}");
+    run(
+        "ssh",
+        &[
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "--",
+            &machine.target,
+            &reset,
+        ],
+    )?;
+    run("herdr", &["machine", "remove", &machine.id])?;
     Ok(true)
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 struct SavedMachine {
     id: String,
     label: String,
+    target: String,
+    session: String,
 }
 
-fn machine_id(json: &str, label: &str) -> Result<Option<String>, Error> {
+fn saved_machine(json: &str, label: &str) -> Result<Option<SavedMachine>, Error> {
     let machines: Vec<SavedMachine> = serde_json::from_str(json)
         .map_err(|err| Error::msg(format!("parse herdr machine list: {err}")))?;
-    Ok(machines
-        .into_iter()
-        .find(|machine| machine.label == label)
-        .map(|machine| machine.id))
+    Ok(machines.into_iter().find(|machine| machine.label == label))
 }
 
 #[derive(Deserialize)]
@@ -350,18 +365,115 @@ mod tests {
     }
 
     #[test]
+    fn resets_the_remote_session_before_removing_its_machine() {
+        let mut calls = Vec::new();
+        let removed = remove_machine_with("agent-demo", |program, args| {
+            calls.push((program.to_string(), args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()));
+            Ok(if args == ["machine", "list", "--json"] {
+                r#"[{"id":"vm-id","label":"agent-demo","target":"ssh://agent@localhost:2300","session":"default"}]"#.into()
+            } else {
+                String::new()
+            })
+        }).unwrap();
+        assert!(removed);
+        assert_eq!(
+            calls[1],
+            (
+                "ssh".into(),
+                vec![
+                    "-o".into(),
+                    "BatchMode=yes".into(),
+                    "-o".into(),
+                    "ConnectTimeout=10".into(),
+                    "--".into(),
+                    "ssh://agent@localhost:2300".into(),
+                    "herdr session stop 'default' && herdr session delete 'default'".into(),
+                ]
+            )
+        );
+        assert_eq!(
+            calls[2],
+            (
+                "herdr".into(),
+                vec!["machine".into(), "remove".into(), "vm-id".into()]
+            )
+        );
+        assert_eq!(calls.len(), 3);
+    }
+
+    #[test]
+    fn reset_uses_only_the_selected_profile_and_quotes_its_session() {
+        let mut reset = String::new();
+        remove_machine_with("agent-demo", |program, args| {
+            if program == "herdr" && args == ["machine", "list", "--json"] {
+                return Ok(r#"[
+                    {"id":"other","label":"other","target":"other-host","session":"other"},
+                    {"id":"vm-id","label":"agent-demo","target":"vm-host","session":"dev's session"}
+                ]"#
+                .into());
+            }
+            if program == "ssh" {
+                assert_eq!(args[5], "vm-host");
+                reset = args[6].into();
+            } else {
+                assert_eq!(args, ["machine", "remove", "vm-id"]);
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+        let session = crate::aws::shell_quote("dev's session");
+        assert_eq!(
+            reset,
+            format!("herdr session stop {session} && herdr session delete {session}")
+        );
+    }
+
+    #[test]
+    fn missing_machine_needs_no_cleanup() {
+        let mut calls = 0;
+        assert!(
+            !remove_machine_with("missing", |_, _| {
+                calls += 1;
+                Ok("[]".into())
+            })
+            .unwrap()
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn failed_reset_keeps_the_machine_and_reports_the_error() {
+        let mut calls = 0;
+        let result = remove_machine_with("agent-demo", |_, _| {
+            calls += 1;
+            if calls == 1 {
+                Ok(
+                    r#"[{"id":"vm-id","label":"agent-demo","target":"vm","session":"default"}]"#
+                        .into(),
+                )
+            } else {
+                Err(Error::msg("SSH unavailable"))
+            }
+        });
+        assert!(result.unwrap_err().to_string().contains("SSH unavailable"));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
     fn finds_a_saved_machine_by_label() {
         let json = r#"[
             {"id":"1261f5","label":"agent-demo","target":"ssh://agent@127.0.0.1:2300","session":"default","enabled":true,"selected":false},
             {"id":"9a0b1c","label":"build-box","target":"build","session":"default","enabled":true,"selected":true}
         ]"#;
         assert_eq!(
-            machine_id(json, "agent-demo").unwrap(),
+            saved_machine(json, "agent-demo")
+                .unwrap()
+                .map(|machine| machine.id),
             Some("1261f5".into())
         );
-        assert_eq!(machine_id(json, "agent-other").unwrap(), None);
-        assert_eq!(machine_id("[]", "agent-demo").unwrap(), None);
-        assert!(machine_id("not json", "agent-demo").is_err());
+        assert_eq!(saved_machine(json, "agent-other").unwrap(), None);
+        assert_eq!(saved_machine("[]", "agent-demo").unwrap(), None);
+        assert!(saved_machine("not json", "agent-demo").is_err());
     }
 
     #[test]

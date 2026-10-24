@@ -276,17 +276,15 @@ pub(crate) fn start(
 }
 
 /// Stop the project's VM and remove its machine from the host herdr;
-/// worktrees and the guest home stay. The next start adds the machine again.
+/// worktrees and the guest home stay, but its Herdr session is reset before
+/// shutdown. The next start adds the machine again with fresh workspaces.
 /// Works from `runner.json` rather than the flake's `stop` app: without
 /// worktrees, as after the last `done`, the flake does not evaluate.
 pub(crate) fn stop(project: &Project) -> Result<Vec<Step>, Error> {
     let Some(vm) = sandbox::vm_for(&running_vms(), &project.dir) else {
         return Ok(vec![Step::Skipped("vm: not running".into())]);
     };
-    let stopped = sandbox::stop_vm(&vm, sandbox::stop_timeout())?;
-    let mut steps = vec![stopped_step(&vm, stopped)];
-    steps.extend(remove_herdr_machine(&vm.name));
-    Ok(steps)
+    Ok(vm_stop(&vm))
 }
 
 fn stopped_step(vm: &RunnerState, stopped: sandbox::Stopped) -> Step {
@@ -373,11 +371,25 @@ fn pick_vms(
 
 /// Stop `vm` through its runner and remove its machine from the host herdr.
 pub(crate) fn vm_stop(vm: &RunnerState) -> Vec<Step> {
-    let mut steps = vec![match sandbox::stop_vm(vm, sandbox::stop_timeout()) {
+    vm_stop_with(
+        vm,
+        || remove_herdr_machine(&vm.name),
+        || sandbox::stop_vm(vm, sandbox::stop_timeout()),
+    )
+}
+
+fn vm_stop_with(
+    vm: &RunnerState,
+    cleanup: impl FnOnce() -> Option<Step>,
+    shutdown: impl FnOnce() -> Result<sandbox::Stopped, Error>,
+) -> Vec<Step> {
+    // The guest must still be reachable to discard its persistent session.
+    // Cleanup failure must not prevent shutdown or hide either result.
+    let mut steps: Vec<_> = cleanup().into_iter().collect();
+    steps.push(match shutdown() {
         Ok(stopped) => stopped_step(vm, stopped),
-        Err(err) => return vec![Step::Failed(format!("vm: stop {}: {err}", vm.name))],
-    }];
-    steps.extend(remove_herdr_machine(&vm.name));
+        Err(err) => Step::Failed(format!("vm: stop {}: {err}", vm.name)),
+    });
     steps
 }
 
@@ -736,6 +748,42 @@ fn with_running_vm(projects: Vec<Project>, running: &[RunnerState]) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_cleanup_precedes_shutdown_even_when_it_fails() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let vm = RunnerState {
+            name: "agent-demo".into(),
+            ..Default::default()
+        };
+        let steps = vm_stop_with(
+            &vm,
+            || {
+                events.borrow_mut().push("cleanup");
+                Some(Step::Failed("herdr: SSH unavailable".into()))
+            },
+            || {
+                events.borrow_mut().push("shutdown");
+                Ok(sandbox::Stopped::Terminated)
+            },
+        );
+        assert_eq!(*events.borrow(), ["cleanup", "shutdown"]);
+        assert!(matches!(&steps[0], Step::Failed(message) if message.contains("SSH unavailable")));
+        assert!(matches!(&steps[1], Step::Done(message) if message.contains("stopped")));
+    }
+
+    #[test]
+    fn shutdown_failure_does_not_hide_the_cleanup_result() {
+        let steps = vm_stop_with(
+            &RunnerState::default(),
+            || Some(Step::Done("herdr: removed machine".into())),
+            || Err(Error::msg("runner unavailable")),
+        );
+        assert!(matches!(&steps[0], Step::Done(_)));
+        assert!(
+            matches!(&steps[1], Step::Failed(message) if message.contains("runner unavailable"))
+        );
+    }
     use crate::git::tests::{commit_all, init_git_repo, skip_without_git};
     use std::process::Command;
 
