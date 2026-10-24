@@ -1024,6 +1024,11 @@ mod tests {
         let repo = temp.path().join("demo");
         init_git_repo(&repo);
         let project = project(&temp.path().join("sandbox"), &repo);
+        std::fs::write(
+            project.dir.join("flake.nix"),
+            "{\n  ai.codex.enable = true;\n}\n",
+        )
+        .unwrap();
         let launch = Launch::new("codex", Some("Add a --json flag".into()));
 
         let created = add_worktree(
@@ -1080,7 +1085,7 @@ mod tests {
             "{\n  ai = {\n    claude.enable = true;\n  };\n}\n",
         )
         .unwrap();
-        assert_eq!(enabled_agents(&project).unwrap(), ["claude"]);
+        assert_eq!(enabled_agents(&project).unwrap(), ["claude", "pi"]);
         let add = |kind: &str| {
             let launch = Launch::new(kind, None);
             add_worktree(

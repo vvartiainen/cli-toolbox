@@ -80,14 +80,20 @@ pub(crate) fn uses_proxy(flake: &str) -> bool {
         .any(|line| line.trim() == format!("caCert = ./{PROXY_CA_FILE};"))
 }
 
-/// `ai` options that enable something other than a coding agent.
-const NOT_AGENTS: [&str; 1] = ["backlog"];
+/// The coding agents agent-sandbox's `ai` options can enable; its other
+/// `ai` options, such as `backlog` and `mcpNixos`, enable no agent.
+const AGENTS: [&str; 6] = ["codex", "claude", "gemini", "opencode", "copilot", "pi"];
+
+/// The agents agent-sandbox enables unless the flake turns them off.
+const DEFAULT_AGENTS: [&str; 1] = ["pi"];
 
 /// The coding agents the flake enables, such as `ai.claude.enable = true;`,
-/// in order. Their names are the agent kinds Herdr starts. Reads both the
-/// nested form the defaults module writes and dotted attribute paths.
+/// in order, then the default ones it does not turn off. Their names are the
+/// agent kinds Herdr starts. Reads both the nested form the defaults module
+/// writes and dotted attribute paths.
 pub(crate) fn enabled_agents(flake: &str) -> Vec<String> {
     let mut agents = Vec::new();
+    let mut disabled = Vec::new();
     // The attribute names of the open `name = {` blocks; empty for others.
     let mut open: Vec<String> = Vec::new();
     for line in flake.lines() {
@@ -104,19 +110,29 @@ pub(crate) fn enabled_agents(flake: &str) -> Vec<String> {
         else {
             continue;
         };
-        if value.trim() != "true" {
-            continue;
-        }
         let path: Vec<&str> = open
             .iter()
             .flat_map(|name| name.split('.'))
             .chain(name.trim().split('.'))
             .collect();
-        if let [.., "ai", agent, "enable"] = path.as_slice()
-            && !NOT_AGENTS.contains(agent)
-            && !agents.iter().any(|known| known == agent)
-        {
-            agents.push(agent.to_string());
+        let [.., "ai", agent, "enable"] = path.as_slice() else {
+            continue;
+        };
+        if !AGENTS.contains(agent) {
+            continue;
+        }
+        let list = match value.trim() {
+            "true" => &mut agents,
+            "false" => &mut disabled,
+            _ => continue,
+        };
+        if !list.iter().any(|known| known == agent) {
+            list.push(agent.to_string());
+        }
+    }
+    for agent in DEFAULT_AGENTS {
+        if !agents.iter().chain(&disabled).any(|known| known == agent) {
+            agents.push(agent.into());
         }
     }
     agents
@@ -239,10 +255,10 @@ mod tests {
         let flake = format!(
             "{{\n  outputs = {{ self, agent-sandbox }}: {{\n    modules = [\n{module}\n    ];\n  }};\n}}\n"
         );
-        assert_eq!(enabled_agents(&flake), ["claude", "codex"]);
-        let flake = "ai = {\n  claude.enable = false;\n  codex = {\n    enable = true;\n  };\n};\nai.gemini.enable = true; # on\n# ai.pi.enable = true;\nvm.enable = true;\n";
+        assert_eq!(enabled_agents(&flake), ["claude", "codex", "pi"]);
+        let flake = "ai = {\n  claude.enable = false;\n  codex = {\n    enable = true;\n  };\n  mcpNixos.enable = true;\n  backlog.enable = true;\n};\nai.gemini.enable = true; # on\nai.pi.enable = false;\nvm.enable = true;\n";
         assert_eq!(enabled_agents(flake), ["codex", "gemini"]);
-        assert!(enabled_agents("{ }").is_empty());
+        assert_eq!(enabled_agents("{ }"), ["pi"]);
     }
 
     #[test]
