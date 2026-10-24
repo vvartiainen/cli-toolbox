@@ -45,6 +45,29 @@
           };
         });
 
+      devShells = forAllSystems (system:
+        let
+          pkgs = pkgsFor system;
+        in {
+          default = pkgs.mkShell {
+            inputsFrom = [ self.packages.${system}.default ];
+            packages = with pkgs; [
+              cargo
+              rustc
+              rustfmt
+              clippy
+              rust-analyzer
+              lldb
+              just
+              git
+              nil
+              nixfmt
+              statix
+            ];
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          };
+        });
+
       apps = forAllSystems (system: {
         default = {
           type = "app";

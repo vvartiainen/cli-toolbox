@@ -75,6 +75,25 @@ If you install `cli-toolbox` from the Nix flake, bash, zsh, and fish completions
 
 ## Development
 
+Enter the Nix development shell for the Rust toolchain, language server,
+formatter, linter, debugger, and tools for editing the flake:
+
+```sh
+nix develop
+```
+
+To test the separately installed Nix-managed Neovim with this project's tools:
+
+```sh
+nix develop --command nvim-nix src/main.rs
+```
+
+The shell supplies `rust-analyzer`, `rustfmt`, Clippy, `lldb-dap`, `nil`,
+`nixfmt`, and `statix`; Neovim itself stays in your user environment. In the
+editor, check `:LspInfo`, `:ConformInfo`, and `:lua print(vim.fn.exepath("rust-analyzer"))`.
+Open a Rust file to test completion and diagnostics, save to test formatting,
+and use `<leader>dr` to select a Rust debug target.
+
 ```sh
 just          # list recipes
 just build
