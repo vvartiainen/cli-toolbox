@@ -49,6 +49,15 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 3. Put reusable parsing, file access, external tool integration, and business logic in the matching `src/<area>` module
 4. Prefer adding tests beside the module you change, starting with happy path coverage
 
+## Backlog
+
+Ideas and open work are tracked in a Backlog.md backlog through the
+`backlog-cli-toolbox` MCP server (`backlog` inside the sandbox), not in the repo.
+
+- Read `backlog://workflow/overview` or call `get_backlog_instructions` first
+- Search for an existing task before creating one
+- Keep the task status and notes current while working
+
 ## Working inside a sandbox
 
 A shell under `/workspace/<name>` may be inside an agent-sandbox microVM. Check
