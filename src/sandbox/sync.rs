@@ -408,7 +408,14 @@ mod tests {
     use crate::git::tests::{commit_all, init_git_repo, skip_without_git};
 
     fn git(repo: &Path, args: &[&str]) -> String {
-        exec::captured_stdout_in("git", args, Some(repo), &[])
+        // Build sandboxes have no global git identity for tags and cherry-picks.
+        let envs = [
+            ("GIT_AUTHOR_NAME", OsStr::new("cli-toolbox")),
+            ("GIT_AUTHOR_EMAIL", OsStr::new("cli-toolbox@example.com")),
+            ("GIT_COMMITTER_NAME", OsStr::new("cli-toolbox")),
+            ("GIT_COMMITTER_EMAIL", OsStr::new("cli-toolbox@example.com")),
+        ];
+        exec::captured_stdout_in("git", args, Some(repo), &envs)
             .unwrap()
             .trim()
             .into()
