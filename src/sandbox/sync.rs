@@ -1,6 +1,7 @@
 //! Agent-owned worktrees, published as create-only host review branches.
 //! Sync never checks out, merges, or moves an existing branch.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -318,6 +319,17 @@ impl Bridge {
         Err(Error::msg("could not allocate a new agent review branch"))
     }
 
+    /// The names of the guest's branches.
+    pub(crate) fn branches(&self, repo: &Path) -> Result<HashSet<String>, Error> {
+        let heads = self.git(repo, &["ls-remote", "--heads", "--", &self.remote])?;
+        Ok(heads
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter_map(|(_, reference)| reference.strip_prefix("refs/heads/"))
+            .map(String::from)
+            .collect())
+    }
+
     /// The guest owns its index. A stale host index must not prevent cleanup
     /// once every committed guest tip has been preserved as a host branch.
     pub(crate) fn prepare_done(&self, repo: &Path, host_branch: &str) -> Result<Review, Error> {
@@ -459,6 +471,10 @@ mod tests {
         let before_guest = snapshot(&guest);
         let bridge = Bridge::local(guest.clone(), "test-source");
         let first = bridge.exchange(&host, &branch).unwrap();
+        assert_eq!(
+            bridge.branches(&host).unwrap(),
+            HashSet::from([branch.clone(), "extra/agent".to_string()])
+        );
         assert!(first.contains("1 new patch"), "{first}");
         let guest_ref = format!("refs/remotes/sandbox-review/test-source/{branch}");
         let host_ref = format!("refs/remotes/host-review/test-source/{branch}");

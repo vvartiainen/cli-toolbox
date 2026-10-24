@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::Step;
 use super::review::{self, Snapshot};
-use crate::sandbox::{project::Project, sync};
+use crate::sandbox::{self, project::Project, sync};
 use crate::{Error, exec, git};
 
 /// What [`prune`] deletes besides accepted snapshots.
@@ -91,10 +91,25 @@ enum Fate {
 }
 
 /// Delete the project's accepted review snapshots, remove their review
-/// checkouts, and delete the fetch refs of removed worktrees whose work is
-/// accepted or kept in a snapshot. Unaccepted work stays unless `options`
+/// checkouts, and delete the stale fetch refs, of removed worktrees and of
+/// guest branches that are gone, whose work is accepted or kept in a
+/// snapshot. Unaccepted work stays unless `options`
 /// say otherwise; the report says what stays and why.
 pub(crate) fn prune(project: &Project, options: &PruneOptions) -> Result<Report, Error> {
+    let vm = sandbox::vm_for(&super::vm::running_vms(), &project.dir);
+    prune_with(project, options, |worktree| {
+        let vm = vm.as_ref().filter(|_| project.mounts(worktree))?;
+        Some(sync::Bridge::for_vm(vm, worktree).and_then(|bridge| bridge.branches(project.repo()?)))
+    })
+}
+
+/// [`prune`], with the guest's branches of a current worktree from
+/// `guest_branches`: `None` when its VM is not running or does not mount it.
+fn prune_with(
+    project: &Project,
+    options: &PruneOptions,
+    guest_branches: impl Fn(&str) -> Option<Result<HashSet<String>, Error>>,
+) -> Result<Report, Error> {
     let repo = project.repo()?;
     let into = match &options.into {
         Some(into) => into.clone(),
@@ -237,18 +252,37 @@ pub(crate) fn prune(project: &Project, options: &PruneOptions) -> Result<Report,
 
     prune_checkouts(project, repo, options, &all, &deleted, &mut report)?;
 
-    // Fetch refs of removed worktrees, which sync never prunes.
+    // Fetch refs of removed worktrees, and of guest branches that are gone,
+    // which sync never prunes. A running VM lists its branches; a stopped one
+    // cannot, so its current worktrees' refs stay.
+    let dir = review::snapshot_dir(project);
     let mut removed: HashSet<&str> = selected
         .iter()
         .map(|snapshot| snapshot.worktree.as_str())
         .chain(options.worktree.as_deref())
         .collect();
     removed.retain(|name| !current.contains(*name));
-    let dir = review::snapshot_dir(project);
-    let sources: HashSet<String> = removed
+    let removed: HashSet<String> = removed
         .iter()
         .map(|name| sync::source_id(&dir, name))
         .collect();
+    let mut live: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut names: Vec<&String> = current
+        .iter()
+        .filter(|name| options.worktree.as_ref().is_none_or(|only| only == *name))
+        .collect();
+    names.sort();
+    for name in names {
+        match guest_branches(name) {
+            Some(Ok(branches)) => {
+                live.insert(sync::source_id(&dir, name), branches);
+            }
+            Some(Err(err)) => report.kept(format!(
+                "fetch refs of {name}: kept; could not list the guest's branches: {err}"
+            )),
+            None => {}
+        }
+    }
     let refs = exec::captured_stdout_in(
         "git",
         &[
@@ -263,11 +297,17 @@ pub(crate) fn prune(project: &Project, options: &PruneOptions) -> Result<Report,
         let Some((reference, tip)) = line.split_once(' ') else {
             continue;
         };
-        let source = reference
+        let Some((source, branch)) = reference
             .strip_prefix("refs/remotes/sandbox-review/")
             .and_then(|rest| rest.split_once('/'))
-            .map(|(source, _)| source);
-        if !source.is_some_and(|source| sources.contains(source)) {
+        else {
+            continue;
+        };
+        let stale = removed.contains(source)
+            || live
+                .get(source)
+                .is_some_and(|branches| !branches.contains(branch));
+        if !stale {
             continue;
         }
         let commits = git::unapplied_commits(repo, &into, tip)?;
@@ -283,13 +323,13 @@ pub(crate) fn prune(project: &Project, options: &PruneOptions) -> Result<Report,
         } else {
             report.unaccepted += 1;
             report.kept(format!(
-                "fetch ref: kept {reference}: {}, and in no kept snapshot",
+                "fetch ref: kept stale {reference}: {}, and in no kept snapshot",
                 not_on(&into, &commits)
             ));
             continue;
         };
         let text = format!(
-            "fetch ref: {} {reference} ({why})",
+            "fetch ref: {} stale {reference} ({why})",
             verb("deleted", "would delete")
         );
         if options.dry_run {
@@ -504,6 +544,11 @@ mod tests {
         );
     }
 
+    /// No running VM.
+    fn no_guest(_: &str) -> Option<Result<HashSet<String>, Error>> {
+        None
+    }
+
     fn branches(repo: &Path) -> Vec<String> {
         must_git_output(
             repo,
@@ -543,7 +588,7 @@ mod tests {
             review_checkout(&fixture, &merged),
         ];
 
-        let report = prune(&fixture.project, &PruneOptions::default()).unwrap();
+        let report = prune_with(&fixture.project, &PruneOptions::default(), no_guest).unwrap();
         assert!(branches(&fixture.repo).is_empty(), "{report}");
         for checkout in &checkouts {
             assert!(!checkout.exists(), "{report}");
@@ -575,7 +620,7 @@ mod tests {
         let checkout = review_checkout(&fixture, &accepted);
         fs::write(checkout.join("notes.txt"), "review notes\n").unwrap();
 
-        let report = prune(&fixture.project, &PruneOptions::default()).unwrap();
+        let report = prune_with(&fixture.project, &PruneOptions::default(), no_guest).unwrap();
         let text = report.to_string();
         assert!(
             text.contains(&format!(
@@ -593,7 +638,7 @@ mod tests {
             force: true,
             ..PruneOptions::default()
         };
-        let report = prune(&fixture.project, &forced).unwrap();
+        let report = prune_with(&fixture.project, &forced, no_guest).unwrap();
         assert!(branches(&fixture.repo).is_empty(), "{report}");
         assert!(!checkout.exists(), "{report}");
     }
@@ -609,7 +654,7 @@ mod tests {
         let newest = snapshot(&fixture, "gone", &[("a.txt", "final\n")], 2);
         must_run_git(&fixture.repo, &["cherry-pick", &newest]);
 
-        let report = prune(&fixture.project, &PruneOptions::default()).unwrap();
+        let report = prune_with(&fixture.project, &PruneOptions::default(), no_guest).unwrap();
         let text = report.to_string();
         assert!(
             text.contains(&format!(
@@ -625,8 +670,60 @@ mod tests {
             superseded: true,
             ..PruneOptions::default()
         };
-        prune(&fixture.project, &options).unwrap();
+        prune_with(&fixture.project, &options, no_guest).unwrap();
         assert!(branches(&fixture.repo).is_empty());
+    }
+
+    #[test]
+    fn fetch_refs_of_deleted_guest_branches_go_once_their_work_is_safe() {
+        if skip_without_git() {
+            return;
+        }
+        let fixture = fixture();
+        let repo = &fixture.repo;
+        let worktrees_root = &fixture.project.worktrees_root;
+        git::create_worktree(repo, worktrees_root, "live", &mut Vec::new()).unwrap();
+        let accepted = snapshot(&fixture, "other", &[("a.txt", "a\n")], 1);
+        must_run_git(repo, &["cherry-pick", &accepted]);
+        // The guest's main is still saved in a kept snapshot of the worktree.
+        let kept = snapshot(&fixture, "live", &[("b.txt", "b\n")], 2);
+        let unsaved = snapshot(&fixture, "scratch", &[("c.txt", "c\n")], 3);
+        let source = sync::source_id(&review::snapshot_dir(&fixture.project), "live");
+        let fetched = |branch: &str, tip: &str| {
+            let reference = format!("refs/remotes/sandbox-review/{source}/{branch}");
+            must_run_git(repo, &["update-ref", &reference, tip]);
+            reference
+        };
+        let still_there = fetched("main", &unsaved);
+        let gone_accepted = fetched("old-fix", &accepted);
+        let gone_kept = fetched("draft", &kept);
+        let gone_only = fetched("experiment", &unsaved);
+        must_run_git(repo, &["branch", "-D", &unsaved]);
+        let guest = |worktree: &str| {
+            assert_eq!(worktree, "live");
+            Some(Ok(HashSet::from(["main".to_string()])))
+        };
+
+        let report = prune_with(&fixture.project, &PruneOptions::default(), guest).unwrap();
+        let text = report.to_string();
+        let exists = |reference: &str| git::resolve_commit(repo, reference).is_some();
+        assert!(exists(&still_there), "{text}");
+        assert!(!exists(&gone_accepted), "{text}");
+        assert!(!exists(&gone_kept), "{text}");
+        assert!(exists(&gone_only), "{text}");
+        assert!(text.contains(&format!("kept stale {gone_only}")), "{text}");
+
+        // A stopped VM cannot say, and one that fails to answer says so.
+        let report = prune_with(&fixture.project, &PruneOptions::default(), no_guest).unwrap();
+        assert!(!report.to_string().contains("experiment"), "{report}");
+        let failing = |_: &str| Some(Err(Error::msg("SSH unavailable")));
+        let report = prune_with(&fixture.project, &PruneOptions::default(), failing).unwrap();
+        assert!(
+            report
+                .to_string()
+                .contains("could not list the guest's branches: SSH unavailable")
+        );
+        assert!(exists(&gone_only));
     }
 
     #[test]
@@ -643,7 +740,7 @@ mod tests {
             all: true,
             ..PruneOptions::default()
         };
-        let report = prune(&fixture.project, &options).unwrap();
+        let report = prune_with(&fixture.project, &options, no_guest).unwrap();
         let text = report.to_string();
         assert!(text.contains(&format!("would delete {accepted}")), "{text}");
         assert!(text.contains("would remove"), "{text}");
@@ -677,7 +774,7 @@ mod tests {
         let only = fetched("other", "scratch", &unsaved);
         must_run_git(repo, &["branch", "-D", &unsaved]);
 
-        let report = prune(&fixture.project, &PruneOptions::default()).unwrap();
+        let report = prune_with(&fixture.project, &PruneOptions::default(), no_guest).unwrap();
         let text = report.to_string();
         let exists = |reference: &str| git::resolve_commit(repo, reference).is_some();
         assert!(!exists(&safe), "{text}");
