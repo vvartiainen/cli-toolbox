@@ -126,7 +126,7 @@ identifies it.
 cli-toolbox agent project create --ai             # in the repository, once
 cli-toolbox agent project start --agent claude    # VM + herdr workspace per worktree
 cli-toolbox agent project add --restart --agent codex --prompt "Add a --json flag"
-cli-toolbox agent project sync                    # publish ordinary host review branches
+cli-toolbox agent project review                  # fetch agent work and open lazygit
 cli-toolbox agent project done cli-toolbox-agent-wt-2
 ```
 
@@ -139,11 +139,56 @@ cli-toolbox agent project done cli-toolbox-agent-wt-2
 | `agent project stop\|restart [project]` | Stops or restarts the VM. Stopping signals the runner like `agent vm stop`, so it works without a worktree to mount (after the last `done`), and removes the VM's machine from the host herdr. Before shutdown it stops and deletes that machine's guest Herdr session, discarding the old terminal layout so the next start opens fresh workspaces instead of offering to resume obsolete sessions. Worktrees, guest home files and agent conversation history stay. If session cleanup fails (for example, SSH is unavailable), the failure is reported and shutdown still proceeds; the machine profile is kept so cleanup can be retried while the VM is running. A restart mounts worktrees added or removed since the start. `--all` stops or restarts the VM of every project whose VM is running, one after another; a project that fails does not stop the others. |
 | `agent project add [project]` | Creates the next agent worktree of the project's repository and prints its path. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). `--agent KIND` and `--prompt TEXT` choose its agent and first prompt; see [Agents per worktree](#agents-per-worktree). |
 | `agent project sync [project]` | Publishes committed agent work as ordinary host snapshot branches under `agent-review/<worktree>/…`, ready to open in Git tools or a separate review worktree. Unchanged tips reuse snapshots; existing branches and agent files stay untouched. Normal host branches are sent to guest review refs separately. `--worktree NAME` selects one; `--all` syncs every running project. See [History exchange](#history-exchange). |
+| `agent project review [project]` | Fetches the selected agent's snapshot, prepares a separate host review worktree, and opens lazygit directly in its commits view. No manual Git commands or checkouts. `--worktree NAME` selects an agent; otherwise a picker handles multiple choices. When the VM/worktree is unavailable, offers saved snapshots. Requires host `lazygit` and a terminal. See [Review in lazygit](#review-in-lazygit). |
 | `agent project done [worktree]` | Preserves committed guest work as host snapshot branches, checks the guest's own index, then removes the agent worktree. Review branches remain; integration into the stale host counterpart is not required. Dirty/detached guest work, failed snapshots, or an unavailable persistent VM block cleanup. `--force` bypasses these safeguards. The VM stops when its last worktree is done. |
 
 `[project]` defaults to the project of the current repository, then to the only
 project. VM state comes from agent-sandbox's `runner.json` files under
 `~/.local/state/agent-sandbox/vms/`.
+
+### Review in lazygit
+
+When the agent says it has finished, use **Review**, not just Sync:
+
+```sh
+cli-toolbox agent project review
+# Or select one agent explicitly:
+cli-toolbox agent project review --worktree cli-toolbox-agent-wt
+```
+
+In the TUI, open the project, select the agent worktree, and press **v**.
+No Git commands or branch checkout are needed. Review:
+
+1. Fetches the agent's committed tip and publishes its normal host snapshot branch.
+2. Creates or reuses a **separate detached host review worktree** under the
+   project's state directory, in `reviews/`.
+3. Runs `lazygit log` there, opening its **commits/log view** at the snapshot tip.
+4. Returns to the toolbox when you quit lazygit.
+
+Select a commit in lazygit to inspect its changes. The Files/working-tree panel
+will normally be clean: the agent's changes are already **committed**. This is
+why Review starts in the commits view rather than leaving you at an empty list
+of unstaged files. The named snapshot branch is also available in lazygit's
+branch list.
+
+Your main checkout and the agent's live worktree are never checked out, reset,
+or cleaned by Review. Existing review copies and edits are kept. Reopening the
+same snapshot reuses its matching review checkout; a new tip or a repurposed
+review directory gets a separate copy. Accepting/merging work remains explicit;
+opening Review does not accept it automatically.
+
+Review requires `lazygit` installed **on the host** and an interactive terminal.
+It checks that before fetching or creating a checkout. Closing or failing to
+launch lazygit does not delete the snapshot or its review files.
+
+With a stopped VM, or after `done` removed the agent worktree, Review offers
+saved snapshots for this project instead and labels them as saved, not newly
+fetched work. It never silently falls back to an old snapshot after a live fetch
+fails. Multiple agents or saved snapshots use a picker; Escape cancels.
+
+Review fetches agent history for viewing. The separate **Sync** action remains
+available for publishing snapshots and sending accepted host branch history back
+to the agent's review refs, as described below.
 
 ### History exchange
 
@@ -151,7 +196,8 @@ project. VM state comes from agent-sandbox's `runner.json` files under
 update or checkout the host counterpart of the agent branch: its Git index can
 remain stale even though workspace files are shared live.
 
-Run this **on the host**, with the VM running (or press `s` in the TUI):
+For snapshot-only publication and bidirectional history exchange, run this **on
+the host**, with the VM running (or press `s` in the TUI):
 
 ```sh
 cli-toolbox agent project sync
@@ -247,6 +293,8 @@ On the host, cherry-pick the implementation commit, then run:
 just fmt
 just test
 just build
+./bin/cli-toolbox agent project review --worktree cli-toolbox-agent-wt
+# Or publish snapshots without opening lazygit:
 ./bin/cli-toolbox agent project sync --worktree cli-toolbox-agent-wt
 git branch --list 'agent-review/*'
 ```
@@ -257,9 +305,10 @@ create no duplicates. After another agent commit, sync should print a new branch
 while the old branch and any review copy remain unchanged.
 
 Local regression tests cover real Git transfers, snapshot reuse, rewritten tips,
-branch collisions, checked-out review copies, dirty indexes, extra branches,
-cleanup preservation, and export failures. The live host-to-VM SSH path still
-needs a host test; running sync inside the sandbox is not a substitute.
+branch collisions, separate/reused review checkouts, dirty indexes, extra branches,
+cleanup preservation, and export failures. Review launch tests use an injected
+viewer; lazygit is not installed in the guest. The live host-to-VM SSH path and
+real lazygit UI still need a host test; a sandbox test is not a substitute.
 
 ### Agents per worktree
 

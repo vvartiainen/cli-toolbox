@@ -11,7 +11,7 @@ use crate::{Error, agent, git};
 /// The default agent kind for `--agent`.
 const AGENT_ENV: &str = "CLI_TOOLBOX_AGENT";
 
-const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # publish agent review snapshot branches\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
+const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # publish agent review snapshot branches\n  cli-toolbox agent project review        # open committed work in lazygit\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
 
 #[derive(Debug, Args)]
 #[command(subcommand_required = true, subcommand_value_name = "command")]
@@ -147,6 +147,16 @@ enum ProjectCommands {
         /// Sync every project whose VM is running.
         #[arg(long)]
         all: bool,
+    },
+    /// Open the agent's committed changes in lazygit, in a separate host checkout.
+    #[command(
+        after_help = "Fetches the selected agent's latest snapshot and opens lazygit in its commits view in a separate host review worktree. The agent's checkout is never changed. With no running VM/worktree, offers saved snapshots instead. Repeated reviews reuse matching copies without resetting edits. Requires lazygit on the host and an interactive terminal; no Git commands or branch checkout are needed."
+    )]
+    Review {
+        project: Option<String>,
+        /// Only this agent worktree; otherwise select one interactively.
+        #[arg(long)]
+        worktree: Option<String>,
     },
     /// Save agent work as review snapshots, then remove its worktree.
     #[command(
@@ -351,6 +361,13 @@ fn run_project(
                 .transpose()?;
             let synced = vm::sync(&project, worktree.as_ref())?;
             vm::write_synced(&synced, stdout)
+        }
+        ProjectCommands::Review { project, worktree } => {
+            let project = resolve(&root, project)?;
+            if let Some(target) = agent::review::open(&project, worktree.as_deref(), stderr)? {
+                writeln!(stdout, "Review files: {}", target.path.display())?;
+            }
+            Ok(())
         }
         ProjectCommands::Done {
             worktree,

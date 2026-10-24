@@ -14,6 +14,7 @@ Command parsing and help output are handled with [clap](https://github.com/clap-
 - `git` for git helpers
 - `rulesync` (38.0.0 tested) for project MCP and skill generation with `agents`
 - `herdr` (optional) to open agent worktrees as Herdr workspaces
+- `lazygit` on the host for `agent project review` (also `v` in the TUI)
 - `nix` and [agent-sandbox](https://github.com/vvartiainen/agent-sandbox-setup) for sandbox projects (`agent project`)
 - `just` for development, and optionally to run a project's `worktree-init` recipe
 
@@ -28,7 +29,7 @@ AWS profile, Azure subscription, Kitty session, and SSH host selection run an in
 | `azure login\|logout\|subscription\|status` | Log in to the Azure CLI (`--force` after PIM activation), log out, pick a subscription (`az account set` plus `AZURE_SUBSCRIPTION_ID`/`ARM_*` exports), or show the current session. Alias `az`. |
 | `agents [status\|set\|sync\|library]` | Select project MCP servers and skills through Rulesync. See [docs/agent-tools.md](docs/agent-tools.md). |
 | `agent worktree create\|list\|cleanup` | Git worktrees for AI agents, with project init and Herdr, optionally starting an agent with a first prompt. See [docs/agents.md](docs/agents.md). |
-| `agent project list\|create\|setup\|start\|stop\|restart\|add\|sync\|done` | Sandbox projects in `~/.agent-sandbox`: one agent-sandbox VM per project, mounting its agent worktrees, with agent-owned worktrees published as host review snapshot branches, host history available to the agents, credentials from agent-proxy and a backlog. See [docs/agents.md](docs/agents.md#sandbox-projects). |
+| `agent project list\|create\|setup\|start\|stop\|restart\|add\|sync\|review\|done` | Sandbox projects in `~/.agent-sandbox`: one agent-sandbox VM per project, mounting its agent worktrees, with agent-owned worktrees published as host review snapshot branches, one-action lazygit review in a separate checkout, host history available to the agents, credentials from agent-proxy and a backlog. See [docs/agents.md](docs/agents.md#sandbox-projects). |
 | `agent vm list\|stop\|prune` | Every running agent-sandbox VM, also those whose project directory is gone. See [docs/agents.md](docs/agents.md#running-vms). |
 | `kitty select-session` | Choose a `*.kitty-session` file from your home directory and switch Kitty to it. |
 | `ssh connect` | Choose an SSH host from your config and connect to it with Kitty's SSH kitten. |

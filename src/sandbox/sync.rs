@@ -22,6 +22,15 @@ pub(crate) struct Bridge {
     workspace: String,
 }
 
+/// Stable per-project/workspace namespace shared with saved-snapshot discovery.
+pub(crate) fn source_id(dir: &Path, worktree: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(dir.as_os_str().as_encoded_bytes());
+    hash.update(b"\0");
+    hash.update(worktree.as_bytes());
+    format!("{:x}", hash.finalize())[..12].to_string()
+}
+
 impl Bridge {
     pub(crate) fn for_vm(vm: &RunnerState, worktree: &str) -> Result<Self, Error> {
         if worktree.is_empty()
@@ -36,11 +45,7 @@ impl Bridge {
         {
             return Err(Error::msg("invalid VM or workspace name for Git exchange"));
         }
-        let mut hash = Sha256::new();
-        hash.update(vm.dir.as_os_str().as_encoded_bytes());
-        hash.update(b"\0");
-        hash.update(worktree.as_bytes());
-        let source = format!("{:x}", hash.finalize())[..12].to_string();
+        let source = source_id(&vm.dir, worktree);
         let config = vm.runtime_dir.join("ssh_config");
         let config = config
             .to_str()

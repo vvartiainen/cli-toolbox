@@ -127,9 +127,9 @@ fn details_help(app: &App) -> &'static str {
 
 fn project_help(state: &ProjectState) -> &'static str {
     if state.status.vm.is_some() {
-        "x stop · r restart · s sync · a add · ⏎ cd · D done · ? help · esc back"
+        "v review · s sync · x stop · r restart · a add · ⏎ cd · D done · ? help · esc back"
     } else {
-        "u start · a add · ⏎ cd · D done · ? help · esc back"
+        "v review saved · u start · a add · ⏎ cd · D done · ? help · esc back"
     }
 }
 
@@ -212,6 +212,10 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             entry("x r", "stop / restart the VM"),
             entry("p", "set up agent-proxy credentials and the backlog"),
             entry("s", "publish agent work as host review branches"),
+            entry(
+                "v",
+                "review selected agent in lazygit (separate host checkout)",
+            ),
             entry("a", "add a worktree (mounted on the next start)"),
             entry(
                 "⏎ c",
@@ -1028,6 +1032,7 @@ mod tests {
             "VM      stopped · press u to start",
             "demo-agent-wt",
             "u start",
+            "v review saved",
         ] {
             assert!(details.contains(want), "missing {want}: {details}");
         }

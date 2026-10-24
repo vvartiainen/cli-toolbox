@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn prints_sandbox_project_help() {
         for command in [
-            "list", "create", "setup", "start", "stop", "restart", "add", "sync", "done",
+            "list", "create", "setup", "start", "stop", "restart", "add", "sync", "review", "done",
         ] {
             let (result, stdout, stderr) = run_args(&["agent", "project", command, "--help"]);
             result.unwrap();
@@ -258,6 +258,24 @@ mod tests {
         }
         assert!(!stdout.contains("fast-forwards"));
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn project_review_help_explains_the_one_action_lazygit_workflow() {
+        let (result, stdout, stderr) = run_args(&["agent", "project", "review", "--help"]);
+        result.unwrap();
+        for text in [
+            "--worktree",
+            "lazygit",
+            "commits view",
+            "separate host",
+            "saved snapshots",
+        ] {
+            assert!(stdout.contains(text), "missing {text}: {stdout}");
+        }
+        assert!(stderr.is_empty());
+        let (result, _, _) = run_args(&["agent", "project", "review", "--all"]);
+        assert!(result.is_err());
     }
 
     #[test]

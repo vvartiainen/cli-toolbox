@@ -239,6 +239,8 @@ pub(crate) enum Action {
     /// Set up the host side of the project's proxy credentials and backlog.
     SetupProject(String),
     SyncProject(String),
+    /// Open the selected agent worktree (or a saved snapshot) in lazygit.
+    ReviewProject(String, Option<AgentWorktree>),
     /// A worktree of the project, with the agent to start in it with the VM.
     AddProjectWorktree(String, Option<Launch>),
     /// Sync and remove a project's worktree, keeping its branch.
@@ -276,7 +278,7 @@ impl Action {
     /// The project whose details open after the result screen, if any.
     fn project_to_open(&self) -> Option<&str> {
         match self {
-            Self::TailorProject(name, _) => Some(name),
+            Self::TailorProject(name, _) | Self::ReviewProject(name, _) => Some(name),
             _ => None,
         }
     }
@@ -294,6 +296,7 @@ impl Action {
             | Self::RestartProject(_)
             | Self::SetupProject(_)
             | Self::SyncProject(_)
+            | Self::ReviewProject(..)
             | Self::AddProjectWorktree(..)
             | Self::DoneProjectWorktree(..)
             | Self::EnterProjectWorktree(_)
@@ -983,6 +986,7 @@ impl App {
             KeyCode::Char('r') => return Effect::Execute(Action::RestartProject(name)),
             KeyCode::Char('p') => return Effect::Execute(Action::SetupProject(name)),
             KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
+            KeyCode::Char('v') => return Effect::Execute(Action::ReviewProject(name, worktree)),
             KeyCode::Char('a') => {
                 let back = Screen::ProjectDetails(state.clone());
                 return self.new_worktree(NewWorktree::Project(name), back);
@@ -1347,6 +1351,20 @@ mod tests {
     }
 
     #[test]
+    fn review_remains_available_after_agent_worktrees_are_removed() {
+        let mut app = App::new("/repo".into());
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(project("demo", &[])))]),
+        );
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('v'))),
+            Effect::Execute(Action::ReviewProject("demo".into(), None))
+        );
+    }
+
+    #[test]
     fn brackets_cycle_tabs_both_ways() {
         let mut app = App::new("/repo".into());
         for expected in [
@@ -1448,6 +1466,10 @@ mod tests {
             ('r', Action::RestartProject("demo".into())),
             ('p', Action::SetupProject("demo".into())),
             ('s', Action::SyncProject("demo".into())),
+            (
+                'v',
+                Action::ReviewProject("demo".into(), Some(first.clone())),
+            ),
             ('a', Action::AddProjectWorktree("demo".into(), None)),
             ('c', Action::EnterProjectWorktree(first.clone())),
         ] {
@@ -1457,6 +1479,13 @@ mod tests {
             );
         }
         app.handle_key(key(KeyCode::Down));
+        let review = Action::ReviewProject("demo".into(), Some(second.clone()));
+        assert_eq!(review.return_tool(), Some(ToolId::SandboxProjects));
+        assert_eq!(review.project_to_open(), Some("demo"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('v'))),
+            Effect::Execute(review)
+        );
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)),
             Effect::Execute(Action::DoneProjectWorktree("demo".into(), second))

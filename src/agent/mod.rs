@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::{self, AgentWorktree};
 use crate::{Error, herdr, project};
 
+pub(crate) mod review;
 pub(crate) mod vm;
 
 /// Kinds that take the interactive session's first prompt as an argument.

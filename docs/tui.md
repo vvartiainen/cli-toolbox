@@ -61,7 +61,9 @@ worktree count (see [agents.md](agents.md#sandbox-projects)):
   the VM and opens every worktree in herdr, `x` stops it, `r` restarts it to mount
   worktree changes, `p` sets up its agent-proxy credentials and backlog
   (`agent project setup`), `s` publishes ordinary host review snapshot branches
-  without disturbing the agent, and `a` adds a worktree,
+  without disturbing the agent, **`v` reviews the selected agent in lazygit** in
+  a separate host checkout (or picks a saved snapshot when stopped/removed), and
+  `a` adds a worktree,
   asking for its agent and first prompt (see [New worktree](#new-worktree)). Up/Down
   select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
   `agent project done` on it. Worktrees without an agent of their own get

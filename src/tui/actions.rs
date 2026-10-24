@@ -314,6 +314,20 @@ impl Context {
                 vm::write_synced(&synced, stdout)?;
                 Ok(Done::body(format!("Review branches for {name}")))
             }
+            Action::ReviewProject(name, worktree) => {
+                let project = load_project(name)?;
+                let target = agent::review::open(
+                    &project,
+                    worktree.as_ref().map(|worktree| worktree.name.as_str()),
+                    stderr,
+                )?;
+                Ok(Done::body(match target {
+                    Some(target) => {
+                        format!("Reviewed {} in {}", target.branch, target.path.display())
+                    }
+                    None => "Review cancelled".into(),
+                }))
+            }
             Action::SyncAllProjects => {
                 let steps = vm::sync_all(&project::sandbox_dir()?, stdout)?;
                 Ok(steps_done(
