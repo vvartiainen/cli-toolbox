@@ -66,4 +66,5 @@ Run freely:
 - `just test`
 - `just build`
 
-Do not run `just sandbox` or `just sandbox-ssh`, they start or control a VM.
+Do not start or control VMs, for example with `cli-toolbox agent project
+start`, `restart` or `stop`, or `agent vm stop`.
