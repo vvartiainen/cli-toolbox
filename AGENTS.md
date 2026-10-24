@@ -51,80 +51,25 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 
 ## Working inside a sandbox
 
-A shell under `/workspace/<name>` may be inside the microVM, not on the
-host. Check `git rev-parse --git-dir`: sandbox Git directories live under
-`/home/agent/.local/share/agent-sandbox/git/`. Do not assume host tools,
-credentials, builders or the centrally managed project flake are available.
-Do not try to reach the host's hidden `.git` or weaken the sandbox to get them.
+A shell under `/workspace/<name>` may be inside an agent-sandbox microVM. Check
+`git rev-parse --git-dir`: sandbox Git directories live under
+`/home/agent/.local/share/agent-sandbox/git/`. Do not assume host tools or
+credentials are available, and do not try to reach the host's `.git`.
 
-### Commits and handoff
+Workspace files are shared with the host immediately, Git metadata is not:
 
-Workspace files are shared with the host immediately; Git metadata is not.
-A guest commit does **not** update the host branch or index.
-
-- Start with `git status --short` and `git branch --show-current`. Preserve
-  existing user changes and use the assigned worktree branch; do not switch
-  branches or reset shared files without agreement.
-- Make small, focused conventional commits, e.g. `fix(ai): ...` or
-  `docs: ...`, following `git log`. Commit completed work unless the user
-  requests otherwise. Stage explicit paths, review `git diff --cached`, and
-  never include credentials, runtime state or unrelated changes.
-- Use the configured Git identity. If committing is blocked, report the
-  problem rather than inventing an identity or claiming a commit exists.
-- Report the workspace, branch, commit IDs, checks run and checks blocked.
-  Keep the VM running until the host has fetched the commits.
-- The **user on the host** fetches commits for review from the centrally
-  managed project flake with `nix run .#git-fetch -- <workspace>` (or omit
-  the workspace for all). Add `--watch` for periodic fetches. Run it from
-  that flake's directory, not this repository by assumption. This is a
-  host-state operation: agents must not run it from the guest.
-  It imports `sandbox-review/<source-id>/*` refs without moving host branches
-  or the index. Fetching is not acceptance: integration is the user's choice.
-  The legacy `git-pull` app can advance host branches, so do not use it as
-  the automatic sync command.
-- Do not push to a remote or merge/rebase diverged host history unless asked.
-  A new guest branch is fetched but does not automatically replace the host's
-  checked-out branch. Detached HEAD commits are not exported by `git-fetch`;
-  put completed work on an agreed branch before handoff.
-
-See [host-owned Git synchronization](docs/plans/host-git-sync.md) for the
-approved fetch-only policy, watch lifecycle and review commands.
-
-### Guest validation and authentication
-
-Use the safe recipes below when their tools are available. If `just`, Nix
-features, store access or the required builder are unavailable, report the
-specific blocker and leave the corresponding `just` commands for the host.
-Do not substitute raw Nix builds, install a daemon, enable nested VMs or
-change host configuration to bypass these limits. Run available local checks
-and review the diff; never describe blocked checks as passing.
-
-Claude's proxy credentials are placeholders, not a guest login. A successful
-`claude auth status` alone does not prove the host credential works. Follow
-[proxy troubleshooting](docs/proxy.md#claude-authentication-failures); never
-print tokens, dump the environment, read secret payloads or commit login files.
+- Start with `git status --short` and stay on the assigned branch
+- Commit completed work on that branch, never on a detached HEAD
+- Do not push, the user fetches the commits from the host
+- Report the branch, commit IDs and which checks ran or were blocked
 
 ## Testing safely
 
-These recipes only evaluate or build this repository. They read no host
-secrets and start no VM, so run them freely, roughly cheapest first:
+Run freely:
 
 - `just fmt`
-- `just show`
-- `just eval`: evaluates every flake output, including the Linux checks
-- `just check`: Darwin regression checks; run after any change
-- `just build`: builds the `./local` runner without starting it
-- `just check-guest`: Linux VM checks for guest-side changes (network,
-  access, secrets, init, proxy, workspaces). Needs an `aarch64-linux`
-  builder; if none is available, say so instead of skipping silently
+- `just test`
+- `just build`
 
-Do not run these; they touch host secrets or host state, so the user runs
-them manually:
-
-- `just run`: resolves host secrets and starts the VM
-- `just ssh`, `just herdr-add`: act on a running VM and the host herdr
-- `just proxy-setup`, `just secrets-init`: write secrets, tokens and config
-- `nix run` of any runner app, which starts or controls a VM
-
-Run checks through `just` rather than raw `nix build` so the command matches
-what the user has allowed.
+Do not run `just sandbox` or `just sandbox-ssh`, they start or control a VM.
+If a tool is missing in the sandbox, report it instead of working around it.
