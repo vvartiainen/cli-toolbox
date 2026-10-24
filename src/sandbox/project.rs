@@ -488,7 +488,7 @@ fn pick_port(used: &[u16], bindable: impl Fn(u16) -> bool) -> Result<u16, Error>
         })
 }
 
-fn detect_template(repo: &Path) -> &'static str {
+pub(crate) fn detect_template(repo: &Path) -> &'static str {
     if repo.join("Cargo.toml").is_file() {
         "rust"
     } else if repo.join("go.mod").is_file() {
@@ -515,7 +515,7 @@ fn valid_name(name: &str) -> Result<String, Error> {
 
 /// A project name from the checkout directory: lower case letters, digits
 /// and dashes, as the guest host name `agent-<name>` needs.
-fn project_name(repo: &Path) -> String {
+pub(crate) fn project_name(repo: &Path) -> String {
     let raw = repo
         .file_name()
         .map(|name| name.to_string_lossy().to_lowercase())

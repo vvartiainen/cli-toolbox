@@ -225,6 +225,11 @@ mod tests {
         ] {
             assert!(stdout.contains(text), "missing {text}: {stdout}");
         }
+        let (_, stdout, _) = run_args(&["agent", "project", "create", "--help"]);
+        assert!(!stdout.contains("--agent"), "{stdout}");
+        assert!(stdout.contains("no worktree yet"), "{stdout}");
+        let (_, stdout, _) = run_args(&["agent", "project", "add", "--help"]);
+        assert!(stdout.contains("--name"), "{stdout}");
         let (_, stdout, _) = run_args(&["agent", "project", "start", "--help"]);
         for text in ["--agent", "--no-herdr"] {
             assert!(stdout.contains(text), "missing {text}: {stdout}");

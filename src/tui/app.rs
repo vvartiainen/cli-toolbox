@@ -9,6 +9,7 @@ use crate::azure::{AccountAction, Subscription};
 use crate::git::Worktree;
 use crate::kitty::Choice;
 use crate::sandbox::RunnerState;
+use crate::sandbox::project::{CreateOptions, TEMPLATES};
 use crate::select;
 use crate::ssh::Host;
 
@@ -233,8 +234,9 @@ pub(crate) enum Action {
     CreateWorktree(String, Option<Launch>),
     EnterWorktree(Worktree),
     Cleanup(Worktree),
-    /// A sandbox project for the launch directory's repository.
-    CreateProject,
+    /// A sandbox project for the launch directory's repository, as the
+    /// project form chose.
+    CreateProject(CreateOptions),
     /// The following name a sandbox project.
     StartProject(String),
     StopProject(String),
@@ -294,7 +296,7 @@ impl Action {
             Self::CreateWorktree(..) | Self::EnterWorktree(_) | Self::Cleanup(_) => {
                 Some(ToolId::GitWorktrees)
             }
-            Self::CreateProject
+            Self::CreateProject(_)
             | Self::StartProject(_)
             | Self::StopProject(_)
             | Self::RestartProject(_)
@@ -325,6 +327,9 @@ pub(crate) enum Prepare {
     /// The suggested name and the enabled agents of a new worktree of this
     /// project, for [`App::project_worktree_form`].
     ProjectWorktree(String),
+    /// The project form's defaults for the launch directory's repository, for
+    /// [`App::project_form`].
+    Project,
 }
 
 /// Work requested by the state machine's owner.
@@ -515,6 +520,75 @@ impl LaunchForm {
     }
 }
 
+/// The field of the project form that keys change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectField {
+    Name,
+    Template,
+    Proxy,
+    Backlog,
+}
+
+impl ProjectField {
+    const ALL: [Self; 4] = [Self::Name, Self::Template, Self::Proxy, Self::Backlog];
+
+    fn offset(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or(0);
+        Self::ALL[(index as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize]
+    }
+}
+
+/// The options of a new sandbox project.
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectForm {
+    /// The defaults, with the repository and SSH key that the form keeps.
+    pub(crate) options: CreateOptions,
+    pub(crate) name: String,
+    /// An index into [`TEMPLATES`].
+    pub(crate) template: usize,
+    pub(crate) proxy: bool,
+    pub(crate) backlog: bool,
+    pub(crate) focus: ProjectField,
+    /// Where Esc returns to.
+    pub(crate) back: Box<Screen>,
+}
+
+impl ProjectForm {
+    pub(crate) fn template(&self) -> &'static str {
+        TEMPLATES[self.template % TEMPLATES.len()]
+    }
+
+    fn action(&self) -> Option<Action> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        Some(Action::CreateProject(CreateOptions {
+            name: Some(name.into()),
+            template: Some(self.template().into()),
+            proxy: self.proxy,
+            backlog: self.backlog,
+            ..self.options.clone()
+        }))
+    }
+
+    /// Change the focused choice: the template cycles, the switches flip.
+    fn change(&mut self, delta: isize) {
+        match self.focus {
+            ProjectField::Name => {}
+            ProjectField::Template => {
+                let count = TEMPLATES.len() as isize;
+                self.template = (self.template as isize + delta).rem_euclid(count) as usize;
+            }
+            ProjectField::Proxy => self.proxy = !self.proxy,
+            ProjectField::Backlog => self.backlog = !self.backlog,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ResultState {
     pub(crate) action: Action,
@@ -532,6 +606,7 @@ pub(crate) enum Screen {
     ProjectDetails(Box<ProjectState>),
     TailorFlake(TailorState),
     NewWorktree(LaunchForm),
+    ProjectForm(ProjectForm),
     ConfirmCleanup(ConfirmState),
     Result(ResultState),
 }
@@ -700,6 +775,35 @@ impl App {
         };
     }
 
+    /// Open the project form with `defaults` for the launch directory's
+    /// repository, or show why there are none on the project list.
+    pub(crate) fn project_form(&mut self, defaults: Result<CreateOptions, String>) {
+        self.loading = None;
+        let options = match defaults {
+            Ok(options) => options,
+            Err(error) => {
+                if let Screen::Picker(picker) = &mut self.screen {
+                    picker.error = Some(error);
+                }
+                return;
+            }
+        };
+        let template = options
+            .template
+            .as_deref()
+            .and_then(|template| TEMPLATES.iter().position(|known| *known == template))
+            .unwrap_or(0);
+        self.screen = Screen::ProjectForm(ProjectForm {
+            name: options.name.clone().unwrap_or_default(),
+            template,
+            proxy: options.proxy,
+            backlog: options.backlog,
+            focus: ProjectField::Name,
+            back: Box::new(self.screen.clone()),
+            options,
+        });
+    }
+
     /// Ask how to tailor the flake of a project that was just created.
     pub(crate) fn tailor_prompt(&mut self, project: NewProject, agent: String, editor: String) {
         self.loading = None;
@@ -754,6 +858,7 @@ impl App {
             Screen::ProjectDetails(_) => self.handle_project_key(key),
             Screen::TailorFlake(_) => self.handle_tailor_key(key),
             Screen::NewWorktree(_) => self.handle_new_worktree_key(key),
+            Screen::ProjectForm(_) => self.handle_project_form_key(key),
             Screen::ConfirmCleanup(_) => self.handle_confirm_key(key),
             Screen::Result(_) => self.handle_result_key(key),
         }
@@ -764,7 +869,7 @@ impl App {
     fn question_opens_help(&self) -> bool {
         match self.screen {
             Screen::Home => !self.searching,
-            Screen::Picker(_) | Screen::NewWorktree(_) => false,
+            Screen::Picker(_) | Screen::NewWorktree(_) | Screen::ProjectForm(_) => false,
             Screen::WorktreeDetails(_)
             | Screen::ProjectDetails(_)
             | Screen::TailorFlake(_)
@@ -1015,8 +1120,11 @@ impl App {
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
+        if key.code == KeyCode::Char('a') {
+            self.loading = None;
+            return Some(Effect::Prepare(Prepare::Project));
+        }
         let action = match key.code {
-            KeyCode::Char('a') => Action::CreateProject,
             KeyCode::Char('s') => Action::SyncAllProjects,
             KeyCode::Char('r') => Action::RestartAllProjects,
             KeyCode::Char('x') => Action::StopAllProjects,
@@ -1130,6 +1238,31 @@ impl App {
                 field.truncate(kept);
             }
             (KeyCode::Char(ch), false) => form.field().push(ch),
+            _ => {}
+        }
+        Effect::None
+    }
+
+    fn handle_project_form_key(&mut self, key: KeyEvent) -> Effect {
+        let Screen::ProjectForm(form) = &mut self.screen else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let on_name = form.focus == ProjectField::Name;
+        match (key.code, ctrl) {
+            // Nothing to create without a name.
+            (KeyCode::Enter, _) => return form.action().map_or(Effect::None, Effect::Execute),
+            (KeyCode::Esc, _) => self.screen = (*form.back).clone(),
+            (KeyCode::Tab | KeyCode::Down, _) => form.focus = form.focus.offset(1),
+            (KeyCode::BackTab | KeyCode::Up, _) => form.focus = form.focus.offset(-1),
+            (KeyCode::Left, _) => form.change(-1),
+            (KeyCode::Right, _) => form.change(1),
+            (KeyCode::Char(' '), false) if !on_name => form.change(1),
+            (KeyCode::Backspace, _) if on_name => {
+                form.name.pop();
+            }
+            (KeyCode::Char('u' | 'w'), true) if on_name => form.name.clear(),
+            (KeyCode::Char(ch), false) if on_name => form.name.push(ch),
             _ => {}
         }
         Effect::None
@@ -1325,6 +1458,7 @@ mod tests {
     use crate::git::Worktree;
     use crate::kitty::Choice;
     use crate::sandbox::RunnerState;
+    use crate::sandbox::project::{CreateOptions, SshKey};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::path::PathBuf;
 
@@ -1535,10 +1669,7 @@ mod tests {
                 &[first.clone(), second.clone()],
             )))]),
         );
-        assert_eq!(
-            app.handle_key(ctrl('a')),
-            Effect::Execute(Action::CreateProject)
-        );
+        assert_eq!(app.handle_key(ctrl('a')), Effect::Prepare(Prepare::Project));
         for (ch, action) in [
             ('s', Action::SyncAllProjects),
             ('r', Action::RestartAllProjects),
@@ -1582,6 +1713,68 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)),
             Effect::Execute(Action::DoneProjectWorktree("demo".into(), second))
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            &app.screen,
+            Screen::Picker(picker) if picker.tool == ToolId::SandboxProjects
+        ));
+    }
+
+    fn create_options() -> CreateOptions {
+        CreateOptions {
+            name: Some("demo".into()),
+            repo: PathBuf::from("/p/demo"),
+            template: Some("rust".into()),
+            source: None,
+            ssh_key: SshKey::Auto,
+            proxy: true,
+            backlog: false,
+        }
+    }
+
+    #[test]
+    fn new_projects_ask_for_their_options_in_a_form() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Char('1')));
+        app.loaded(ToolId::SandboxProjects, Ok(Vec::new()));
+        assert_eq!(app.handle_key(ctrl('a')), Effect::Prepare(Prepare::Project));
+        // Without a repository the list says why.
+        app.project_form(Err("not a git repository".into()));
+        assert!(matches!(
+            &app.screen,
+            Screen::Picker(picker) if picker.error.as_deref() == Some("not a git repository")
+        ));
+
+        app.project_form(Ok(create_options()));
+        let Screen::ProjectForm(form) = &app.screen else {
+            panic!("expected the project form");
+        };
+        assert_eq!((form.name.as_str(), form.template()), ("demo", "rust"));
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None, "no name");
+        for ch in "my-app?".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Backspace));
+        assert!(!app.show_help, "? is name text");
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Left));
+        let want = CreateOptions {
+            name: Some("my-app".into()),
+            template: Some("go".into()),
+            proxy: false,
+            backlog: true,
+            ..create_options()
+        };
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::CreateProject(want))
         );
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(
@@ -1843,7 +2036,7 @@ mod tests {
             );
         }
         for action in [
-            Action::CreateProject,
+            Action::CreateProject(create_options()),
             Action::SyncProject("demo".into()),
             Action::DoneProjectWorktree("demo".into(), worktree("a")),
         ] {

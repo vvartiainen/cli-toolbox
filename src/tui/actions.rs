@@ -63,6 +63,11 @@ impl Context {
         self.cwd.as_deref().map_err(Error::msg)
     }
 
+    /// The project form's defaults for the launch directory's repository.
+    pub fn project_defaults(&self) -> Result<CreateOptions, Error> {
+        project_defaults(self.working_dir()?)
+    }
+
     pub fn load(&self, tool: ToolId) -> Result<Vec<Resource>, Error> {
         match tool {
             ToolId::GitWorktrees => Ok(git::project_worktrees(
@@ -239,33 +244,22 @@ impl Context {
                     project: None,
                 })
             }
-            Action::CreateProject => {
-                let options = CreateOptions {
-                    name: None,
-                    repo: git::main_checkout(self.working_dir()?)?,
-                    template: None,
-                    source: None,
-                    ssh_key: SshKey::Auto,
-                    proxy: true,
-                    backlog: true,
-                };
-                let (project, created) = vm::create(
+            Action::CreateProject(options) => {
+                let (project, steps) = vm::create(
                     &project::sandbox_dir()?,
-                    &options,
-                    None,
+                    options,
                     None,
                     &mut std::io::stderr(),
                 )?;
                 let summary = format!(
-                    "Sandbox project {}: {}\nFirst worktree: {}",
+                    "Sandbox project {}: {}\nNo worktree yet; add one with a in the project.",
                     project.name,
                     project.dir.display(),
-                    created.worktree.path.display(),
                 );
                 Ok(Done {
-                    body: format!("{summary}\n\n{}", steps_text(&created.steps)),
+                    body: format!("{summary}\n\n{}", steps_text(&steps)),
                     shell: None,
-                    incomplete: created.steps.iter().any(agent::Step::failed),
+                    incomplete: steps.iter().any(agent::Step::failed),
                     project: Some(NewProject {
                         name: project.name,
                         summary,
@@ -454,6 +448,22 @@ fn load_home(tool: ToolId, home: &Path) -> Result<Vec<Resource>, Error> {
             "this tool does not load resources from the home directory",
         )),
     }
+}
+
+/// The project form's defaults for the repository at `cwd`: named after its
+/// main checkout, the template its files suggest, agent-proxy credentials, and
+/// a backlog when there is a backlog folder.
+fn project_defaults(cwd: &Path) -> Result<CreateOptions, Error> {
+    let repo = git::main_checkout(cwd)?;
+    Ok(CreateOptions {
+        name: Some(project::project_name(&repo)),
+        template: Some(project::detect_template(&repo).into()),
+        source: None,
+        ssh_key: SshKey::Auto,
+        proxy: true,
+        backlog: crate::sandbox::setup::backlog_root().is_some(),
+        repo,
+    })
 }
 
 /// What the new worktree form of a project starts with.

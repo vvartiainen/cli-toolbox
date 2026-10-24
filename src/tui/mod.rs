@@ -86,6 +86,9 @@ fn event_loop(
                 let defaults = actions::project_worktree_defaults(&project);
                 app.project_worktree_form(project, defaults.name, defaults.agents, defaults.note);
             }
+            Effect::Prepare(Prepare::Project) => {
+                app.project_form(context.project_defaults().map_err(|err| err.to_string()));
+            }
             Effect::Execute(action) => {
                 let outcome = handoff(
                     session,

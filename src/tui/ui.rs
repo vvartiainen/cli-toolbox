@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Pa
 
 use super::app::{
     App, Category, ConfirmState, DetailsState, FormField, LaunchForm, NewWorktree, PickerState,
-    ProjectState, Resource, ResultState, Screen, TailorState, ToolId, branch_label,
+    ProjectField, ProjectForm, ProjectState, Resource, ResultState, Screen, TailorState, ToolId,
+    branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -21,6 +22,7 @@ const HELP_PROJECTS: &str =
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
 const HELP_NEW_WORKTREE: &str = "tab name/prompt · ←→ agent · ⏎ create · F1 help · esc back";
+const HELP_PROJECT_FORM: &str = "tab ↑↓ field · ←→ space change · ⏎ create · F1 help · esc back";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
 const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
 const HELP_OVERLAY: &str = "any key closes help";
@@ -69,6 +71,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         Screen::ProjectDetails(project) => draw_project(frame, app, project),
         Screen::TailorFlake(tailor) => draw_tailor(frame, tailor),
         Screen::NewWorktree(form) => draw_new_worktree(frame, app, form),
+        Screen::ProjectForm(form) => draw_project_form(frame, form),
         Screen::ConfirmCleanup(confirm) => draw_confirmation(frame, app, confirm),
         Screen::Result(result) => draw_result(frame, result),
     }
@@ -126,7 +129,9 @@ fn details_help(app: &App) -> &'static str {
 }
 
 fn project_help(state: &ProjectState) -> &'static str {
-    if state.status.vm.is_some() {
+    if state.status.worktrees.is_empty() {
+        "a add · v review saved · ? help · esc back"
+    } else if state.status.vm.is_some() {
         "v review · s sync · x stop · r restart · a add · ⏎ cd · D done · ? help · esc back"
     } else {
         "v review saved · u start · a add · ⏎ cd · D done · ? help · esc back"
@@ -242,6 +247,16 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             entry("←→", "choose the agent, or none"),
             entry("⌫ ^W ^U", "delete a character / word / all"),
             entry("⏎", "create the worktree (needs a name)"),
+            entry("esc", "back without creating"),
+        ],
+        Screen::ProjectForm(_) => vec![
+            entry("type", "the project name"),
+            entry("tab ↑↓", "next / previous field"),
+            entry(
+                "←→ space",
+                "change the template, or turn proxy / backlog on or off",
+            ),
+            entry("⏎", "create the project (no worktree yet)"),
             entry("esc", "back without creating"),
         ],
         Screen::ConfirmCleanup(_) => vec![
@@ -771,6 +786,55 @@ fn new_worktree_hint(form: &LaunchForm) -> String {
     }
 }
 
+fn draw_project_form(frame: &mut Frame<'_>, form: &ProjectForm) {
+    let area = frame.area();
+    let block = panel(
+        breadcrumb(Category::Sandbox, "New project"),
+        form.options.repo.display().to_string(),
+        HELP_PROJECT_FORM,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let row = |field: ProjectField, name: &str, value: Span<'static>| {
+        let focused = form.focus == field;
+        let marker = if focused { "▌" } else { " " };
+        Line::from(vec![
+            Span::styled(marker, Style::new().fg(ACCENT)),
+            Span::styled(format!("{name:<10}"), Style::new().fg(ACCENT)),
+            value,
+        ])
+    };
+    let choice = |text: String| Span::styled(format!("‹ {text} ›"), Style::new().bold());
+    let switch = |on: bool| choice(if on { "on" } else { "off" }.into());
+    let name = if form.name.is_empty() {
+        "the guest host name is agent-<name>".dark_gray()
+    } else {
+        Span::raw(clean_text(&form.name))
+    };
+    let mut lines = vec![
+        row(ProjectField::Name, "Name", name),
+        row(
+            ProjectField::Template,
+            "Template",
+            choice(form.template().into()),
+        ),
+        row(ProjectField::Proxy, "Proxy", switch(form.proxy)),
+        row(ProjectField::Backlog, "Backlog", switch(form.backlog)),
+        Line::default(),
+    ];
+    let hint = if form.name.trim().is_empty() {
+        "Type a name to create the project.".to_string()
+    } else {
+        format!(
+            "⏎ creates projects/{}/flake.nix in the sandbox directory from the {} template. Proxy: agent credentials from agent-proxy. Backlog: a Backlog.md folder for the agents. Add worktrees afterwards.",
+            form.name.trim(),
+            form.template()
+        )
+    };
+    lines.push(Line::from(clean_text(&hint).dark_gray()));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
 fn field(name: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{name:<8}"), Style::new().fg(ACCENT)),
@@ -1149,6 +1213,32 @@ mod tests {
         let text = rendered(&app, 100, super::HEIGHT);
         assert!(text.contains("Prompt  Add tests"), "{text}");
         assert!(text.contains("starts codex with the prompt."), "{text}");
+    }
+
+    #[test]
+    fn renders_the_project_form() {
+        let mut app = App::new("/tmp/project".into());
+        app.project_form(Ok(crate::sandbox::project::CreateOptions {
+            name: Some("demo".into()),
+            repo: PathBuf::from("/p/demo"),
+            template: Some("rust".into()),
+            source: None,
+            ssh_key: crate::sandbox::project::SshKey::Auto,
+            proxy: true,
+            backlog: false,
+        }));
+        let text = rendered(&app, 100, super::HEIGHT);
+        for want in [
+            "New project",
+            "/p/demo",
+            "▌Name      demo",
+            "Template  ‹ rust ›",
+            "Proxy     ‹ on ›",
+            "Backlog   ‹ off ›",
+            "projects/demo/flake.nix",
+        ] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
     }
 
     #[test]

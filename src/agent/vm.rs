@@ -93,28 +93,19 @@ fn status_with(project: Project, running: &[RunnerState]) -> ProjectStatus {
     }
 }
 
-/// Create a project for the repository and its first worktree, and set up
-/// its host side. With `ai`, that agent kind then tailors the flake to the
-/// repository. `launch` starts in the first worktree with the VM.
+/// Create a project for the repository and set up its host side, as
+/// `options` say. With `ai`, that agent kind then tailors the flake to the
+/// repository. The project has no worktree yet; `add_worktree` adds them.
 pub(crate) fn create(
     root: &Path,
     options: &CreateOptions,
     ai: Option<&str>,
-    launch: Option<&Launch>,
     stderr: &mut dyn Write,
-) -> Result<(Project, Created), Error> {
+) -> Result<(Project, Vec<Step>), Error> {
     let project = project::create(root, options, stderr)?;
-    let name = git::next_agent_worktree_name(&options.repo, &project.worktrees_root)?;
-    let worktree = git::create_worktree(&options.repo, &project.worktrees_root, &name, stderr)?;
-    write_worktrees(&project)?;
-    let mut steps = vec![Step::Done(format!(
-        "project: {} with worktree {}",
-        project.dir.display(),
-        worktree.name
-    ))];
-    if let Some(launch) = launch {
-        steps.push(record_launch_step(&project, &worktree.name, launch));
-    }
+    // Worktrees left in the repository's group, from an earlier project, count.
+    let worktrees = write_worktrees(&project)?;
+    let mut steps = vec![Step::Done(format!("project: {}", project.dir.display()))];
     steps.extend(self::setup(&project));
     if let Some(agent) = ai {
         steps.push(
@@ -124,7 +115,13 @@ pub(crate) fn create(
             },
         );
     }
-    Ok((project, Created { worktree, steps }))
+    if worktrees.is_empty() {
+        steps.push(Step::Skipped(format!(
+            "worktree: none yet; add one with `cli-toolbox agent project add {} --name NAME`",
+            project.name
+        )));
+    }
+    Ok((project, steps))
 }
 
 /// Set up the host side of what the project's flake uses: the agent-proxy

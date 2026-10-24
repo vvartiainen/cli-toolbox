@@ -11,7 +11,7 @@ use crate::{Error, agent, git};
 /// The default agent kind for `--agent`.
 const AGENT_ENV: &str = "CLI_TOOLBOX_AGENT";
 
-const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # publish agent review snapshot branches\n  cli-toolbox agent project review        # open committed work in lazygit\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
+const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project add --name feature/login --agent claude\n  cli-toolbox agent project start\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # publish agent review snapshot branches\n  cli-toolbox agent project review        # open committed work in lazygit\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
 
 #[derive(Debug, Args)]
 #[command(subcommand_required = true, subcommand_value_name = "command")]
@@ -48,9 +48,9 @@ enum AgentCommands {
 enum ProjectCommands {
     /// List sandbox projects, their VMs and worktrees.
     List,
-    /// Create a sandbox project for the current repository and its first worktree.
+    /// Create a sandbox project for the current repository.
     #[command(
-        after_help = "Creates <sandbox dir>/projects/<name>/flake.nix from `nix flake init -t <agent-sandbox>#<template>`, points its agent-sandbox input at the same flake, keeps the guest home in <sandbox dir>/state/<name>, picks a free SSH port (2300-2399), authorizes your SSH public key and mounts the generated worktrees.nix. It adds a cli-toolbox defaults module: Claude Code and Codex with their credentials from agent-proxy on the host, and a Backlog.md backlog in $CLI_TOOLBOX_BACKLOG_ROOT/<name> (default: the Obsidian Agents folder in iCloud, when it exists). Then creates the repository's first agent worktree and runs `agent project setup`.\n\nWith --ai, a coding agent then tailors the toolchain to the repository following agent-sandbox's docs/setup-agent.md.\n\nThe agent-sandbox flake defaults to $CLI_TOOLBOX_AGENT_SANDBOX_FLAKE, then the upstream repository."
+        after_help = "Creates <sandbox dir>/projects/<name>/flake.nix from `nix flake init -t <agent-sandbox>#<template>`, points its agent-sandbox input at the same flake, keeps the guest home in <sandbox dir>/state/<name>, picks a free SSH port (2300-2399), authorizes your SSH public key and mounts the generated worktrees.nix. It adds a cli-toolbox defaults module: Claude Code and Codex with their credentials from agent-proxy on the host, and a Backlog.md backlog in $CLI_TOOLBOX_BACKLOG_ROOT/<name> (default: the Obsidian Agents folder in iCloud, when it exists). Then runs `agent project setup`. The project has no worktree yet: add one with `agent project add --name NAME`.\n\nWith --ai, a coding agent then tailors the toolchain to the repository following agent-sandbox's docs/setup-agent.md.\n\nThe agent-sandbox flake defaults to $CLI_TOOLBOX_AGENT_SANDBOX_FLAKE, then the upstream repository."
     )]
     Create {
         /// Project name (default: the repository's directory name).
@@ -77,8 +77,6 @@ enum ProjectCommands {
         /// Do not give the project a backlog.
         #[arg(long)]
         no_backlog: bool,
-        #[command(flatten)]
-        launch: LaunchArgs,
     },
     /// Set up the host side of the project's proxy credentials and backlog.
     #[command(
@@ -232,7 +230,6 @@ fn run_project(
             ai,
             no_proxy,
             no_backlog,
-            launch,
         } => {
             let options = CreateOptions {
                 name,
@@ -254,14 +251,8 @@ fn run_project(
                     kind
                 }
             });
-            let (project, created) = vm::create(
-                &root,
-                &options,
-                ai.as_deref(),
-                launch.resolve()?.as_ref(),
-                stderr,
-            )?;
-            finish(&created.steps, stderr)?;
+            let (project, steps) = vm::create(&root, &options, ai.as_deref(), stderr)?;
+            finish(&steps, stderr)?;
             writeln!(stdout, "{}", project.dir.display())?;
             Ok(())
         }
