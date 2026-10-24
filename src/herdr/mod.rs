@@ -182,22 +182,50 @@ fn remove_machine_with(
     };
     // Session management is not forwarded by `herdr --machine`. Use the
     // profile's SSH target and session, not the caller's local Herdr context.
-    let session = crate::aws::shell_quote(&machine.session);
-    let reset = format!("herdr session stop {session} && herdr session delete {session}");
-    run(
+    let sessions = run(
         "ssh",
-        &[
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "--",
-            &machine.target,
-            &reset,
-        ],
+        &over_ssh(&machine.target, "herdr session list --json"),
     )?;
+    let reset = reset_command(&sessions, &machine.session)?;
+    run("ssh", &over_ssh(&machine.target, &reset))?;
     run("herdr", &["machine", "remove", &machine.id])?;
     Ok(true)
+}
+
+fn over_ssh<'a>(target: &'a str, command: &'a str) -> [&'a str; 7] {
+    [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "--",
+        target,
+        command,
+    ]
+}
+
+/// A shell command that stops `name` and discards its saved layout. The
+/// default session lives in Herdr's config directory and cannot be deleted,
+/// so its `session.json` is removed instead; the guest's server stays
+/// stopped and starts fresh on the next boot.
+fn reset_command(sessions_json: &str, name: &str) -> Result<String, Error> {
+    let listed: SessionList = serde_json::from_str(sessions_json)
+        .map_err(|err| Error::msg(format!("parse herdr session list: {err}")))?;
+    let quoted = crate::aws::shell_quote(name);
+    let stop = format!("herdr session stop {quoted}");
+    Ok(
+        match listed
+            .sessions
+            .into_iter()
+            .find(|session| session.name == name)
+        {
+            Some(session) if session.default => {
+                let layout = format!("{}/session.json", session.session_dir);
+                format!("{stop} && rm -f -- {}", crate::aws::shell_quote(&layout))
+            }
+            _ => format!("{stop} && herdr session delete {quoted}"),
+        },
+    )
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
@@ -206,6 +234,19 @@ struct SavedMachine {
     label: String,
     target: String,
     session: String,
+}
+
+#[derive(Deserialize)]
+struct SessionList {
+    sessions: Vec<ListedSession>,
+}
+
+#[derive(Deserialize)]
+struct ListedSession {
+    name: String,
+    #[serde(default)]
+    default: bool,
+    session_dir: String,
 }
 
 fn saved_machine(json: &str, label: &str) -> Result<Option<SavedMachine>, Error> {
@@ -364,6 +405,11 @@ mod tests {
         assert!(kinds_in("no kinds").is_empty());
     }
 
+    const GUEST_SESSIONS: &str = r#"{"sessions":[
+        {"default":true,"name":"default","running":true,"session_dir":"/home/agent/.config/herdr","socket_path":"/home/agent/.config/herdr/herdr.sock"},
+        {"default":false,"name":"dev's session","running":true,"session_dir":"/home/agent/.config/herdr/sessions/dev","socket_path":"/s.sock"}
+    ]}"#;
+
     #[test]
     fn resets_the_remote_session_before_removing_its_machine() {
         let mut calls = Vec::new();
@@ -371,34 +417,44 @@ mod tests {
             calls.push((program.to_string(), args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()));
             Ok(if args == ["machine", "list", "--json"] {
                 r#"[{"id":"vm-id","label":"agent-demo","target":"ssh://agent@localhost:2300","session":"default"}]"#.into()
+            } else if args.last() == Some(&"herdr session list --json") {
+                GUEST_SESSIONS.into()
             } else {
                 String::new()
             })
         }).unwrap();
         assert!(removed);
-        assert_eq!(
-            calls[1],
+        let ssh = |command: &str| {
             (
-                "ssh".into(),
-                vec![
-                    "-o".into(),
-                    "BatchMode=yes".into(),
-                    "-o".into(),
-                    "ConnectTimeout=10".into(),
-                    "--".into(),
-                    "ssh://agent@localhost:2300".into(),
-                    "herdr session stop 'default' && herdr session delete 'default'".into(),
+                "ssh".to_string(),
+                [
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=10",
+                    "--",
+                    "ssh://agent@localhost:2300",
+                    command,
                 ]
+                .map(String::from)
+                .to_vec(),
+            )
+        };
+        assert_eq!(calls[1], ssh("herdr session list --json"));
+        assert_eq!(
+            calls[2],
+            ssh(
+                "herdr session stop 'default' && rm -f -- '/home/agent/.config/herdr/session.json'"
             )
         );
         assert_eq!(
-            calls[2],
+            calls[3],
             (
                 "herdr".into(),
                 vec!["machine".into(), "remove".into(), "vm-id".into()]
             )
         );
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 4);
     }
 
     #[test]
@@ -414,6 +470,9 @@ mod tests {
             }
             if program == "ssh" {
                 assert_eq!(args[5], "vm-host");
+                if args[6] == "herdr session list --json" {
+                    return Ok(GUEST_SESSIONS.into());
+                }
                 reset = args[6].into();
             } else {
                 assert_eq!(args, ["machine", "remove", "vm-id"]);
