@@ -60,7 +60,8 @@ worktree count (see [agents.md](agents.md#sandbox-projects)):
 - Enter opens a project: its repository, VM state and worktrees. There, `u` starts
   the VM and opens every worktree in herdr, `x` stops it, `r` restarts it to mount
   worktree changes, `p` sets up its agent-proxy credentials and backlog
-  (`agent project setup`), `s` syncs the agents' commits, and `a` adds a worktree,
+  (`agent project setup`), `s` exchanges host/VM commits for review without moving
+  active branches, and `a` adds a worktree,
   asking for its agent and first prompt (see [New worktree](#new-worktree)). Up/Down
   select a worktree; Enter (or `c`) shows its `cd` command and `D` runs
   `agent project done` on it. Worktrees without an agent of their own get

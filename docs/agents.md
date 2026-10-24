@@ -126,7 +126,7 @@ identifies it.
 cli-toolbox agent project create --ai             # in the repository, once
 cli-toolbox agent project start --agent claude    # VM + herdr workspace per worktree
 cli-toolbox agent project add --restart --agent codex --prompt "Add a --json flag"
-cli-toolbox agent project sync                    # guest commits -> worktree branches
+cli-toolbox agent project sync                    # exchange host/guest history for review
 cli-toolbox agent project done cli-toolbox-agent-wt-2
 ```
 
@@ -138,12 +138,91 @@ cli-toolbox agent project done cli-toolbox-agent-wt-2
 | `agent project start [project]` | Writes `worktrees.nix`, runs the flake's `start` app (detached; waits for guest SSH), runs `herdr-add` and opens a herdr workspace at `/workspace/<worktree>` for every worktree, starting the worktree's own agent (see [Agents per worktree](#agents-per-worktree)), or else `--agent KIND` or `CLI_TOOLBOX_AGENT`, in each. |
 | `agent project stop\|restart [project]` | Stops or restarts the VM. Stopping signals the runner like `agent vm stop`, so it works without a worktree to mount (after the last `done`), and removes the VM's machine from the host herdr. Before shutdown it stops and deletes that machine's guest Herdr session, discarding the old terminal layout so the next start opens fresh workspaces instead of offering to resume obsolete sessions. Worktrees, guest home files and agent conversation history stay. If session cleanup fails (for example, SSH is unavailable), the failure is reported and shutdown still proceeds; the machine profile is kept so cleanup can be retried while the VM is running. A restart mounts worktrees added or removed since the start. `--all` stops or restarts the VM of every project whose VM is running, one after another; a project that fails does not stop the others. |
 | `agent project add [project]` | Creates the next agent worktree of the project's repository and prints its path. A running VM mounts it after a restart; `--restart` does that right away (it also restarts the other agents' sessions). `--agent KIND` and `--prompt TEXT` choose its agent and first prompt; see [Agents per worktree](#agents-per-worktree). |
-| `agent project sync [project]` | Runs the flake's `git-pull`: the guest's commits are fetched into `sandbox/*` and each worktree branch is fast-forwarded (`--worktree NAME` for one). Reports branches that diverged. `--all` syncs every project whose VM is running, under a `<project>:` heading each. |
-| `agent project done [worktree]` | Syncs the worktree, removes it and keeps its branch. It refuses when guest commits have diverged from the branch, when the VM is stopped but has a guest home (so it cannot sync), or when the worktree has uncommitted changes; `--force` removes anyway. The VM stops when its last worktree is done. |
+| `agent project sync [project]` | Exchanges committed history into review refs on both host and VM, without changing active branches, indexes or working files. Divergence needs review, not a failed sync. Shows new guest patches separately from already cherry-picked ones. `--worktree NAME` selects one; `--all` syncs every running project. See [History exchange](#history-exchange). |
+| `agent project done [worktree]` | Fetches guest branches for review, then removes the worktree and keeps its branch. It refuses while any fetched guest branch has commits outside the host worktree branch (including cherry-picked equivalents), with detached guest HEAD, when the VM is stopped but has a guest home, or with uncommitted changes. Integrate the work explicitly first; `--force` removes anyway. The VM stops when its last worktree is done. |
 
 `[project]` defaults to the project of the current repository, then to the only
 project. VM state comes from agent-sandbox's `runner.json` files under
 `~/.local/state/agent-sandbox/vms/`.
+
+### History exchange
+
+Run this **on the host**, with the VM running:
+
+```sh
+cli-toolbox agent project sync
+# Or: cli-toolbox agent project sync --worktree cli-toolbox-agent-wt
+```
+
+Files are already shared live. This command exchanges only committed Git history:
+
+- Guest → host: all named guest branches go into
+  `refs/remotes/sandbox-review/<source>/<branch>`.
+- Host → guest: the selected host worktree branch goes into
+  `refs/remotes/host-review/<source>/<branch>` in that guest repository.
+- `<source>` is a stable identifier for the project directory and workspace;
+  different workspaces cannot overwrite each other's review refs.
+- Neither active branch nor index is moved. No checkout, reset, merge or rebase
+  happens, even when a fast-forward would be possible. No tags are exported.
+  Review tips are refreshed, but deleted guest branches are not pruned.
+- The runner's `runtimeDir/ssh_config` supplies the VM connection and host key.
+  SSH must work noninteractively (load the authorized key in your SSH agent).
+  This does not require an updated external project flake or use legacy `git-pull`.
+
+Sync prints the exact review refs, inspection commands, and commit IDs. A
+diverged branch is a successful exchange, not an error. Transport/authentication
+failures still fail the command; other worktrees are attempted. Guest history is
+fetched first, so it remains on the host even if sending host history fails.
+Worktrees not mounted by the VM are skipped with a restart hint. Detached guest
+HEAD is rejected rather than silently omitting its unexported commits.
+
+On the host, review the printed `sandbox-review/…` ref and cherry-pick selected
+commits labelled **new**:
+
+```sh
+git show <commit-id>
+git cherry-pick <commit-id>
+cli-toolbox agent project sync
+```
+
+After cherry-picking, sync labels patch-equivalent guest commits **already
+applied on host**, instead of repeatedly listing them as new work. This uses
+Git's patch-equivalence heuristic, not an assertion that branch histories match;
+merge commits remain separately visible for review.
+
+In the VM, the printed `host-review/…` ref makes host commits available to the
+agent without a restart. Inspect it with the printed `git log` command. Accepting
+those commits into the active guest branch is still explicit: pause the agent
+and coordinate with the host before merging or cherry-picking, because working
+files are shared. A clean, compatible checkout can use
+`git merge --ff-only <host-review-ref>`; if it refuses, do not force or reset the
+shared files. Keep the review refs and resolve the history deliberately.
+
+`done` stays conservative: patch-equivalent commits are not Git ancestors.
+It checks every fetched guest branch, not just the initially assigned branch,
+and refuses until its history is integrated into the host worktree branch.
+After deliberately accepting equivalent patches you can choose `done --force`,
+but first verify there are no uncommitted changes or other unreviewed branches.
+
+#### Trying a new CLI build
+
+On the host, cherry-pick the implementation commit, then run:
+
+```sh
+just fmt
+just test
+just build
+./bin/cli-toolbox agent project sync --worktree cli-toolbox-agent-wt
+```
+
+No VM rebuild is required. Confirm both review refs exist with
+`git show-ref` in their respective repositories and that each side's
+`git rev-parse HEAD` is unchanged. Repeat sync after cherry-picking a guest
+commit: it should be shown as already applied, with a successful exit status.
+Local regression tests cover real Git transfers between temporary repositories,
+dirty/staged/untracked files, equivalent patches, extra branches, merge commits,
+and transport/export failures. The host-to-VM SSH path still needs a live host
+test; running sync inside the sandbox is not a substitute.
 
 ### Agents per worktree
 
@@ -228,16 +307,18 @@ whose project or flake directory was removed while it ran, where
 | --- | --- |
 | agent-sandbox (Nix) | VM lifecycle for the directory it is started in: ports, state, home image, git bridging, herdr in the guest. Exposes the flake apps `start`, `stop`, `status`, `ssh`, `git-pull` and `herdr-add`, and `runner.json`. |
 | herdr | Agent sessions in the guest, and the host sidebar of machines. |
-| cli-toolbox | Projects, worktrees and the `worktrees.nix` that ties them together; orchestration of VM, herdr, sync and cleanup, from the CLI and the TUI. |
+| cli-toolbox | Projects, worktrees and the `worktrees.nix` that ties them together; orchestration of VM, herdr, bidirectional Git review-ref exchange over the runner's SSH connection, and cleanup, from the CLI and the TUI. |
 
-- cli-toolbox never reads Nix internals. It only runs `nix run .#<app>` in the
-  project directory, and reads `runner.json`; `agent vm stop` signals the
-  runner it records, as the `stop` app does.
+- cli-toolbox never reads Nix internals. VM setup runs `nix run .#<app>` in the
+  project directory and reads `runner.json`; history exchange runs ordinary Git
+  over SSH using the recorded runtime directory's `ssh_config`. `agent vm stop`
+  signals the recorded runner, as the `stop` app does.
 - `vm.workspaces` and `stateDir` are fixed when the flake is built, so mounting a
   new worktree needs a VM restart. cli-toolbox remembers what the running VM
   mounted (`state/<project>/mounted-worktrees.nix`) and says when a restart is due.
-- agent-sandbox knows nothing about worktrees or cli-toolbox. Every step still
-  works by hand with `nix run .#…` in the project directory.
+- agent-sandbox knows nothing about worktrees or cli-toolbox. Lifecycle steps
+  still work by hand with `nix run .#…` in the project directory; history exchange
+  uses ordinary Git review refs instead of relying on the legacy `git-pull` app.
 
 ### Known gaps
 

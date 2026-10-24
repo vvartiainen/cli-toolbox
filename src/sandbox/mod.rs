@@ -1,8 +1,8 @@
 //! agent-sandbox integration: the central project flakes and the microVM
-//! each one runs. Everything goes through the flake's apps
-//! (`nix run .#start|git-pull|herdr-add`, run from the project directory,
-//! which identifies the VM) and the `runner.json` files the runner keeps in
-//! its host-only runtime directory; stopping needs only the latter.
+//! each one runs. VM control uses the flake's apps
+//! (`nix run .#start|herdr-add`, run from the project directory)
+//! and the host-only `runner.json` files. History exchange uses the runner's
+//! SSH config; stopping needs only its process metadata.
 
 use std::ffi::OsString;
 use std::fs;
@@ -17,6 +17,7 @@ use crate::{Error, exec};
 
 pub(crate) mod project;
 pub(crate) mod setup;
+pub(crate) mod sync;
 
 /// Overrides agent-sandbox's runtime state root, like the runner does.
 pub(crate) const RUNTIME_ROOT_ENV: &str = "AGENT_SANDBOX_RUNTIME_ROOT";
@@ -61,18 +62,6 @@ pub(crate) fn start(dir: &Path) -> Result<RunnerState, Error> {
     let json = exec::stdout_of_in("nix", &["run", ".#start"], Some(dir), &[])?;
     serde_json::from_str(&json)
         .map_err(|err| Error::msg(format!("parse agent-sandbox start output: {err}\n{json}")))
-}
-
-/// Fetch the guest's commits of `workspaces` (all when empty) into their
-/// host repositories as `sandbox/*` and fast-forward their branches.
-/// Returns the app's report.
-pub(crate) fn git_pull(dir: &Path, workspaces: &[&str]) -> Result<String, Error> {
-    let mut args = vec!["run", ".#git-pull"];
-    if !workspaces.is_empty() {
-        args.push("--");
-        args.extend(workspaces);
-    }
-    exec::stdout_of_in("nix", &args, Some(dir), &[])
 }
 
 /// Add the VM of the flake in `dir` to the host herdr as a machine labelled

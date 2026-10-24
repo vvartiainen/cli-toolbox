@@ -11,7 +11,7 @@ use crate::{Error, agent, git};
 /// The default agent kind for `--agent`.
 const AGENT_ENV: &str = "CLI_TOOLBOX_AGENT";
 
-const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # the agents' commits land on the worktree branches\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
+const PROJECT_HELP: &str = "A sandbox project is a directory in ~/.agent-sandbox/projects/ (or $CLI_TOOLBOX_SANDBOX_DIR/projects/) holding an agent-sandbox flake, out of the agents' reach. Its one microVM mounts every agent worktree of the project's repository at /workspace/<worktree>; cli-toolbox writes that list to worktrees.nix next to the flake. The VM is added to herdr as the machine agent-<project>, with a guest workspace per worktree.\n\nWorkflow:\n\n  cli-toolbox agent project create --ai   # in the repository, once\n  cli-toolbox agent project start --agent claude\n  cli-toolbox agent project add --restart # another worktree for another agent\n  cli-toolbox agent project sync          # exchange host/guest history for review\n  cli-toolbox agent project done <worktree>\n\nPROJECT defaults to the project of the current repository, or the only project.";
 
 #[derive(Debug, Args)]
 #[command(subcommand_required = true, subcommand_value_name = "command")]
@@ -134,9 +134,9 @@ enum ProjectCommands {
         #[arg(long)]
         no_herdr: bool,
     },
-    /// Bring the agents' commits to the worktree branches on the host.
+    /// Exchange host and VM commits for review, leaving active branches alone.
     #[command(
-        after_help = "Fetches the guest's commits into sandbox/* and fast-forwards each worktree branch, which then exists in the main repository for review and merge. Files are already shared live; only git history moves."
+        after_help = "Fetches named guest branches into sandbox-review/<source>/* on the host and sends the selected host branch to host-review/<source>/* in the VM. Files are already shared live; neither checkout, index nor active branch is changed. Divergence is a review status, not a sync error. Shows new patches separately from already cherry-picked patches. Uses the runner's SSH config; no flake update is required."
     )]
     Sync {
         #[arg(conflicts_with = "all")]
@@ -150,7 +150,7 @@ enum ProjectCommands {
     },
     /// Sync a worktree, then remove it and keep its branch.
     #[command(
-        after_help = "Refuses when guest commits could not be synced, when the VM is stopped but has a guest home, or when the worktree has uncommitted changes. --force removes anyway. The VM stops when its last worktree is done."
+        after_help = "Fetches guest branches for review without moving the host branch. Refuses while guest commits remain outside the host branch (even cherry-picked equivalents), when the VM is stopped but has a guest home, or when the worktree has uncommitted changes. Integrate the work explicitly before done; --force removes anyway. The VM stops when its last worktree is done."
     )]
     Done {
         /// Worktree name or path; may be omitted when the project has only one.

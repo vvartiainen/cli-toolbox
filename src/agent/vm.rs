@@ -2,7 +2,8 @@
 //! central sandbox directory and mounting every agent worktree of the
 //! project's repository at `/workspace/<worktree>`. The VM is added to the
 //! host herdr as a machine, with a guest workspace per worktree. The agents'
-//! commits come back as the worktrees' branches.
+//! commits and host history are exchanged as review refs, without moving either
+//! side's active branches.
 //!
 //! The `vm_*` functions manage every running agent-sandbox VM from its
 //! runner state alone, also when its project directory is gone.
@@ -428,77 +429,76 @@ pub(crate) fn restart(
     Ok(steps)
 }
 
-/// The result of bringing the agents' commits to the host.
+/// History exchange results. Divergence needs review, not a failed sync.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Synced {
-    /// What git-pull reported, one line per worktree.
     pub(crate) report: String,
-    /// Per branch, guest commits that the host branch does not have.
-    pub(crate) unsynced: Vec<(String, String)>,
+    pub(crate) failures: Vec<String>,
 }
 
-/// Fetch the guest's commits and fast-forward the worktrees' branches: the
-/// one given, or all of them.
+/// Exchange committed history into review refs in both directions. Never
+/// advance an active branch or touch either checkout's index or working files.
 pub(crate) fn sync(project: &Project, worktree: Option<&AgentWorktree>) -> Result<Synced, Error> {
-    if sandbox::vm_for(&running_vms(), &project.dir).is_none() {
-        return Err(Error::msg(format!(
+    let vm = sandbox::vm_for(&running_vms(), &project.dir).ok_or_else(|| {
+        Error::msg(format!(
             "the VM of {} is not running; start it with `cli-toolbox agent project start {}`",
             project.name, project.name
-        )));
-    }
+        ))
+    })?;
     let worktrees = match worktree {
         Some(worktree) => vec![worktree.clone()],
         None => git::agent_worktrees(project.repo()?)?,
     };
-    // The guest has no Git directory for worktrees added since it started.
-    let (mounted, unmounted): (Vec<_>, Vec<_>) = worktrees
-        .iter()
-        .partition(|worktree| project.mounts(&worktree.name));
-    let mut report: String = unmounted
-        .iter()
-        .map(|worktree| {
-            format!(
+    Ok(sync_worktrees(
+        &worktrees,
+        |name| project.mounts(name),
+        |worktree| {
+            sandbox::sync::Bridge::for_vm(&vm, &worktree.name)?
+                .exchange(&worktree.path, &worktree.branch)
+        },
+    ))
+}
+
+fn sync_worktrees(
+    worktrees: &[AgentWorktree],
+    mounted: impl Fn(&str) -> bool,
+    mut exchange: impl FnMut(&AgentWorktree) -> Result<String, Error>,
+) -> Synced {
+    let mut synced = Synced {
+        report: String::new(),
+        failures: Vec::new(),
+    };
+    for worktree in worktrees {
+        if !mounted(&worktree.name) {
+            synced.report.push_str(&format!(
                 "{}: not mounted by the VM yet; restart it to sync.\n",
                 worktree.name
-            )
-        })
-        .collect();
-    if !mounted.is_empty() {
-        let names: Vec<&str> = mounted
-            .iter()
-            .map(|worktree| worktree.name.as_str())
-            .collect();
-        report.push_str(&sandbox::git_pull(&project.dir, &names)?);
-    }
-    let mut unsynced = Vec::new();
-    for worktree in &worktrees {
-        if let Some(log) = unsynced_commits(&worktree.path, &worktree.branch)? {
-            unsynced.push((worktree.branch.clone(), log));
+            ));
+            continue;
+        }
+        synced.report.push_str(&format!("{}:\n", worktree.name));
+        match exchange(worktree) {
+            Ok(report) => synced.report.push_str(&report),
+            Err(err) => {
+                synced
+                    .report
+                    .push_str(&format!("  history exchange failed: {err}\n"));
+                synced.failures.push(worktree.name.clone());
+            }
         }
     }
-    Ok(Synced { report, unsynced })
+    synced
 }
 
-/// Write `synced` for people: the report, then diverged branches.
 pub(crate) fn write_synced(synced: &Synced, out: &mut dyn Write) -> Result<(), Error> {
     write!(out, "{}", synced.report)?;
-    for (branch, log) in &synced.unsynced {
-        writeln!(
-            out,
-            "{branch} has diverged from the guest; its commits are in sandbox/{branch}:\n{log}"
-        )?;
+    if !synced.failures.is_empty() {
+        return Err(Error::msg(format!(
+            "history exchange failed for {}",
+            synced.failures.join(", ")
+        )));
     }
     Ok(())
-}
-
-/// Guest commits fetched into `refs/remotes/sandbox/<branch>` that `branch`
-/// does not contain, for example after the host committed on its own.
-pub(crate) fn unsynced_commits(dir: &Path, branch: &str) -> Result<Option<String>, Error> {
-    let guest = format!("refs/remotes/sandbox/{branch}");
-    if git::resolve_commit(dir, &guest).is_none() || git::is_ancestor(dir, &guest, branch) {
-        return Ok(None);
-    }
-    git::log_oneline(dir, &format!("{branch}..{guest}")).map(Some)
 }
 
 /// The project's agent worktree named `name` (or its only one).
@@ -516,7 +516,7 @@ pub(crate) fn done(
     stderr: &mut dyn Write,
 ) -> Result<Vec<Step>, Error> {
     let vm = sandbox::vm_for(&running_vms(), &project.dir);
-    if let Some(problem) = done_blocker(project, worktree, vm.is_some(), options.force)? {
+    if let Some(problem) = done_blocker(project, worktree, vm.as_ref(), options.force)? {
         return Err(Error::msg(format!(
             "{problem}\nPass --force to remove {} anyway; its branch {} stays.",
             worktree.name, worktree.branch
@@ -549,22 +549,29 @@ pub(crate) fn done(
 fn done_blocker(
     project: &Project,
     worktree: &AgentWorktree,
-    running: bool,
+    vm: Option<&RunnerState>,
     force: bool,
 ) -> Result<Option<String>, Error> {
     if force {
         return Ok(None);
     }
     // A worktree added after the VM started has no guest commits to lose.
-    if running && project.mounts(&worktree.name) {
-        sandbox::git_pull(&project.dir, &[&worktree.name])?;
-        if let Some(unsynced) = unsynced_commits(&worktree.path, &worktree.branch)? {
+    if let Some(vm) = vm.filter(|_| project.mounts(&worktree.name)) {
+        let review = sandbox::sync::Bridge::for_vm(vm, &worktree.name)?
+            .fetch(&worktree.path, &worktree.branch)?;
+        if !review.pending.is_empty() {
             return Ok(Some(format!(
-                "{} has diverged from the guest; these guest commits would be lost:\n{unsynced}",
-                worktree.branch
+                "{} still has guest commits outside its host branch; review and integrate them before done:\n{}",
+                worktree.name,
+                review
+                    .pending
+                    .iter()
+                    .map(|(reference, log)| format!("{reference}:\n{log}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )));
         }
-    } else if project.state_dir.join("home.img").exists() {
+    } else if vm.is_none() && project.state_dir.join("home.img").exists() {
         return Ok(Some(format!(
             "the VM of {} is stopped, so the latest commits of {} cannot be synced; run `cli-toolbox agent project start {}` first",
             project.name, worktree.name, project.name
@@ -784,18 +791,7 @@ mod tests {
             matches!(&steps[1], Step::Failed(message) if message.contains("runner unavailable"))
         );
     }
-    use crate::git::tests::{commit_all, init_git_repo, skip_without_git};
-    use std::process::Command;
-
-    fn git(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git {args:?}: {output:?}");
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
+    use crate::git::tests::{init_git_repo, skip_without_git};
 
     /// A project for `repo` in `root`, as `project create` leaves it.
     fn project(root: &Path, repo: &Path) -> Project {
@@ -811,54 +807,44 @@ mod tests {
     }
 
     #[test]
-    fn synced_guest_commits_are_not_reported() {
-        if skip_without_git() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("demo");
-        init_git_repo(&repo);
-        let branch = git(&repo, &["symbolic-ref", "--short", "HEAD"]);
-        // No sync yet, then a sync that fast-forwarded the branch.
-        assert_eq!(unsynced_commits(&repo, &branch).unwrap(), None);
-        git(
-            &repo,
-            &[
-                "update-ref",
-                &format!("refs/remotes/sandbox/{branch}"),
-                "HEAD",
-            ],
+    fn sync_skips_unmounted_worktrees_and_continues_after_transport_errors() {
+        let worktrees: Vec<_> = ["unmounted", "broken", "ready"]
+            .into_iter()
+            .map(|name| AgentWorktree {
+                name: name.into(),
+                path: "/unused".into(),
+                branch: name.into(),
+            })
+            .collect();
+        let mut called = Vec::new();
+        let synced = sync_worktrees(
+            &worktrees,
+            |name| name != "unmounted",
+            |worktree| {
+                called.push(worktree.name.clone());
+                if worktree.name == "broken" {
+                    Err(Error::msg("SSH unavailable"))
+                } else {
+                    Ok("guest: 1 new patch to review\n".into())
+                }
+            },
         );
-        assert_eq!(unsynced_commits(&repo, &branch).unwrap(), None);
+        assert_eq!(called, ["broken", "ready"]);
+        assert_eq!(synced.failures, ["broken"]);
+        assert!(synced.report.contains("not mounted"));
+        assert!(synced.report.contains("SSH unavailable"));
+        let mut output = Vec::new();
+        assert!(write_synced(&synced, &mut output).is_err());
+        assert!(String::from_utf8(output).unwrap().contains("1 new patch"));
     }
 
     #[test]
-    fn diverged_guest_commits_are_reported() {
-        if skip_without_git() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("demo");
-        init_git_repo(&repo);
-        let branch = git(&repo, &["symbolic-ref", "--short", "HEAD"]);
-        let base = git(&repo, &["rev-parse", "HEAD"]);
-        // The guest committed on the base, and the host on its own.
-        std::fs::write(repo.join("guest.txt"), "guest\n").unwrap();
-        commit_all(&repo);
-        git(
-            &repo,
-            &[
-                "update-ref",
-                &format!("refs/remotes/sandbox/{branch}"),
-                "HEAD",
-            ],
-        );
-        git(&repo, &["reset", "-q", "--hard", &base]);
-        std::fs::write(repo.join("host.txt"), "host\n").unwrap();
-        commit_all(&repo);
-
-        let unsynced = unsynced_commits(&repo, &branch).unwrap().unwrap();
-        assert_eq!(unsynced.lines().count(), 1, "{unsynced}");
+    fn review_needed_is_a_successful_sync() {
+        let synced = Synced {
+            report: "guest: 1 new patch to review\n".into(),
+            failures: Vec::new(),
+        };
+        assert!(write_synced(&synced, &mut Vec::new()).is_ok());
     }
 
     #[test]
@@ -989,12 +975,12 @@ mod tests {
         .unwrap();
         let worktree = created.worktree;
         assert_eq!(
-            done_blocker(&project, &worktree, false, false).unwrap(),
+            done_blocker(&project, &worktree, None, false).unwrap(),
             None
         );
 
         std::fs::write(worktree.path.join("wip.txt"), "wip\n").unwrap();
-        let blocker = done_blocker(&project, &worktree, false, false)
+        let blocker = done_blocker(&project, &worktree, None, false)
             .unwrap()
             .unwrap();
         assert!(blocker.contains("?? wip.txt"), "{blocker}");
@@ -1004,21 +990,24 @@ mod tests {
         std::fs::create_dir_all(&project.state_dir).unwrap();
         std::fs::write(project.state_dir.join("mounted-worktrees.nix"), "{\n}\n").unwrap();
         assert_eq!(
-            done_blocker(&project, &worktree, true, false).unwrap(),
+            done_blocker(&project, &worktree, Some(&RunnerState::default()), false).unwrap(),
             None
         );
         std::fs::write(worktree.path.join("wip.txt"), "wip\n").unwrap();
 
         std::fs::create_dir_all(&project.state_dir).unwrap();
         std::fs::write(project.state_dir.join("home.img"), "home").unwrap();
-        let blocker = done_blocker(&project, &worktree, false, false)
+        let blocker = done_blocker(&project, &worktree, None, false)
             .unwrap()
             .unwrap();
         assert!(blocker.contains("is stopped"), "{blocker}");
-        assert_eq!(
-            done_blocker(&project, &worktree, false, true).unwrap(),
-            None
-        );
+        // A live VM that never mounted this worktree has no history to fetch,
+        // even when its persistent home already exists.
+        let blocker = done_blocker(&project, &worktree, Some(&RunnerState::default()), false)
+            .unwrap()
+            .unwrap();
+        assert!(blocker.contains("uncommitted changes"), "{blocker}");
+        assert_eq!(done_blocker(&project, &worktree, None, true).unwrap(), None);
 
         let forced = VmOptions {
             force: true,

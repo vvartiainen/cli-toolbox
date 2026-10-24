@@ -245,6 +245,21 @@ mod tests {
     }
 
     #[test]
+    fn project_sync_help_explains_bidirectional_review_without_branch_updates() {
+        let (result, stdout, stderr) = run_args(&["agent", "project", "sync", "--help"]);
+        result.unwrap();
+        for text in [
+            "sandbox-review/<source>",
+            "host-review/<source>",
+            "Divergence is a review status",
+        ] {
+            assert!(stdout.contains(text), "missing {text}: {stdout}");
+        }
+        assert!(!stdout.contains("fast-forwards"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
     fn prints_agent_worktree_help() {
         let (result, stdout, stderr) = run_args(&["agent", "worktree", "--help"]);
         result.unwrap();

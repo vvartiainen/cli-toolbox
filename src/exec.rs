@@ -78,7 +78,25 @@ pub fn combined_output(name: &str, args: &[&str], cwd: Option<&Path>) -> Result<
 /// Run `name` without a terminal and return its stdout. Stderr is captured
 /// and only shown in the error.
 pub fn captured_stdout(name: &str, args: &[&str]) -> Result<String, Error> {
-    let output = output(name, args, None)?;
+    captured_stdout_in(name, args, None, &[])
+}
+
+/// Capture stdout with a working directory and command-local environment.
+/// Stdin is closed; stderr is included on failure, never mixed into stdout.
+pub fn captured_stdout_in(
+    name: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    envs: &[(&str, &OsStr)],
+) -> Result<String, Error> {
+    let mut command = Command::new(name);
+    command.args(args).envs(envs.iter().copied());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command
+        .output()
+        .map_err(|err| command_error(name, args, err))?;
     status_ok(name, args, &output)?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
