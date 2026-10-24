@@ -9,7 +9,7 @@ use crossterm::event::{self, Event};
 
 use crate::{Error, terminal::TerminalSession};
 use actions::{Context, Outcome};
-use app::{App, Effect};
+use app::{App, Effect, Prepare};
 
 /// Run the launcher. With `print_shell`, a successful shell action (an AWS
 /// export or a `cd`) exits the launcher and is printed to `stdout` for `eval`.
@@ -81,6 +81,10 @@ fn event_loop(
                     .terminal_mut()
                     .draw(|frame| ui::draw(frame, app))?;
                 app.loaded(tool, context.load(tool).map_err(|err| err.to_string()));
+            }
+            Effect::Prepare(Prepare::ProjectWorktree(project)) => {
+                let defaults = actions::project_worktree_defaults(&project);
+                app.project_worktree_form(project, defaults.name, defaults.agents, defaults.note);
             }
             Effect::Execute(action) => {
                 let outcome = handoff(

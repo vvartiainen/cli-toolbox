@@ -228,8 +228,9 @@ pub(crate) enum Action {
     AzureAccount(AccountAction),
     Kitty(PathBuf),
     Ssh(Host),
-    /// A worktree of the launch directory, with the agent to start in it.
-    CreateWorktree(Option<Launch>),
+    /// A git worktree of the launch directory by name, with the agent to
+    /// start in it.
+    CreateWorktree(String, Option<Launch>),
     EnterWorktree(Worktree),
     Cleanup(Worktree),
     /// A sandbox project for the launch directory's repository.
@@ -243,8 +244,9 @@ pub(crate) enum Action {
     SyncProject(String),
     /// Open the selected agent worktree (or a saved snapshot) in lazygit.
     ReviewProject(String, Option<Worktree>),
-    /// A worktree of the project, with the agent to start in it with the VM.
-    AddProjectWorktree(String, Option<Launch>),
+    /// A worktree of the project by name, with the agent to start in it with
+    /// the VM.
+    AddProjectWorktree(String, String, Option<Launch>),
     /// Sync and remove a project's worktree, keeping its branch.
     DoneProjectWorktree(String, Worktree),
     EnterProjectWorktree(Worktree),
@@ -289,7 +291,7 @@ impl Action {
     /// return to the home screen.
     pub(crate) fn return_tool(&self) -> Option<ToolId> {
         match self {
-            Self::CreateWorktree(_) | Self::EnterWorktree(_) | Self::Cleanup(_) => {
+            Self::CreateWorktree(..) | Self::EnterWorktree(_) | Self::Cleanup(_) => {
                 Some(ToolId::GitWorktrees)
             }
             Self::CreateProject
@@ -316,11 +318,22 @@ impl Action {
     }
 }
 
+/// Values the runtime looks up for a form, then hands to the matching
+/// [`App`] method.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Prepare {
+    /// The suggested name and the enabled agents of a new worktree of this
+    /// project, for [`App::project_worktree_form`].
+    ProjectWorktree(String),
+}
+
 /// Work requested by the state machine's owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Effect {
     None,
     Load(ToolId),
+    /// Look up what a form needs before it opens; see [`Prepare`].
+    Prepare(Prepare),
     Execute(Action),
     Quit,
 }
@@ -423,15 +436,29 @@ pub(crate) enum NewWorktree {
     Project(String),
 }
 
-/// The agent and first prompt for a new worktree.
+/// The field of the new worktree form that typing edits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FormField {
+    Name,
+    Prompt,
+}
+
+/// The name of a new worktree, and the agent and first prompt for it.
 #[derive(Clone, Debug)]
 pub(crate) struct LaunchForm {
     pub(crate) target: NewWorktree,
+    /// The branch name; the folder name is derived from it.
+    pub(crate) name: String,
+    /// An agent can be chosen: Herdr is there to run it in.
+    pub(crate) agents: bool,
     /// The agent kinds to choose from.
     pub(crate) kinds: Vec<String>,
     /// The chosen kind, or none for a worktree without an agent.
     pub(crate) kind: Option<usize>,
     pub(crate) prompt: String,
+    pub(crate) focus: FormField,
+    /// What could not be looked up for the form, such as an unreadable flake.
+    pub(crate) note: Option<String>,
     /// Where Esc returns to.
     pub(crate) back: Box<Screen>,
 }
@@ -439,6 +466,7 @@ pub(crate) struct LaunchForm {
 impl LaunchForm {
     pub(crate) fn kind(&self) -> Option<&str> {
         self.kind
+            .filter(|_| self.agents)
             .and_then(|index| self.kinds.get(index))
             .map(String::as_str)
     }
@@ -448,11 +476,34 @@ impl LaunchForm {
             .map(|kind| Launch::new(kind, Some(self.prompt.clone())))
     }
 
-    fn action(&self) -> Action {
-        match &self.target {
-            NewWorktree::Local => Action::CreateWorktree(self.launch()),
-            NewWorktree::Project(name) => Action::AddProjectWorktree(name.clone(), self.launch()),
+    /// The worktree to create, once it has a name.
+    fn action(&self) -> Option<Action> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return None;
         }
+        Some(match &self.target {
+            NewWorktree::Local => Action::CreateWorktree(name.into(), self.launch()),
+            NewWorktree::Project(project) => {
+                Action::AddProjectWorktree(project.clone(), name.into(), self.launch())
+            }
+        })
+    }
+
+    fn field(&mut self) -> &mut String {
+        match self.focus {
+            FormField::Name => &mut self.name,
+            FormField::Prompt => &mut self.prompt,
+        }
+    }
+
+    /// Move between the name and the prompt; without agents there is only
+    /// the name.
+    fn switch_focus(&mut self) {
+        self.focus = match self.focus {
+            FormField::Name if self.agents => FormField::Prompt,
+            _ => FormField::Name,
+        };
     }
 
     /// Step through no agent and the kinds.
@@ -530,20 +581,38 @@ impl App {
         }
     }
 
-    /// Ask for the agent and prompt of a new worktree, or create it right
-    /// away when there is no Herdr to start an agent in.
-    fn new_worktree(&mut self, target: NewWorktree, back: Screen) -> Effect {
+    /// Ask for the name of a new worktree and, with Herdr to run one in, the
+    /// agent to start there with its first prompt. `kinds` are the agents on
+    /// offer; the default one is chosen when it is among them.
+    fn new_worktree(
+        &mut self,
+        target: NewWorktree,
+        name: String,
+        kinds: Vec<String>,
+        note: Option<String>,
+        back: Screen,
+    ) {
         self.loading = None;
-        let form = LaunchForm {
+        let kind = self
+            .default_agent
+            .as_ref()
+            .and_then(|default| kinds.iter().position(|kind| kind == default));
+        self.screen = Screen::NewWorktree(LaunchForm {
             target,
-            kinds: Vec::new(),
-            kind: None,
+            name,
+            agents: self.herdr,
+            kinds,
+            kind,
             prompt: String::new(),
+            focus: FormField::Name,
+            note,
             back: Box::new(back),
-        };
-        if !self.herdr {
-            return Effect::Execute(form.action());
-        }
+        });
+    }
+
+    /// The agents a git worktree can start: those Herdr lists (or common
+    /// ones), and the default.
+    fn local_agent_kinds(&self) -> Vec<String> {
         let mut kinds = self.agent_kinds.clone();
         if kinds.is_empty() {
             kinds = FALLBACK_AGENTS.map(String::from).to_vec();
@@ -553,16 +622,21 @@ impl App {
         {
             kinds.insert(0, default.clone());
         }
-        let kind = self
-            .default_agent
-            .as_ref()
-            .and_then(|default| kinds.iter().position(|kind| kind == default));
-        self.screen = Screen::NewWorktree(LaunchForm {
-            kinds,
-            kind,
-            ..form
-        });
-        Effect::None
+        kinds
+    }
+
+    /// Open the new worktree form of `project` with what the runtime looked
+    /// up: the suggested `name` and the `agents` the project enables, the only
+    /// ones it offers. `note` says what could not be looked up.
+    pub(crate) fn project_worktree_form(
+        &mut self,
+        project: String,
+        name: String,
+        agents: Vec<String>,
+        note: Option<String>,
+    ) {
+        let back = self.screen.clone();
+        self.new_worktree(NewWorktree::Project(project), name, agents, note, back);
     }
 
     /// Tools listed on the home screen: the active category, or every tool
@@ -888,7 +962,9 @@ impl App {
         match key.code {
             KeyCode::Char('a') => {
                 let back = Screen::Picker(picker.clone());
-                Some(self.new_worktree(NewWorktree::Local, back))
+                let kinds = self.local_agent_kinds();
+                self.new_worktree(NewWorktree::Local, String::new(), kinds, None, back);
+                Some(Effect::None)
             }
             KeyCode::Char('d') => {
                 let Some(worktree) = picker.selected_worktree() else {
@@ -989,10 +1065,7 @@ impl App {
             KeyCode::Char('p') => return Effect::Execute(Action::SetupProject(name)),
             KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
             KeyCode::Char('v') => return Effect::Execute(Action::ReviewProject(name, worktree)),
-            KeyCode::Char('a') => {
-                let back = Screen::ProjectDetails(state.clone());
-                return self.new_worktree(NewWorktree::Project(name), back);
-            }
+            KeyCode::Char('a') => return Effect::Prepare(Prepare::ProjectWorktree(name)),
             KeyCode::Enter | KeyCode::Char('c') => {
                 if let Some(worktree) = worktree {
                     return Effect::Execute(Action::EnterProjectWorktree(worktree));
@@ -1031,19 +1104,32 @@ impl App {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (key.code, ctrl) {
-            (KeyCode::Enter, _) => return Effect::Execute(form.action()),
+            // Nothing to create without a name.
+            (KeyCode::Enter, _) => return form.action().map_or(Effect::None, Effect::Execute),
             (KeyCode::Esc, _) => self.screen = (*form.back).clone(),
-            (KeyCode::Left | KeyCode::Up | KeyCode::BackTab, _) => form.cycle(-1),
-            (KeyCode::Right | KeyCode::Down | KeyCode::Tab, _) => form.cycle(1),
+            (KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down, _) => {
+                form.switch_focus()
+            }
+            (KeyCode::Left, _) if form.agents => form.cycle(-1),
+            (KeyCode::Right, _) if form.agents => form.cycle(1),
             (KeyCode::Backspace, _) => {
-                form.prompt.pop();
+                form.field().pop();
             }
-            (KeyCode::Char('u'), true) => form.prompt.clear(),
+            (KeyCode::Char('u'), true) => form.field().clear(),
             (KeyCode::Char('w'), true) => {
-                let kept = form.prompt.trim_end().rfind(' ').map_or(0, |at| at + 1);
-                form.prompt.truncate(kept);
+                // The words of a name end at `/` and `-` too.
+                let separators: &[char] = match form.focus {
+                    FormField::Name => &[' ', '/', '-'],
+                    FormField::Prompt => &[' '],
+                };
+                let field = form.field();
+                let kept = field
+                    .trim_end_matches(separators)
+                    .rfind(separators)
+                    .map_or(0, |at| at + 1);
+                field.truncate(kept);
             }
-            (KeyCode::Char(ch), false) => form.prompt.push(ch),
+            (KeyCode::Char(ch), false) => form.field().push(ch),
             _ => {}
         }
         Effect::None
@@ -1230,7 +1316,8 @@ pub(crate) fn branch_label(worktree: &Worktree) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, App, Category, Effect, NewProject, NewWorktree, Resource, Screen, Tailor, ToolId,
+        Action, App, Category, Effect, NewProject, NewWorktree, Prepare, Resource, Screen, Tailor,
+        ToolId,
     };
     use crate::agent::Launch;
     use crate::agent::vm::ProjectStatus;
@@ -1473,7 +1560,6 @@ mod tests {
                 'v',
                 Action::ReviewProject("demo".into(), Some(first.clone())),
             ),
-            ('a', Action::AddProjectWorktree("demo".into(), None)),
             ('c', Action::EnterProjectWorktree(first.clone())),
         ] {
             assert_eq!(
@@ -1481,6 +1567,10 @@ mod tests {
                 Effect::Execute(action)
             );
         }
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Effect::Prepare(Prepare::ProjectWorktree("demo".into()))
+        );
         app.handle_key(key(KeyCode::Down));
         let review = Action::ReviewProject("demo".into(), Some(second.clone()));
         assert_eq!(review.return_tool(), Some(ToolId::SandboxProjects));
@@ -1595,10 +1685,19 @@ mod tests {
     fn manager_shortcuts_create_and_remove_with_cancel() {
         let tree = worktree("repo-agent-wt");
         let mut app = worktree_manager(std::slice::from_ref(&tree));
+        // Without Herdr the form asks for the name only.
+        assert_eq!(app.handle_key(ctrl('a')), Effect::None);
+        assert!(matches!(&app.screen, Screen::NewWorktree(form) if !form.agents));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None, "no name");
+        app.handle_key(key(KeyCode::Tab));
+        for ch in "feature/x".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
         assert_eq!(
-            app.handle_key(ctrl('a')),
-            Effect::Execute(Action::CreateWorktree(None))
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::CreateWorktree("feature/x".into(), None))
         );
+        app.handle_key(key(KeyCode::Esc));
         app.handle_key(ctrl('d'));
         assert!(matches!(app.screen, Screen::ConfirmCleanup(_)));
         assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Effect::None);
@@ -1609,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn new_worktrees_ask_for_the_agent_and_prompt_with_herdr() {
+    fn new_worktrees_ask_for_a_name_the_agent_and_prompt_with_herdr() {
         let mut app = worktree_manager(&[]);
         app.herdr = true;
         app.agent_kinds = vec!["pi".into(), "claude".into(), "codex".into()];
@@ -1620,9 +1719,18 @@ mod tests {
             panic!("expected the new worktree form");
         };
         assert_eq!(form.target, NewWorktree::Local);
+        assert_eq!(form.name, "");
         assert_eq!(form.kind(), Some("claude"));
 
+        for ch in "fix/login".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(ctrl('w'));
+        for ch in "flaky".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
         app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Down));
         for ch in "Fix it?".chars() {
             app.handle_key(key(KeyCode::Char(ch)));
         }
@@ -1630,18 +1738,22 @@ mod tests {
         assert!(!app.show_help, "? is prompt text");
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
-            Effect::Execute(Action::CreateWorktree(Some(Launch::new(
-                "codex",
-                Some("Fix it".into())
-            ))))
+            Effect::Execute(Action::CreateWorktree(
+                "fix/flaky".into(),
+                Some(Launch::new("codex", Some("Fix it".into())))
+            ))
         );
 
         // Past the last kind comes no agent; Esc goes back to the list.
         app.handle_key(key(KeyCode::Right));
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
-            Effect::Execute(Action::CreateWorktree(None))
+            Effect::Execute(Action::CreateWorktree("fix/flaky".into(), None))
         );
+        // Back in the name, Ctrl-U clears it and Enter waits for one.
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None);
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(
             &app.screen,
@@ -1650,10 +1762,11 @@ mod tests {
     }
 
     #[test]
-    fn project_worktrees_ask_for_the_agent_that_starts_with_the_vm() {
+    fn project_worktrees_offer_only_the_agents_the_project_enables() {
         let mut app = App::new("/repo".into());
         app.herdr = true;
-        app.default_agent = Some("my-agent".into());
+        app.agent_kinds = vec!["pi".into(), "claude".into(), "codex".into()];
+        app.default_agent = Some("codex".into());
         app.handle_key(key(KeyCode::Char('s')));
         app.handle_key(key(KeyCode::Char('1')));
         app.loaded(
@@ -1661,19 +1774,39 @@ mod tests {
             Ok(vec![Resource::Project(Box::new(project("demo", &[])))]),
         );
         app.handle_key(key(KeyCode::Enter));
-        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Effect::Prepare(Prepare::ProjectWorktree("demo".into()))
+        );
+        app.project_worktree_form(
+            "demo".into(),
+            "demo-agent-wt-2".into(),
+            vec!["claude".into()],
+            None,
+        );
         let Screen::NewWorktree(form) = &app.screen else {
             panic!("expected the new worktree form");
         };
         assert_eq!(form.target, NewWorktree::Project("demo".into()));
-        // Without Herdr's list, the default and common kinds are offered.
-        assert_eq!(form.kinds, ["my-agent", "claude", "codex", "pi"]);
-        app.handle_key(ctrl('w'));
+        assert_eq!(form.name, "demo-agent-wt-2");
+        // codex is not enabled, so nothing is chosen until picked.
+        assert_eq!(form.kinds, ["claude"]);
+        assert_eq!(form.kind(), None);
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
             Effect::Execute(Action::AddProjectWorktree(
                 "demo".into(),
-                Some(Launch::new("my-agent", None))
+                "demo-agent-wt-2".into(),
+                None
+            ))
+        );
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::AddProjectWorktree(
+                "demo".into(),
+                "demo-agent-wt-2".into(),
+                Some(Launch::new("claude", None))
             ))
         );
         app.handle_key(key(KeyCode::Esc));
@@ -1699,7 +1832,7 @@ mod tests {
     fn worktree_results_reload_the_manager_and_other_results_return_home() {
         let mut app = App::new("/repo".into());
         for action in [
-            Action::CreateWorktree(None),
+            Action::CreateWorktree("a".into(), None),
             Action::EnterWorktree(worktree("a")),
             Action::Cleanup(worktree("a")),
         ] {

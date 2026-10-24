@@ -80,6 +80,48 @@ pub(crate) fn uses_proxy(flake: &str) -> bool {
         .any(|line| line.trim() == format!("caCert = ./{PROXY_CA_FILE};"))
 }
 
+/// `ai` options that enable something other than a coding agent.
+const NOT_AGENTS: [&str; 1] = ["backlog"];
+
+/// The coding agents the flake enables, such as `ai.claude.enable = true;`,
+/// in order. Their names are the agent kinds Herdr starts. Reads both the
+/// nested form the defaults module writes and dotted attribute paths.
+pub(crate) fn enabled_agents(flake: &str) -> Vec<String> {
+    let mut agents = Vec::new();
+    // The attribute names of the open `name = {` blocks; empty for others.
+    let mut open: Vec<String> = Vec::new();
+    for line in flake.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if line.starts_with('}') {
+            open.pop();
+            continue;
+        }
+        if let Some(head) = line.strip_suffix('{') {
+            open.push(head.trim().trim_end_matches('=').trim().into());
+            continue;
+        }
+        let Some((name, value)) = line.strip_suffix(';').and_then(|line| line.split_once('='))
+        else {
+            continue;
+        };
+        if value.trim() != "true" {
+            continue;
+        }
+        let path: Vec<&str> = open
+            .iter()
+            .flat_map(|name| name.split('.'))
+            .chain(name.trim().split('.'))
+            .collect();
+        if let [.., "ai", agent, "enable"] = path.as_slice()
+            && !NOT_AGENTS.contains(agent)
+            && !agents.iter().any(|known| known == agent)
+        {
+            agents.push(agent.to_string());
+        }
+    }
+    agents
+}
+
 /// The flake's `vm.backlogDir`.
 pub(crate) fn backlog_dir(flake: &str) -> Option<PathBuf> {
     string_setting(flake, "backlogDir =").map(PathBuf::from)
@@ -189,6 +231,18 @@ mod tests {
         assert!(!plain.contains("chatgptLoginFromProxy"), "{plain}");
         assert!(!plain.contains("backlog.enable"), "{plain}");
         assert!(plain.contains("claude.enable = true;"), "{plain}");
+    }
+
+    #[test]
+    fn enabled_agents_come_from_the_ai_options() {
+        let module = defaults_module("demo", true, true, "        ");
+        let flake = format!(
+            "{{\n  outputs = {{ self, agent-sandbox }}: {{\n    modules = [\n{module}\n    ];\n  }};\n}}\n"
+        );
+        assert_eq!(enabled_agents(&flake), ["claude", "codex"]);
+        let flake = "ai = {\n  claude.enable = false;\n  codex = {\n    enable = true;\n  };\n};\nai.gemini.enable = true; # on\n# ai.pi.enable = true;\nvm.enable = true;\n";
+        assert_eq!(enabled_agents(flake), ["codex", "gemini"]);
+        assert!(enabled_agents("{ }").is_empty());
     }
 
     #[test]

@@ -109,12 +109,15 @@ enum ProjectCommands {
         #[command(flatten)]
         boot: BootArgs,
     },
-    /// Create another agent worktree for the project; prints its path.
+    /// Create another worktree for the project; prints its path.
     #[command(
-        after_help = "With --agent or --prompt, the agent starts in the worktree's herdr workspace when the VM next opens it: on `--restart`, `agent project restart` or `agent project start`. The prompt is sent once. Other worktrees keep their own agent, or get $CLI_TOOLBOX_AGENT."
+        after_help = "The worktree is ~/.agent-sandbox/worktrees/<repo>/<dir> (or $CLI_TOOLBOX_WORKTREES_DIR/<repo>/<dir>) on the branch NAME. Its folder, guest mount /workspace/<dir> and herdr label are NAME with `/` replaced by `-`. An existing local branch is checked out, otherwise it is created. Without --name, the next free <repo>-agent-wt-N is used.\n\nWith --agent or --prompt, the agent starts in the worktree's herdr workspace when the VM next opens it: on `--restart`, `agent project restart` or `agent project start`. The prompt is sent once. Other worktrees keep their own agent, or get $CLI_TOOLBOX_AGENT. --agent must be an agent the project's flake enables (ai.<kind>.enable = true)."
     )]
     Add {
         project: Option<String>,
+        /// Branch name of the worktree (default: the next <repo>-agent-wt-N).
+        #[arg(long)]
+        name: Option<String>,
         /// Restart a running VM right away to mount it.
         #[arg(long)]
         restart: bool,
@@ -286,6 +289,7 @@ fn run_project(
         }
         ProjectCommands::Add {
             project,
+            name,
             restart,
             launch,
             no_herdr,
@@ -296,6 +300,7 @@ fn run_project(
             };
             let created = vm::add_worktree(
                 &resolve(&root, project)?,
+                name.as_deref(),
                 restart,
                 launch.resolve()?.as_ref(),
                 &boot_options(boot),

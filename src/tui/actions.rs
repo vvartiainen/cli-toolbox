@@ -214,16 +214,13 @@ impl Context {
                 ssh::connect(host, stdout, stderr)?;
                 Ok(Done::body(format!("SSH session for {} ended.", host.name)))
             }
-            Action::CreateWorktree(launch) => {
+            Action::CreateWorktree(name, launch) => {
                 // The launcher has released the terminal, so git and the init
                 // command stream their progress to it directly.
-                let cwd = self.working_dir()?;
-                let root = git::git_worktrees_root()?;
-                let name = git::next_agent_worktree_name(cwd, &root)?;
                 let created = agent::create_worktree(
-                    cwd,
-                    &root,
-                    &name,
+                    self.working_dir()?,
+                    &git::git_worktrees_root()?,
+                    name,
                     agent::Options::default(),
                     launch.as_ref(),
                     &mut std::io::stderr(),
@@ -352,9 +349,10 @@ impl Context {
                 "Stopped every running VM".into(),
                 &vm::each_running(&project::sandbox_dir()?, vm::stop)?,
             )),
-            Action::AddProjectWorktree(name, launch) => {
+            Action::AddProjectWorktree(project, name, launch) => {
                 let created = vm::add_worktree(
-                    &load_project(name)?,
+                    &load_project(project)?,
+                    Some(name),
                     false,
                     launch.as_ref(),
                     &vm_options(),
@@ -455,6 +453,46 @@ fn load_home(tool: ToolId, home: &Path) -> Result<Vec<Resource>, Error> {
         _ => Err(Error::msg(
             "this tool does not load resources from the home directory",
         )),
+    }
+}
+
+/// What the new worktree form of a project starts with.
+pub(super) struct WorktreeDefaults {
+    /// The suggested name.
+    pub name: String,
+    /// The agents the project enables, the only ones on offer.
+    pub agents: Vec<String>,
+    /// What could not be looked up.
+    pub note: Option<String>,
+}
+
+/// The suggested name and the enabled agents of a new worktree of the
+/// project `name`. What fails to load is left empty and noted.
+pub(super) fn project_worktree_defaults(name: &str) -> WorktreeDefaults {
+    let project = match load_project(name) {
+        Ok(project) => project,
+        Err(err) => {
+            return WorktreeDefaults {
+                name: String::new(),
+                agents: Vec::new(),
+                note: Some(err.to_string()),
+            };
+        }
+    };
+    let mut notes = Vec::new();
+    let mut noted = |err: Error| notes.push(err.to_string());
+    let suggested = vm::suggested_worktree_name(&project).unwrap_or_else(|err| {
+        noted(err);
+        String::new()
+    });
+    let agents = vm::enabled_agents(&project).unwrap_or_else(|err| {
+        noted(err);
+        Vec::new()
+    });
+    WorktreeDefaults {
+        name: suggested,
+        agents,
+        note: (!notes.is_empty()).then(|| notes.join("; ")),
     }
 }
 
@@ -567,7 +605,7 @@ mod tests {
         let context = Context {
             cwd: Err("directory no longer exists".into()),
         };
-        let outcome = context.execute(&Action::CreateWorktree(None));
+        let outcome = context.execute(&Action::CreateWorktree("x".into(), None));
         assert!(outcome.failed);
         assert!(outcome.shell.is_none());
         assert!(outcome.body.contains("directory no longer exists"));

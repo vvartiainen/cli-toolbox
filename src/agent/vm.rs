@@ -154,11 +154,14 @@ pub(crate) fn setup(project: &Project) -> Vec<Step> {
     vec![proxy, backlog]
 }
 
-/// Create the next agent worktree of the project's repository. A running VM
-/// mounts it after a restart, which `restart` does right away. `launch`
-/// starts in it once the VM opens it in herdr.
+/// Create the worktree `name` of the project's repository (see
+/// [`git::create_worktree`]), or else the next `<repo>-agent-wt-N`. A running
+/// VM mounts it after a restart, which `restart` does right away. `launch`
+/// starts in it once the VM opens it in herdr; it must be an agent the
+/// project enables, when its flake names any.
 pub(crate) fn add_worktree(
     project: &Project,
+    name: Option<&str>,
     restart: bool,
     launch: Option<&Launch>,
     options: &VmOptions,
@@ -166,10 +169,23 @@ pub(crate) fn add_worktree(
 ) -> Result<Created, Error> {
     // Forget the agents of worktrees removed by hand before the new one can
     // reuse such a name.
+    if let Some(launch) = launch {
+        let enabled = enabled_agents(project)?;
+        if !enabled.is_empty() && !enabled.contains(&launch.kind) {
+            return Err(Error::msg(format!(
+                "project {} does not enable {}; its flake enables {}",
+                project.name,
+                launch.kind,
+                enabled.join(", ")
+            )));
+        }
+    }
     write_worktrees(project)?;
-    let repo = project.repo()?;
-    let name = git::next_agent_worktree_name(repo, &project.worktrees_root)?;
-    let worktree = git::create_worktree(repo, &project.worktrees_root, &name, stderr)?;
+    let name = match name {
+        Some(name) => name.to_string(),
+        None => suggested_worktree_name(project)?,
+    };
+    let worktree = git::create_worktree(project.repo()?, &project.worktrees_root, &name, stderr)?;
     write_worktrees(project)?;
     let mut steps = Vec::new();
     if let Some(launch) = launch {
@@ -188,6 +204,21 @@ pub(crate) fn add_worktree(
         ))),
     }
     Ok(Created { worktree, steps })
+}
+
+/// The name a new worktree of the project gets unless named otherwise:
+/// the next free `<repo>-agent-wt-N`.
+pub(crate) fn suggested_worktree_name(project: &Project) -> Result<String, Error> {
+    git::next_agent_worktree_name(project.repo()?, &project.worktrees_root)
+}
+
+/// The coding agents the project's flake enables (`ai.<kind>.enable`), the
+/// ones a worktree of it can start.
+pub(crate) fn enabled_agents(project: &Project) -> Result<Vec<String>, Error> {
+    let path = project.dir.join("flake.nix");
+    let flake = std::fs::read_to_string(&path)
+        .map_err(|err| Error::msg(format!("read {}: {err}", path.display())))?;
+    Ok(setup::enabled_agents(&flake))
 }
 
 /// The agents chosen for the project's worktrees, by worktree name.
@@ -631,8 +662,8 @@ fn write_worktrees(project: &Project) -> Result<Vec<Worktree>, Error> {
 }
 
 /// Add the VM to herdr and open a workspace per worktree, starting the
-/// worktree's own agent or else `agent` in it. A worktree's first prompt is
-/// sent once.
+/// worktree's own agent or else `agent`, when the project enables it. A
+/// worktree's first prompt is sent once.
 fn herdr_steps(
     project: &Project,
     machine: &str,
@@ -647,6 +678,9 @@ fn herdr_steps(
     }
     let mut steps = vec![Step::Done(format!("herdr: machine {machine}"))];
     let mut launches = launches(project);
+    let enabled = enabled_agents(project).unwrap_or_default();
+    let agent =
+        agent.filter(|kind| enabled.is_empty() || enabled.iter().any(|known| known == kind));
     let mut prompted = false;
     for worktree in worktrees {
         let cwd = guest_dir(&worktree.name);
@@ -856,14 +890,21 @@ mod tests {
         let project = project(&temp.path().join("sandbox"), &repo);
         let options = VmOptions::default();
 
-        let first = add_worktree(&project, false, None, &options, &mut Vec::new()).unwrap();
-        let second = add_worktree(&project, false, None, &options, &mut Vec::new()).unwrap();
-        assert_eq!(second.worktree.name, "demo-agent-wt-2");
+        let named = Some("feature/login");
+        let first = add_worktree(&project, named, false, None, &options, &mut Vec::new()).unwrap();
+        let second = add_worktree(&project, None, false, None, &options, &mut Vec::new()).unwrap();
+        assert_eq!(first.worktree.name, "feature-login");
+        assert_eq!(first.worktree.branch, "feature/login");
+        assert_eq!(second.worktree.name, "demo-agent-wt");
+        assert_eq!(
+            suggested_worktree_name(&project).unwrap(),
+            "demo-agent-wt-2"
+        );
         assert!(matches!(&first.steps[..], [Step::Skipped(text)] if text.contains("stopped")));
 
         let mounted = std::fs::read_to_string(project.dir.join("worktrees.nix")).unwrap();
+        assert!(mounted.contains("\"feature-login\" = "), "{mounted}");
         assert!(mounted.contains("\"demo-agent-wt\" = "), "{mounted}");
-        assert!(mounted.contains("\"demo-agent-wt-2\" = "), "{mounted}");
 
         let status = status(project.clone());
         assert_eq!(status.worktrees.len(), 2);
@@ -884,6 +925,7 @@ mod tests {
 
         let created = add_worktree(
             &project,
+            None,
             false,
             Some(&launch),
             &VmOptions::default(),
@@ -909,6 +951,7 @@ mod tests {
         .unwrap();
         let again = add_worktree(
             &project,
+            None,
             false,
             None,
             &VmOptions::default(),
@@ -918,6 +961,38 @@ mod tests {
         assert_eq!(again.worktree.name, "demo-agent-wt");
         assert!(launches(&project).is_empty());
         assert!(!project.dir.join(AGENTS_FILE).exists());
+    }
+
+    #[test]
+    fn only_agents_the_flake_enables_can_start() {
+        if skip_without_git() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("demo");
+        init_git_repo(&repo);
+        let project = project(&temp.path().join("sandbox"), &repo);
+        std::fs::write(
+            project.dir.join("flake.nix"),
+            "{\n  ai = {\n    claude.enable = true;\n  };\n}\n",
+        )
+        .unwrap();
+        assert_eq!(enabled_agents(&project).unwrap(), ["claude"]);
+        let add = |kind: &str| {
+            let launch = Launch::new(kind, None);
+            add_worktree(
+                &project,
+                Some(kind),
+                false,
+                Some(&launch),
+                &VmOptions::default(),
+                &mut Vec::new(),
+            )
+        };
+        let err = add("codex").err().unwrap();
+        assert!(err.to_string().contains("does not enable codex"), "{err}");
+        assert!(project.worktrees().unwrap().is_empty());
+        assert_eq!(add("claude").unwrap().worktree.name, "claude");
     }
 
     #[test]
@@ -944,6 +1019,7 @@ mod tests {
         let project = project(&temp.path().join("sandbox"), &repo);
         let created = add_worktree(
             &project,
+            None,
             false,
             None,
             &VmOptions::default(),

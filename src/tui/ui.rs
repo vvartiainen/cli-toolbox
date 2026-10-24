@@ -5,8 +5,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
 use super::app::{
-    App, Category, ConfirmState, DetailsState, LaunchForm, NewWorktree, PickerState, ProjectState,
-    Resource, ResultState, Screen, TailorState, ToolId, branch_label,
+    App, Category, ConfirmState, DetailsState, FormField, LaunchForm, NewWorktree, PickerState,
+    ProjectState, Resource, ResultState, Screen, TailorState, ToolId, branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -20,7 +20,7 @@ const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop all · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
-const HELP_NEW_WORKTREE: &str = "←→ agent · type the prompt · ⏎ create · F1 help · esc back";
+const HELP_NEW_WORKTREE: &str = "tab name/prompt · ←→ agent · ⏎ create · F1 help · esc back";
 const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
 const HELP_CONFIRM: &str = "y remove · n cancel · ←→ ⏎ choose · ? help";
 const HELP_OVERLAY: &str = "any key closes help";
@@ -237,10 +237,11 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             entry("s esc", "skip and open the project"),
         ],
         Screen::NewWorktree(_) => vec![
-            entry("←→ ↑↓ tab", "choose the agent, or none"),
-            entry("type", "write its first prompt (optional)"),
+            entry("type", "the name (the branch), or the agent's first prompt"),
+            entry("tab ↑↓", "switch between the name and the prompt"),
+            entry("←→", "choose the agent, or none"),
             entry("⌫ ^W ^U", "delete a character / word / all"),
-            entry("⏎", "create the worktree"),
+            entry("⏎", "create the worktree (needs a name)"),
             entry("esc", "back without creating"),
         ],
         Screen::ConfirmCleanup(_) => vec![
@@ -667,15 +668,45 @@ fn draw_new_worktree(frame: &mut Frame<'_>, app: &App, form: &LaunchForm) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [agent, prompt, hint] = Layout::vertical([
+    let label = |name: &str| Span::styled(format!("{name:<8}"), Style::new().fg(ACCENT));
+    let cursor = |field: FormField| {
+        let shown = if form.focus == field { "▏" } else { "" };
+        Span::styled(shown, Style::new().fg(ACCENT))
+    };
+
+    let [name, agent, prompt, hint] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Min(1),
+        Constraint::Length(u16::from(form.agents)),
+        Constraint::Min(u16::from(form.agents)),
         Constraint::Length(2),
     ])
     .spacing(1)
     .areas(inner);
+    let mut spans = vec![label("Name")];
+    if form.name.is_empty() {
+        spans.push(cursor(FormField::Name));
+        spans.push(" the branch, such as feature/login".dark_gray());
+    } else {
+        spans.push(Span::raw(clean_text(&form.name)));
+        spans.push(cursor(FormField::Name));
+        // The folder, mount and Herdr label when they differ from the branch.
+        if let Ok(dir) = crate::git::worktree_dir_name(form.name.trim())
+            && dir != form.name
+        {
+            spans.push(format!("  folder {dir}").dark_gray());
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), name);
 
-    let label = |name: &str| Span::styled(format!("{name:<8}"), Style::new().fg(ACCENT));
+    let hint_text = match form.note.as_deref() {
+        Some(note) => Span::styled(clean_text(note), Style::new().fg(Color::Yellow)),
+        None => clean_text(&new_worktree_hint(form)).dark_gray(),
+    };
+    frame.render_widget(Paragraph::new(hint_text).wrap(Wrap { trim: true }), hint);
+    if !form.agents {
+        return;
+    }
+
     let kind = match form.kind() {
         Some(kind) => Span::styled(format!("‹ {} ›", clean_text(kind)), Style::new().bold()),
         None => "‹ none ›".dark_gray(),
@@ -692,19 +723,36 @@ fn draw_new_worktree(frame: &mut Frame<'_>, app: &App, form: &LaunchForm) {
     } else {
         Span::raw(clean_text(&form.prompt))
     };
-    let cursor = Span::styled("▏", Style::new().fg(ACCENT));
-    let paragraph =
-        Paragraph::new(Line::from(vec![label("Prompt"), text, cursor])).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(Line::from(vec![
+        label("Prompt"),
+        text,
+        cursor(FormField::Prompt),
+    ]))
+    .wrap(Wrap { trim: false });
     // Keep the end of a long prompt, where typing happens, in view.
     let scroll = max_scroll(&paragraph, prompt);
     frame.render_widget(paragraph.scroll((scroll, 0)), prompt);
+}
 
+/// What Enter does in the new worktree form.
+fn new_worktree_hint(form: &LaunchForm) -> String {
+    if form.name.trim().is_empty() {
+        return "Type a name to create the worktree.".into();
+    }
+    if !form.agents {
+        return match form.target {
+            NewWorktree::Local => "⏎ creates the worktree.".into(),
+            NewWorktree::Project(_) => {
+                "⏎ adds the worktree; the VM mounts it on its next start or restart.".into()
+            }
+        };
+    }
     let with_prompt = if form.prompt.trim().is_empty() {
         ""
     } else {
         " with the prompt"
     };
-    let hint_text = match (&form.target, form.kind()) {
+    match (&form.target, form.kind()) {
         (NewWorktree::Local, Some(kind)) => {
             format!("⏎ creates the worktree, opens it in herdr and starts {kind}{with_prompt}.")
         }
@@ -714,14 +762,13 @@ fn draw_new_worktree(frame: &mut Frame<'_>, app: &App, form: &LaunchForm) {
         (NewWorktree::Project(_), Some(kind)) => format!(
             "⏎ adds the worktree. {kind} starts in it{with_prompt} when the VM opens it: u starts, r restarts a running VM."
         ),
-        (NewWorktree::Project(_), None) => {
-            "⏎ adds the worktree. The VM opens it in herdr with $CLI_TOOLBOX_AGENT, if set.".into()
+        (NewWorktree::Project(_), None) if form.kinds.is_empty() => {
+            "⏎ adds the worktree. The project's flake.nix enables no agents (ai.<kind>.enable).".into()
         }
-    };
-    frame.render_widget(
-        Paragraph::new(clean_text(&hint_text).dark_gray()).wrap(Wrap { trim: true }),
-        hint,
-    );
+        (NewWorktree::Project(_), None) => {
+            "⏎ adds the worktree. The VM opens it in herdr with $CLI_TOOLBOX_AGENT, if the project enables it.".into()
+        }
+    }
 }
 
 fn field(name: &str, value: &str) -> Line<'static> {
@@ -858,7 +905,7 @@ mod tests {
     fn wrapped_result_scroll_clamps_state_and_moves_back_immediately() {
         let mut app = App::new("/tmp/project".into());
         app.finished(
-            &Action::CreateWorktree(None),
+            &Action::CreateWorktree("x".into(), None),
             "Created".into(),
             "界".repeat(150),
             false,
@@ -894,7 +941,7 @@ mod tests {
 
         let mut result_app = App::new("/tmp/project".into());
         result_app.finished(
-            &Action::CreateWorktree(None),
+            &Action::CreateWorktree("x".into(), None),
             "Created".into(),
             "line one\nline two".into(),
             false,
@@ -1079,12 +1126,23 @@ mod tests {
         let text = rendered(&app, 100, super::HEIGHT);
         for want in [
             "New worktree",
+            "Name    ▏ the branch, such as feature/login",
             "Agent   ‹ codex ›",
             "optional: what the agent should do first",
-            "starts codex.",
+            "Type a name",
         ] {
             assert!(text.contains(want), "missing {want}: {text}");
         }
+        for ch in "feature/tests".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let text = rendered(&app, 100, super::HEIGHT);
+        assert!(
+            text.contains("Name    feature/tests▏  folder feature-tests"),
+            "{text}"
+        );
+        assert!(text.contains("starts codex."), "{text}");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         for ch in "Add tests".chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
         }
@@ -1120,7 +1178,7 @@ mod tests {
     fn replaces_terminal_controls_in_results() {
         let mut app = App::new("/tmp/project".into());
         app.finished(
-            &Action::CreateWorktree(None),
+            &Action::CreateWorktree("x".into(), None),
             "Title\u{1b}".into(),
             "safe\u{7}".into(),
             false,
