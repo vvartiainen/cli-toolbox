@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::{self, Worktree};
 use crate::{Error, herdr, project, sandbox};
 
+pub(crate) mod prune;
 pub(crate) mod review;
 pub(crate) mod vm;
 

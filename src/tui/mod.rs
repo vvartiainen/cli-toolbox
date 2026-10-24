@@ -89,6 +89,10 @@ fn event_loop(
             Effect::Prepare(Prepare::Project) => {
                 app.project_form(context.project_defaults().map_err(|err| err.to_string()));
             }
+            Effect::Prepare(Prepare::Prune(project)) => {
+                let plan = actions::prune_plan(&project).map_err(|err| err.to_string());
+                app.confirm_prune(project, plan);
+            }
             Effect::Prepare(Prepare::StopVm(runtime_dir)) => {
                 match actions::vm_stop_line(&runtime_dir) {
                     Ok(line) => app.confirm_vm_stop(runtime_dir, line),

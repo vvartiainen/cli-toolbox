@@ -1,9 +1,10 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 
 use crate::agent::Launch;
+use crate::agent::prune::{self, PruneOptions};
 use crate::agent::vm::{self, VmOptions};
 use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
 use crate::{Error, agent, git};
@@ -164,6 +165,34 @@ enum ProjectCommands {
         /// Keep the worktree's branch even when its commits are on the integration branch.
         #[arg(long)]
         keep_branch: bool,
+    },
+    /// Delete review snapshots whose work is on the integration branch, and their review checkouts.
+    #[command(
+        after_help = "A snapshot agent-review/<worktree>/* is accepted when `git cherry <into> <snapshot>` shows no new commit: cherry-picked and merged work both count, since git cherry compares changes, not commit IDs. Accepted snapshots are deleted, and so are the review checkouts made from them (in the project's state folder, reviews/), unless they have local edits.\n\nKept and reported:\n  - unaccepted snapshots, with how many commits are not on the integration branch and the first one's subject (--all deletes them too)\n  - superseded snapshots: older snapshots of a removed worktree whose newest snapshot is accepted, where history the agent rebased or amended ends up (--superseded deletes them; an older tip can hold a commit the agent dropped later)\n  - review checkouts with local edits (--force removes them)\n\nFetch refs refs/remotes/sandbox-review/<source>/* of removed worktrees, left behind because sync never prunes them, are deleted once their tip is accepted or in a kept snapshot.\n\nThe integration branch is main when it exists, else the main checkout's branch; --into overrides it. In a terminal, prune shows what it would delete and asks first; --yes skips the question. Without a terminal, --all and --force need --yes."
+    )]
+    Prune {
+        project: Option<String>,
+        /// Only this worktree's snapshots.
+        #[arg(long)]
+        worktree: Option<String>,
+        /// The branch accepted work is on (default: main, else the main checkout's branch).
+        #[arg(long, value_name = "BRANCH")]
+        into: Option<String>,
+        /// Also delete superseded snapshots of removed worktrees.
+        #[arg(long)]
+        superseded: bool,
+        /// Delete every snapshot, also unaccepted ones, and the fetch refs of removed worktrees.
+        #[arg(long)]
+        all: bool,
+        /// Also remove review checkouts with local edits.
+        #[arg(long)]
+        force: bool,
+        /// Only print what would be deleted and what kept.
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        /// Do not ask before deleting.
+        #[arg(long, short)]
+        yes: bool,
     },
     /// Remove a worktree without saving its work first, also with the VM stopped.
     #[command(
@@ -356,6 +385,36 @@ fn run_project(
             }
             finish(&steps, stderr)
         }
+        ProjectCommands::Prune {
+            project,
+            worktree,
+            into,
+            superseded,
+            all,
+            force,
+            dry_run,
+            yes,
+        } => {
+            let project = resolve(&root, project)?;
+            let options = PruneOptions {
+                worktree,
+                into,
+                superseded,
+                all,
+                force,
+                dry_run,
+            };
+            let mut stdin = std::io::stdin().lock();
+            let interactive = std::io::stdin().is_terminal();
+            run_prune(
+                &project,
+                &options,
+                yes,
+                interactive.then_some(&mut stdin as &mut dyn BufRead),
+                stdout,
+                stderr,
+            )
+        }
         ProjectCommands::Remove {
             worktree,
             project,
@@ -387,6 +446,55 @@ fn run_vm(
         }
         VmCommands::Prune => finish(&vm::vm_prune(&project::sandbox_dir()?)?, stderr),
     }
+}
+
+/// `agent project prune`: show the plan, ask on a terminal (`ask`) unless
+/// `yes`, then prune.
+fn run_prune(
+    project: &Project,
+    options: &PruneOptions,
+    yes: bool,
+    ask: Option<&mut dyn BufRead>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Error> {
+    let plan = prune::prune(
+        project,
+        &PruneOptions {
+            dry_run: true,
+            ..options.clone()
+        },
+    )?;
+    if options.dry_run || plan.deleted == 0 {
+        write!(stdout, "{plan}")?;
+        return Ok(());
+    }
+    if !yes {
+        match ask {
+            Some(input) => {
+                write!(stderr, "{plan}Delete these? [y/N] ")?;
+                stderr.flush()?;
+                let mut answer = String::new();
+                input.read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    writeln!(stderr, "Nothing deleted.")?;
+                    return Ok(());
+                }
+            }
+            None if options.all || options.force => {
+                return Err(Error::msg(
+                    "--all and --force delete unaccepted work; pass --yes to confirm without a terminal",
+                ));
+            }
+            None => {}
+        }
+    }
+    let report = prune::prune(project, options)?;
+    write!(stdout, "{report}")?;
+    if report.steps.iter().any(agent::Step::failed) {
+        return Err(Error::msg("a step failed"));
+    }
+    Ok(())
 }
 
 /// The named project, else the current repository's, else the only one.

@@ -24,7 +24,7 @@ pub(crate) fn open(
 ) -> Result<Option<Prepared>, Error> {
     let target = prepare_with(
         project.repo()?,
-        &project.state_dir.join("reviews"),
+        &checkouts_dir(project),
         || {
             exec::look_path("lazygit").ok_or_else(|| {
                 Error::msg("review requires lazygit on the host; install it and try again")
@@ -112,34 +112,73 @@ fn snapshot_for_review(
     Ok(choose(&labels, &mut pick)?.map(|index| labels[index].clone()))
 }
 
-fn saved_snapshots(project: &Project, name: Option<&str>) -> Result<Vec<String>, Error> {
+/// A review snapshot branch of a project's worktree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Snapshot {
+    /// `agent-review/<worktree>/<date>-<source>-<tip>`.
+    pub(crate) branch: String,
+    pub(crate) worktree: String,
+    pub(crate) tip: String,
+}
+
+/// The project's review snapshots, of the worktree `name` or of all, newest
+/// first. A worktree's snapshots carry the source id of the project and
+/// worktree, so other projects' snapshots are left out.
+pub(crate) fn snapshots(project: &Project, name: Option<&str>) -> Result<Vec<Snapshot>, Error> {
     let branches = git_output(
         project.repo()?,
         &[
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname:strip=2)",
+            "--format=%(refname:strip=2) %(objectname)",
             "refs/heads/agent-review/",
         ],
     )?;
-    let dir = project
-        .dir
-        .canonicalize()
-        .unwrap_or_else(|_| project.dir.clone());
+    let dir = snapshot_dir(project);
     Ok(branches
         .lines()
-        .filter(|branch| {
-            let Some((workspace, leaf)) = branch
-                .strip_prefix("agent-review/")
-                .and_then(|rest| rest.split_once('/'))
-            else {
-                return false;
-            };
-            name.is_none_or(|name| workspace == name)
-                && leaf.contains(&format!("-{}-", sandbox::sync::source_id(&dir, workspace)))
+        .filter_map(|line| {
+            let (branch, tip) = line.split_once(' ')?;
+            let (worktree, leaf) = branch.strip_prefix("agent-review/")?.split_once('/')?;
+            let ours = name.is_none_or(|name| worktree == name)
+                && leaf.contains(&format!("-{}-", sandbox::sync::source_id(&dir, worktree)));
+            ours.then(|| Snapshot {
+                branch: branch.into(),
+                worktree: worktree.into(),
+                tip: tip.into(),
+            })
         })
-        .map(str::to_string)
         .collect())
+}
+
+/// The project directory as the VM's runner names it, which snapshot
+/// source ids are made from.
+pub(crate) fn snapshot_dir(project: &Project) -> PathBuf {
+    project
+        .dir
+        .canonicalize()
+        .unwrap_or_else(|_| project.dir.clone())
+}
+
+fn saved_snapshots(project: &Project, name: Option<&str>) -> Result<Vec<String>, Error> {
+    Ok(snapshots(project, name)?
+        .into_iter()
+        .map(|snapshot| snapshot.branch)
+        .collect())
+}
+
+/// Where the project's review checkouts are.
+pub(crate) fn checkouts_dir(project: &Project) -> PathBuf {
+    project.state_dir.join("reviews")
+}
+
+/// The folder name a review checkout of `branch` at `tip` starts with.
+pub(crate) fn checkout_key(branch: &str, tip: &str) -> String {
+    let key = format!(
+        "{:x}",
+        Sha256::digest(format!("{branch}\0{tip}").as_bytes())
+    );
+    key[..24].to_string()
 }
 
 fn choose(
@@ -168,7 +207,7 @@ fn prepare_with(
         .transpose()
 }
 
-fn prepare(repo: &Path, root: &Path, branch: &str) -> Result<Prepared, Error> {
+pub(crate) fn prepare(repo: &Path, root: &Path, branch: &str) -> Result<Prepared, Error> {
     if !branch.starts_with("agent-review/") {
         return Err(Error::msg(
             "review requires an agent-review snapshot branch",
@@ -177,10 +216,7 @@ fn prepare(repo: &Path, root: &Path, branch: &str) -> Result<Prepared, Error> {
     let reference = format!("refs/heads/{branch}");
     let tip = git::resolve_commit(repo, &reference)
         .ok_or_else(|| Error::msg(format!("review snapshot {branch} does not exist")))?;
-    let key = format!(
-        "{:x}",
-        Sha256::digest(format!("{branch}\0{tip}").as_bytes())
-    );
+    let key = checkout_key(branch, &tip);
     fs::create_dir_all(root)?;
     let root = root.canonicalize()?;
     let common = common_dir(repo)?;
@@ -192,9 +228,9 @@ fn prepare(repo: &Path, root: &Path, branch: &str) -> Result<Prepared, Error> {
         .collect();
     for attempt in 0..100 {
         let folder = if attempt == 0 {
-            key[..24].to_string()
+            key.clone()
         } else {
-            format!("{}-{attempt}", &key[..24])
+            format!("{key}-{attempt}")
         };
         let path = root.join(folder);
         match fs::symlink_metadata(&path) {

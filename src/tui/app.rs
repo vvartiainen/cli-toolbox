@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::agent::Launch;
+use crate::agent::prune::{PruneOptions, Report};
 use crate::agent::vm::ProjectStatus;
 use crate::aws::Profile;
 use crate::azure::{AccountAction, Subscription};
@@ -241,14 +242,14 @@ pub(crate) enum Action {
     StartProject(String),
     StopProject(String),
     RestartProject(String),
-    /// Set up the host side of the project's proxy credentials and backlog.
-    SetupProject(String),
     SyncProject(String),
     /// Open the selected agent worktree (or a saved snapshot) in lazygit.
     ReviewProject(String, Option<Worktree>),
     /// A worktree of the project by name, with the agent to start in it with
     /// the VM.
     AddProjectWorktree(String, String, Option<Launch>),
+    /// Delete the project's review snapshots and checkouts as the options say.
+    PruneProject(String, PruneOptions),
     /// Save a project worktree's work as snapshots, then remove it.
     DoneProjectWorktree(String, Worktree),
     /// Remove a project's worktree without saving its work; the flag keeps
@@ -285,7 +286,8 @@ impl Action {
         match self {
             Self::TailorProject(name, _)
             | Self::ReviewProject(name, _)
-            | Self::RemoveProjectWorktree(name, ..) => Some(name),
+            | Self::RemoveProjectWorktree(name, ..)
+            | Self::PruneProject(name, _) => Some(name),
             _ => None,
         }
     }
@@ -301,7 +303,7 @@ impl Action {
             | Self::StartProject(_)
             | Self::StopProject(_)
             | Self::RestartProject(_)
-            | Self::SetupProject(_)
+            | Self::PruneProject(..)
             | Self::SyncProject(_)
             | Self::ReviewProject(..)
             | Self::AddProjectWorktree(..)
@@ -329,6 +331,9 @@ pub(crate) enum Prepare {
     /// The project form's defaults for the launch directory's repository, for
     /// [`App::project_form`].
     Project,
+    /// What pruning the project's review snapshots would delete, for
+    /// [`App::confirm_prune`].
+    Prune(String),
     /// What the VM with this runtime directory mounts, for
     /// [`App::confirm_vm_stop`].
     StopVm(PathBuf),
@@ -1244,7 +1249,7 @@ impl App {
                 let status = state.status.clone();
                 return self.confirm_vm(&status, VmChange::Restart);
             }
-            KeyCode::Char('p') => return Effect::Execute(Action::SetupProject(name)),
+            KeyCode::Char('p') => return Effect::Prepare(Prepare::Prune(name)),
             KeyCode::Char('s') => return Effect::Execute(Action::SyncProject(name)),
             KeyCode::Char('v') => return Effect::Execute(Action::ReviewProject(name, worktree)),
             KeyCode::Char('a') => return Effect::Prepare(Prepare::ProjectWorktree(name)),
@@ -1483,6 +1488,57 @@ impl App {
         self.confirm(ConfirmState::new(title, lines, choices));
     }
 
+    /// Show what pruning `project` would delete (`plan`, a dry run) and ask
+    /// how far to go: the accepted snapshots, also superseded ones, or
+    /// everything. A failed dry run is shown as the result.
+    pub(crate) fn confirm_prune(&mut self, project: String, plan: Result<Report, String>) {
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                let action = Action::PruneProject(project, PruneOptions::default());
+                self.finished(&action, "Prune failed".into(), error, true);
+                return;
+            }
+        };
+        let action = |options: PruneOptions| Action::PruneProject(project.clone(), options);
+        let mut choices = Vec::new();
+        if plan.deleted > 0 {
+            choices.push(Choice::new(
+                'p',
+                "Delete accepted",
+                action(PruneOptions::default()),
+            ));
+        }
+        if plan.superseded > 0 {
+            let options = PruneOptions {
+                superseded: true,
+                ..PruneOptions::default()
+            };
+            choices.push(Choice::new('s', "Also superseded", action(options)));
+        }
+        if plan.superseded + plan.unaccepted + plan.dirty > 0 {
+            let options = PruneOptions {
+                all: true,
+                force: true,
+                ..PruneOptions::default()
+            };
+            choices.push(Choice::new('F', "Force delete all", action(options)));
+        }
+        let title = if choices.is_empty() {
+            format!("Nothing to prune in {project}")
+        } else {
+            format!("Prune the review snapshots of {project}?")
+        };
+        let mut lines: Vec<String> = plan.to_string().lines().map(String::from).collect();
+        if plan.superseded + plan.unaccepted + plan.dirty > 0 {
+            lines.push(
+                "F also deletes the kept snapshots and fetch refs, and review checkouts with edits: their work is lost."
+                    .into(),
+            );
+        }
+        self.confirm(ConfirmState::new(title, lines, choices));
+    }
+
     /// Ask before stopping the VM with `runtime_dir`, described by `line`.
     pub(crate) fn confirm_vm_stop(&mut self, runtime_dir: PathBuf, line: String) {
         let choices = vec![Choice::new('y', "Stop", Action::StopVm(runtime_dir))];
@@ -1649,6 +1705,8 @@ mod tests {
         ToolId,
     };
     use crate::agent::Launch;
+    use crate::agent::Step;
+    use crate::agent::prune::{PruneOptions, Report};
     use crate::agent::vm::ProjectStatus;
     use crate::aws::Profile;
     use crate::git::Worktree;
@@ -1882,7 +1940,6 @@ mod tests {
             ('u', Action::StartProject("demo".into())),
             ('x', Action::StopProject("demo".into())),
             ('r', Action::RestartProject("demo".into())),
-            ('p', Action::SetupProject("demo".into())),
             ('s', Action::SyncProject("demo".into())),
             (
                 'v',
@@ -1898,6 +1955,10 @@ mod tests {
         assert_eq!(
             app.handle_key(key(KeyCode::Char('a'))),
             Effect::Prepare(Prepare::ProjectWorktree("demo".into()))
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('p'))),
+            Effect::Prepare(Prepare::Prune("demo".into()))
         );
         // d asks whether to keep the branch.
         assert_eq!(app.handle_key(key(KeyCode::Char('d'))), Effect::None);
@@ -2127,6 +2188,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn pruning_shows_the_dry_run_and_asks_how_far_to_go() {
+        let mut app = App::new("/repo".into());
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(project("demo", &[])))]),
+        );
+        app.handle_key(key(KeyCode::Enter));
+        let plan = Report {
+            into: "main".into(),
+            steps: vec![
+                Step::Done("snapshot: would delete agent-review/a/x (on main)".into()),
+                Step::Skipped("snapshot: kept agent-review/b/y: 1 commit not on main".into()),
+            ],
+            deleted: 1,
+            unaccepted: 1,
+            ..Report::default()
+        };
+        app.confirm_prune("demo".into(), Ok(plan));
+        let Screen::Confirm(confirm) = &app.screen else {
+            panic!("expected a confirmation");
+        };
+        assert_eq!(confirm.lines[0], "Integration branch: main");
+        let keys: Vec<char> = confirm.choices.iter().map(|choice| choice.key).collect();
+        assert_eq!(keys, ['p', 'F'], "nothing superseded");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('p'))),
+            Effect::Execute(Action::PruneProject("demo".into(), PruneOptions::default()))
+        );
+        let forced = PruneOptions {
+            all: true,
+            force: true,
+            ..PruneOptions::default()
+        };
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT)),
+            Effect::Execute(Action::PruneProject("demo".into(), forced))
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Effect::None);
+        assert!(matches!(app.screen, Screen::ProjectDetails(_)));
+
+        // Back to the project after pruning.
+        let action = Action::PruneProject("demo".into(), PruneOptions::default());
+        assert_eq!(action.project_to_open(), Some("demo"));
+        app.confirm_prune("demo".into(), Err("no main branch".into()));
+        assert!(matches!(&app.screen, Screen::Result(result) if result.failed));
     }
 
     #[test]

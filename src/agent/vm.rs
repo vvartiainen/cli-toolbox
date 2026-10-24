@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
+use super::prune::{self, PruneOptions};
 use super::{Created, Launch, Step};
 use crate::git::{self, Worktree};
 use crate::sandbox::project::{self, CreateOptions, Project};
@@ -542,7 +543,9 @@ pub(crate) fn select_worktree(project: &Project, name: &str) -> Result<Worktree,
 /// Save a worktree's committed guest work as review snapshots, then remove
 /// it. Refuses to lose work unless forced. Its branch is deleted when its
 /// commits are already on the integration branch, and kept otherwise or with
-/// `keep_branch`. Stops the VM when it was the last worktree.
+/// `keep_branch`. Stops the VM when it was the last worktree. Then prunes the
+/// worktree's accepted snapshots; a failed prune does not fail it, since the
+/// worktree is gone by then.
 pub(crate) fn done(
     project: &Project,
     worktree: &Worktree,
@@ -567,6 +570,17 @@ pub(crate) fn done(
             "branch {} kept: {reason}",
             worktree.branch
         )));
+    }
+    let options = PruneOptions {
+        worktree: Some(worktree.name.clone()),
+        ..PruneOptions::default()
+    };
+    match prune::prune(project, &options) {
+        Ok(report) => steps.extend(report.steps.into_iter().map(|step| match step {
+            Step::Failed(text) => Step::Skipped(format!("prune failed: {text}")),
+            step => step,
+        })),
+        Err(err) => steps.push(Step::Skipped(format!("prune: {err}"))),
     }
     if vm.is_some() {
         if remaining.is_empty() {
@@ -1165,6 +1179,15 @@ mod tests {
             crate::git::tests::commit_all(&worktree.path);
         }
         crate::git::tests::must_run_git(&repo, &["cherry-pick", "accepted"]);
+        // Its saved snapshot is accepted too, and done prunes it.
+        let source =
+            crate::sandbox::sync::source_id(&project.dir.canonicalize().unwrap(), "accepted");
+        let tip = crate::git::resolve_commit(&repo, "accepted").unwrap();
+        let snapshot = format!(
+            "agent-review/accepted/20261024-120000-{source}-{}",
+            &tip[..12]
+        );
+        crate::git::tests::must_run_git(&repo, &["branch", &snapshot, "accepted"]);
 
         let done = |worktree: &Worktree, keep_branch: bool| {
             let options = VmOptions {
@@ -1175,9 +1198,10 @@ mod tests {
         };
         assert_eq!(
             done(&accepted, false),
-            [Step::Done(
-                "worktree: removed accepted and branch accepted".into()
-            )]
+            [
+                Step::Done("worktree: removed accepted and branch accepted".into()),
+                Step::Done(format!("snapshot: deleted {snapshot} (on main)")),
+            ]
         );
         assert_eq!(
             done(&pending, false)[1],

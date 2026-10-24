@@ -223,7 +223,10 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             entry("↑↓ j k", "select a worktree"),
             entry("u", "start the VM and open the worktrees in herdr"),
             entry("x r", "stop / restart the VM (asks first)"),
-            entry("p", "set up agent-proxy credentials and the backlog"),
+            entry(
+                "p",
+                "prune review snapshots whose work is on main, and their checkouts (asks)",
+            ),
             entry("s", "publish agent work as host review branches"),
             entry(
                 "v",

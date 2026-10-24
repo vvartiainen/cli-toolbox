@@ -210,6 +210,7 @@ mod tests {
     fn prints_sandbox_project_help() {
         for command in [
             "list", "create", "setup", "start", "stop", "restart", "add", "sync", "review", "done",
+            "remove", "prune",
         ] {
             let (result, stdout, stderr) = run_args(&["agent", "project", command, "--help"]);
             result.unwrap();
@@ -228,6 +229,24 @@ mod tests {
         let (_, stdout, _) = run_args(&["agent", "project", "create", "--help"]);
         assert!(!stdout.contains("--agent"), "{stdout}");
         assert!(stdout.contains("no worktree yet"), "{stdout}");
+        let (_, stdout, _) = run_args(&["agent", "project", "prune", "--help"]);
+        for text in [
+            "--into",
+            "--superseded",
+            "--all",
+            "--force",
+            "--dry-run",
+            "git cherry",
+        ] {
+            assert!(stdout.contains(text), "missing {text}: {stdout}");
+        }
+        let (_, stdout, _) = run_args(&["agent", "project", "remove", "--help"]);
+        assert!(stdout.contains("--keep-branch"), "{stdout}");
+        assert!(
+            run_args(&["agent", "project", "prune", "--dry-run", "--yes"])
+                .0
+                .is_err()
+        );
         let (_, stdout, _) = run_args(&["agent", "project", "add", "--help"]);
         assert!(stdout.contains("--name"), "{stdout}");
         let (_, stdout, _) = run_args(&["agent", "project", "start", "--help"]);

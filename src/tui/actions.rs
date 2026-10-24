@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::agent::prune;
 use crate::agent::vm::{self, VmOptions};
 use crate::azure::{self, AccountAction, Az, AzCli};
 use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
@@ -301,10 +302,15 @@ impl Context {
                 let steps = vm::restart(&project, &vm_options(), &mut std::io::stderr())?;
                 Ok(steps_done(format!("VM of {name}"), &steps))
             }
-            Action::SetupProject(name) => {
-                // The proxy setup may prompt for secrets in the released terminal.
-                let steps = vm::setup(&load_project(name)?);
-                Ok(steps_done(format!("Setup of {name}"), &steps))
+            Action::PruneProject(name, options) => {
+                let report = prune::prune(&load_project(name)?, options)?;
+                Ok(steps_done(
+                    format!(
+                        "Pruned the review snapshots of {name} (into {})",
+                        report.into
+                    ),
+                    &report.steps,
+                ))
             }
             Action::SyncProject(name) => {
                 let synced = vm::sync(&load_project(name)?, None)?;
@@ -450,6 +456,16 @@ fn project_defaults(cwd: &Path) -> Result<CreateOptions, Error> {
         backlog: crate::sandbox::setup::backlog_root().is_some(),
         repo,
     })
+}
+
+/// What pruning the project `name` with the default options would delete
+/// and keep.
+pub(super) fn prune_plan(name: &str) -> Result<prune::Report, Error> {
+    let options = prune::PruneOptions {
+        dry_run: true,
+        ..prune::PruneOptions::default()
+    };
+    prune::prune(&load_project(name)?, &options)
 }
 
 /// The confirmation line of the running VM with `runtime_dir`.
