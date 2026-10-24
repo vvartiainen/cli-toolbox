@@ -58,20 +58,6 @@ Ideas and open work are tracked in a Backlog.md backlog through the
 - Search for an existing task before creating one
 - Keep the task status and notes current while working
 
-## Working inside a sandbox
-
-A shell under `/workspace/<name>` may be inside an agent-sandbox microVM. Check
-`git rev-parse --git-dir`: sandbox Git directories live under
-`/home/agent/.local/share/agent-sandbox/git/`. Do not assume host tools or
-credentials are available, and do not try to reach the host's `.git`.
-
-Workspace files are shared with the host immediately, Git metadata is not:
-
-- Start with `git status --short` and stay on the assigned branch
-- Commit completed work on that branch, never on a detached HEAD
-- Do not push, the user fetches the commits from the host
-- Report the branch, commit IDs and which checks ran or were blocked
-
 ## Testing safely
 
 Run freely:
@@ -81,4 +67,3 @@ Run freely:
 - `just build`
 
 Do not run `just sandbox` or `just sandbox-ssh`, they start or control a VM.
-If a tool is missing in the sandbox, report it instead of working around it.
