@@ -65,10 +65,13 @@ impl Context {
 
     pub fn load(&self, tool: ToolId) -> Result<Vec<Resource>, Error> {
         match tool {
-            ToolId::AgentWorktrees => Ok(git::agent_worktrees(self.working_dir()?)?
-                .into_iter()
-                .map(Resource::Worktree)
-                .collect()),
+            ToolId::Worktrees => Ok(git::project_worktrees(
+                self.working_dir()?,
+                &git::worktrees_root()?,
+            )?
+            .into_iter()
+            .map(Resource::Worktree)
+            .collect()),
             ToolId::SandboxProjects => Ok(vm::statuses(&project::sandbox_dir()?)?
                 .into_iter()
                 .map(|status| Resource::Project(Box::new(status)))
@@ -247,7 +250,6 @@ impl Context {
                 };
                 let (project, created) = vm::create(
                     &project::sandbox_dir()?,
-                    &git::worktrees_root()?,
                     &options,
                     None,
                     None,
@@ -349,7 +351,6 @@ impl Context {
             Action::AddProjectWorktree(name, launch) => {
                 let created = vm::add_worktree(
                     &load_project(name)?,
-                    &git::worktrees_root()?,
                     false,
                     launch.as_ref(),
                     &vm_options(),
@@ -538,7 +539,7 @@ mod tests {
         let context = Context {
             cwd: Err("not needed".into()),
         };
-        let outcome = context.execute(&Action::EnterWorktree(git::AgentWorktree {
+        let outcome = context.execute(&Action::EnterWorktree(git::Worktree {
             name: "agent's tree".into(),
             path: PathBuf::from("/tmp/agent's tree"),
             branch: String::new(),

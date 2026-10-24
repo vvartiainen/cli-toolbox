@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::git::{self, AgentWorktree};
+use crate::git::{self, Worktree};
 use crate::{Error, herdr, project};
 
 pub(crate) mod review;
@@ -137,7 +137,7 @@ impl fmt::Display for Step {
 }
 
 pub(crate) struct Created {
-    pub(crate) worktree: AgentWorktree,
+    pub(crate) worktree: Worktree,
     pub(crate) steps: Vec<Step>,
 }
 
@@ -151,7 +151,8 @@ pub(crate) fn create_worktree(
     launch: Option<&Launch>,
     stderr: &mut dyn Write,
 ) -> Result<Created, Error> {
-    let worktree = git::create_agent_worktree_record(cwd, root, stderr)?;
+    let name = git::next_agent_worktree_name(cwd, root)?;
+    let worktree = git::create_worktree(cwd, root, &name, stderr)?;
     let mut steps = Vec::new();
     if options.init {
         steps.push(init_step(cwd, &worktree.path, stderr)?);
@@ -181,7 +182,7 @@ fn init_step(source: &Path, dir: &Path, stderr: &mut dyn Write) -> Result<Step, 
     })
 }
 
-fn herdr_open_step(repo: &Path, worktree: &AgentWorktree, launch: Option<&Launch>) -> Step {
+fn herdr_open_step(repo: &Path, worktree: &Worktree, launch: Option<&Launch>) -> Step {
     if !herdr::available() {
         return Step::Skipped("herdr: not installed".into());
     }
@@ -204,11 +205,7 @@ fn herdr_open_step(repo: &Path, worktree: &AgentWorktree, launch: Option<&Launch
 }
 
 /// Start `launch` in the root pane of the worktree's new workspace.
-fn start_in_worktree(
-    repo: &Path,
-    worktree: &AgentWorktree,
-    launch: &Launch,
-) -> Result<String, Error> {
+fn start_in_worktree(repo: &Path, worktree: &Worktree, launch: &Launch) -> Result<String, Error> {
     let id = herdr::worktree_workspace(repo, &worktree.path)?
         .ok_or_else(|| Error::msg("herdr lists no open workspace for it"))?;
     let pane = herdr::first_pane(&id)?;
@@ -220,7 +217,7 @@ fn start_in_worktree(
 /// because the worktree has uncommitted changes.
 pub(crate) fn remove_worktree(
     cwd: &Path,
-    worktree: &AgentWorktree,
+    worktree: &Worktree,
     options: Options,
     stderr: &mut dyn Write,
 ) -> Result<Vec<Step>, Error> {
@@ -228,7 +225,7 @@ pub(crate) fn remove_worktree(
     let lookup = options
         .herdr
         .then(|| herdr::available().then(|| herdr::worktree_workspace(cwd, &worktree.path)));
-    git::remove_agent_worktree(cwd, worktree, git::RemoveOptions::default(), stderr)?;
+    git::remove_worktree(cwd, worktree, git::RemoveOptions::default(), stderr)?;
     let Some(lookup) = lookup else {
         return Ok(Vec::new());
     };
@@ -263,6 +260,7 @@ pub(crate) fn create(
 /// `agent worktree cleanup`: remove the named worktree, or all of them.
 pub(crate) fn cleanup(
     cwd: &Path,
+    root: &Path,
     name: &str,
     all: bool,
     options: Options,
@@ -270,7 +268,7 @@ pub(crate) fn cleanup(
     stderr: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut steps = Vec::new();
-    for worktree in git::select_agent_worktrees(cwd, name, all)? {
+    for worktree in git::select_worktrees(git::project_worktrees(cwd, root)?, name, all)? {
         let removed = remove_worktree(cwd, &worktree, options, stderr)?;
         report(&removed, stderr)?;
         writeln!(stdout, "{}", worktree.path.display())?;
@@ -361,10 +359,14 @@ mod tests {
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("– init: no `worktree-init`"), "{stderr}");
 
-        let worktrees = git::agent_worktrees(&repo).unwrap();
+        let worktrees = git::project_worktrees(&repo, &root.path().join("worktrees")).unwrap();
         let steps = remove_worktree(&repo, &worktrees[0], NO_HERDR, &mut Vec::new()).unwrap();
         assert!(steps.is_empty());
-        assert!(git::agent_worktrees(&repo).unwrap().is_empty());
+        assert!(
+            git::project_worktrees(&repo, &root.path().join("worktrees"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::agent::Launch;
 use crate::agent::vm::ProjectStatus;
 use crate::aws::Profile;
 use crate::azure::{AccountAction, Subscription};
-use crate::git::AgentWorktree;
+use crate::git::Worktree;
 use crate::kitty::Choice;
 use crate::sandbox::RunnerState;
 use crate::select;
@@ -88,7 +88,7 @@ pub(crate) enum ToolId {
     AwsProfile,
     AzureSubscription,
     AzureAccount,
-    AgentWorktrees,
+    Worktrees,
     SandboxProjects,
     SandboxVms,
     KittySession,
@@ -100,7 +100,7 @@ impl ToolId {
         Self::AwsProfile,
         Self::AzureSubscription,
         Self::AzureAccount,
-        Self::AgentWorktrees,
+        Self::Worktrees,
         Self::SandboxProjects,
         Self::SandboxVms,
         Self::KittySession,
@@ -111,7 +111,7 @@ impl ToolId {
         match self {
             Self::AwsProfile => Category::Aws,
             Self::AzureSubscription | Self::AzureAccount => Category::Azure,
-            Self::AgentWorktrees => Category::Agents,
+            Self::Worktrees => Category::Agents,
             Self::SandboxProjects | Self::SandboxVms => Category::Sandbox,
             Self::KittySession | Self::SshConnect => Category::Terminal,
         }
@@ -124,7 +124,7 @@ impl ToolId {
             Self::AzureAccount => "Account",
             Self::KittySession => "Switch Kitty session",
             Self::SshConnect => "SSH connect",
-            Self::AgentWorktrees => "Worktrees",
+            Self::Worktrees => "Worktrees",
             Self::SandboxProjects => "Projects",
             Self::SandboxVms => "VMs",
         }
@@ -139,7 +139,7 @@ impl ToolId {
             Self::AzureAccount => "Status, log in, log in again after PIM activation, log out",
             Self::KittySession => "Switch to a .kitty-session file from your home directory",
             Self::SshConnect => "Connect to a configured host with Kitty's SSH kitten",
-            Self::AgentWorktrees => "Create, inspect, cd into or remove agent worktrees",
+            Self::Worktrees => "Create, inspect, cd into or remove agent worktrees",
             Self::SandboxProjects => {
                 "Project VMs in ~/.agent-sandbox: create, start, add worktrees, sync"
             }
@@ -154,7 +154,7 @@ impl ToolId {
             Self::AzureAccount => "Azure account",
             Self::KittySession => "Kitty sessions",
             Self::SshConnect => "SSH hosts",
-            Self::AgentWorktrees => "Agent worktrees",
+            Self::Worktrees => "Agent worktrees",
             Self::SandboxProjects => "Sandbox projects",
             Self::SandboxVms => "Running VMs",
         }
@@ -169,7 +169,7 @@ pub(crate) enum Resource {
     AzureAccount(AccountAction),
     Kitty(Choice),
     Ssh(Host),
-    Worktree(AgentWorktree),
+    Worktree(Worktree),
     Project(Box<ProjectStatus>),
     Vm(Box<RunnerState>),
 }
@@ -211,7 +211,7 @@ impl Resource {
                 | (ToolId::AzureAccount, Self::AzureAccount(_))
                 | (ToolId::KittySession, Self::Kitty(_))
                 | (ToolId::SshConnect, Self::Ssh(_))
-                | (ToolId::AgentWorktrees, Self::Worktree(_))
+                | (ToolId::Worktrees, Self::Worktree(_))
                 | (ToolId::SandboxProjects, Self::Project(_))
                 | (ToolId::SandboxVms, Self::Vm(_))
         )
@@ -228,8 +228,8 @@ pub(crate) enum Action {
     Ssh(Host),
     /// A worktree of the launch directory, with the agent to start in it.
     CreateWorktree(Option<Launch>),
-    EnterWorktree(AgentWorktree),
-    Cleanup(AgentWorktree),
+    EnterWorktree(Worktree),
+    Cleanup(Worktree),
     /// A sandbox project for the launch directory's repository.
     CreateProject,
     /// The following name a sandbox project.
@@ -240,12 +240,12 @@ pub(crate) enum Action {
     SetupProject(String),
     SyncProject(String),
     /// Open the selected agent worktree (or a saved snapshot) in lazygit.
-    ReviewProject(String, Option<AgentWorktree>),
+    ReviewProject(String, Option<Worktree>),
     /// A worktree of the project, with the agent to start in it with the VM.
     AddProjectWorktree(String, Option<Launch>),
     /// Sync and remove a project's worktree, keeping its branch.
-    DoneProjectWorktree(String, AgentWorktree),
-    EnterProjectWorktree(AgentWorktree),
+    DoneProjectWorktree(String, Worktree),
+    EnterProjectWorktree(Worktree),
     /// Tailor a new project's flake to its repository.
     TailorProject(String, Tailor),
     /// The following act on every project whose VM is running.
@@ -288,7 +288,7 @@ impl Action {
     pub(crate) fn return_tool(&self) -> Option<ToolId> {
         match self {
             Self::CreateWorktree(_) | Self::EnterWorktree(_) | Self::Cleanup(_) => {
-                Some(ToolId::AgentWorktrees)
+                Some(ToolId::Worktrees)
             }
             Self::CreateProject
             | Self::StartProject(_)
@@ -367,7 +367,7 @@ impl PickerState {
             .and_then(|index| self.resources.get(*index))
     }
 
-    fn selected_worktree(&self) -> Option<AgentWorktree> {
+    fn selected_worktree(&self) -> Option<Worktree> {
         match self.selected_resource() {
             Some(Resource::Worktree(worktree)) => Some(worktree.clone()),
             _ => None,
@@ -377,14 +377,14 @@ impl PickerState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ConfirmState {
-    pub(crate) worktree: AgentWorktree,
+    pub(crate) worktree: Worktree,
     pub(crate) confirm: bool,
     pub(crate) return_picker: PickerState,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct DetailsState {
-    pub(crate) worktree: AgentWorktree,
+    pub(crate) worktree: Worktree,
     pub(crate) return_picker: PickerState,
     pub(crate) scroll: u16,
 }
@@ -398,7 +398,7 @@ pub(crate) struct ProjectState {
 }
 
 impl ProjectState {
-    pub(crate) fn selected_worktree(&self) -> Option<&AgentWorktree> {
+    pub(crate) fn selected_worktree(&self) -> Option<&Worktree> {
         self.status.worktrees.get(self.selected)
     }
 }
@@ -841,11 +841,11 @@ impl App {
                         Effect::Execute(Action::Kitty(choice.path))
                     }
                     (ToolId::SshConnect, Resource::Ssh(host)) => Effect::Execute(Action::Ssh(host)),
-                    (ToolId::AgentWorktrees, Resource::Worktree(worktree)) => {
+                    (ToolId::Worktrees, Resource::Worktree(worktree)) => {
                         let return_picker = self
                             .picker()
                             .cloned()
-                            .unwrap_or_else(|| PickerState::new(ToolId::AgentWorktrees));
+                            .unwrap_or_else(|| PickerState::new(ToolId::Worktrees));
                         self.screen = Screen::WorktreeDetails(DetailsState {
                             worktree,
                             return_picker,
@@ -879,7 +879,7 @@ impl App {
     fn handle_worktree_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
         let picker = self
             .picker()
-            .filter(|picker| picker.tool == ToolId::AgentWorktrees)?;
+            .filter(|picker| picker.tool == ToolId::Worktrees)?;
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
@@ -1208,7 +1208,7 @@ fn move_selection(selected: &mut usize, visible_len: usize, delta: isize) {
     *selected = next.clamp(0, visible_len as isize - 1) as usize;
 }
 
-fn worktree_label(worktree: &AgentWorktree) -> String {
+fn worktree_label(worktree: &Worktree) -> String {
     format!(
         "{}  {}  [{}]",
         worktree.name,
@@ -1217,7 +1217,7 @@ fn worktree_label(worktree: &AgentWorktree) -> String {
     )
 }
 
-pub(crate) fn branch_label(worktree: &AgentWorktree) -> &str {
+pub(crate) fn branch_label(worktree: &Worktree) -> &str {
     if worktree.branch.is_empty() {
         "(no branch)"
     } else {
@@ -1233,7 +1233,7 @@ mod tests {
     use crate::agent::Launch;
     use crate::agent::vm::ProjectStatus;
     use crate::aws::Profile;
-    use crate::git::AgentWorktree;
+    use crate::git::Worktree;
     use crate::kitty::Choice;
     use crate::sandbox::RunnerState;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1254,8 +1254,8 @@ mod tests {
         })
     }
 
-    fn worktree(name: &str) -> AgentWorktree {
-        AgentWorktree {
+    fn worktree(name: &str) -> Worktree {
+        Worktree {
             name: name.into(),
             path: PathBuf::from(format!("/tmp/{name}")),
             branch: name.into(),
@@ -1263,15 +1263,15 @@ mod tests {
     }
 
     /// Open the worktree manager with the given worktrees loaded.
-    fn worktree_manager(worktrees: &[AgentWorktree]) -> App {
+    fn worktree_manager(worktrees: &[Worktree]) -> App {
         let mut app = App::new("/repo".into());
         app.handle_key(key(KeyCode::Char('i')));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('1'))),
-            Effect::Load(ToolId::AgentWorktrees)
+            Effect::Load(ToolId::Worktrees)
         );
         app.loaded(
-            ToolId::AgentWorktrees,
+            ToolId::Worktrees,
             Ok(worktrees.iter().cloned().map(Resource::Worktree).collect()),
         );
         app
@@ -1390,7 +1390,7 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('2'))), Effect::None);
         assert_eq!(
             app.handle_key(key(KeyCode::Char('1'))),
-            Effect::Load(ToolId::AgentWorktrees)
+            Effect::Load(ToolId::Worktrees)
         );
     }
 
@@ -1412,13 +1412,14 @@ mod tests {
         );
     }
 
-    fn project(name: &str, worktrees: &[AgentWorktree]) -> ProjectStatus {
+    fn project(name: &str, worktrees: &[Worktree]) -> ProjectStatus {
         ProjectStatus {
             project: crate::sandbox::project::Project {
                 name: name.into(),
                 dir: PathBuf::from(format!("/sandbox/projects/{name}")),
                 repo: Some(PathBuf::from(format!("/p/{name}"))),
                 state_dir: PathBuf::from(format!("/sandbox/state/{name}")),
+                worktrees_root: PathBuf::from("/wt"),
             },
             worktrees: worktrees.to_vec(),
             vm: None,
@@ -1601,7 +1602,7 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Effect::None);
         assert!(matches!(
             &app.screen,
-            Screen::Picker(picker) if picker.tool == ToolId::AgentWorktrees
+            Screen::Picker(picker) if picker.tool == ToolId::Worktrees
         ));
     }
 
@@ -1642,7 +1643,7 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(
             &app.screen,
-            Screen::Picker(picker) if picker.tool == ToolId::AgentWorktrees
+            Screen::Picker(picker) if picker.tool == ToolId::Worktrees
         ));
     }
 
@@ -1703,7 +1704,7 @@ mod tests {
             app.finished(&action, "Done".into(), "done".into(), false);
             assert_eq!(
                 app.handle_key(key(KeyCode::Esc)),
-                Effect::Load(ToolId::AgentWorktrees)
+                Effect::Load(ToolId::Worktrees)
             );
         }
         for action in [

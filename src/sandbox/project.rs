@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::setup;
-use crate::git::AgentWorktree;
+use crate::git::{self, Worktree};
 use crate::{Error, exec};
 
 /// Overrides the central sandbox directory, `~/.agent-sandbox`.
@@ -44,6 +44,9 @@ pub(crate) struct Project {
     pub(crate) repo: Option<PathBuf>,
     /// `home.img` and the runner's logs.
     pub(crate) state_dir: PathBuf,
+    /// Where the repository's project worktrees are grouped:
+    /// `<worktrees_root>/<repo>/<worktree>`, see [`git::worktrees_root`].
+    pub(crate) worktrees_root: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,6 +66,7 @@ impl Project {
             dir,
             repo,
             state_dir: root.join("state").join(name),
+            worktrees_root: git::worktrees_root().unwrap_or_else(|_| root.join("worktrees")),
         }
     }
 
@@ -74,6 +78,11 @@ impl Project {
                 self.name
             ))
         })
+    }
+
+    /// The repository's project worktrees, the ones the VM mounts.
+    pub(crate) fn worktrees(&self) -> Result<Vec<Worktree>, Error> {
+        git::project_worktrees(self.repo()?, &self.worktrees_root)
     }
 
     /// Whether `worktrees.nix` changed since the running VM was started.
@@ -104,7 +113,7 @@ impl Project {
     }
 
     /// Rewrite `worktrees.nix` for `worktrees`. Returns whether it changed.
-    pub(crate) fn write_worktrees(&self, worktrees: &[AgentWorktree]) -> Result<bool, Error> {
+    pub(crate) fn write_worktrees(&self, worktrees: &[Worktree]) -> Result<bool, Error> {
         let path = self.dir.join(WORKTREES_FILE);
         let text = worktrees_nix(worktrees);
         if fs::read_to_string(&path).is_ok_and(|old| old == text) {
@@ -415,7 +424,7 @@ fn per_worktree_guest_paths(line: &str) -> Option<String> {
 }
 
 /// The generated `worktrees.nix`: worktree name → host path.
-pub(crate) fn worktrees_nix(worktrees: &[AgentWorktree]) -> String {
+pub(crate) fn worktrees_nix(worktrees: &[Worktree]) -> String {
     let mut text = String::from(
         "# Written by cli-toolbox from the project's agent worktrees; do not edit.\n{\n",
     );
@@ -748,7 +757,7 @@ mod tests {
 
     #[test]
     fn worktrees_nix_maps_names_to_paths() {
-        let worktrees = [AgentWorktree {
+        let worktrees = [Worktree {
             name: "demo-agent-wt".into(),
             path: "/wt/demo/demo-agent-wt".into(),
             branch: "demo-agent-wt".into(),
@@ -804,7 +813,7 @@ mod tests {
         assert!(!project.write_worktrees(&[]).unwrap());
         project.record_mounted().unwrap();
         assert!(!project.restart_needed());
-        let worktree = AgentWorktree {
+        let worktree = Worktree {
             name: "demo-agent-wt".into(),
             path: "/wt/demo-agent-wt".into(),
             branch: "demo-agent-wt".into(),

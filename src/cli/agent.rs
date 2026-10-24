@@ -298,7 +298,6 @@ fn run_project(
             });
             let (project, created) = vm::create(
                 &root,
-                &git::worktrees_root()?,
                 &options,
                 ai.as_deref(),
                 launch.resolve()?.as_ref(),
@@ -342,7 +341,6 @@ fn run_project(
             };
             let created = vm::add_worktree(
                 &resolve(&root, project)?,
-                &git::worktrees_root()?,
                 restart,
                 launch.resolve()?.as_ref(),
                 &boot_options(boot),
@@ -437,7 +435,12 @@ pub(super) fn run_worktree(
                 stderr,
             )
         }
-        WorktreeCommands::List => git::list_agent_worktrees(&working_dir()?, stdout, stderr),
+        WorktreeCommands::List => {
+            for worktree in git::project_worktrees(&working_dir()?, &git::worktrees_root()?)? {
+                writeln!(stdout, "{}", worktree.path.display())?;
+            }
+            Ok(())
+        }
         WorktreeCommands::Cleanup {
             name,
             all,
@@ -449,6 +452,7 @@ pub(super) fn run_worktree(
             };
             agent::cleanup(
                 &working_dir()?,
+                &git::worktrees_root()?,
                 name.as_deref().unwrap_or(""),
                 all,
                 options,

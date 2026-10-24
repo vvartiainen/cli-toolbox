@@ -66,9 +66,9 @@ fn snapshot_for_review(
     stderr: &mut dyn Write,
     mut pick: impl FnMut(&[String]) -> Result<Option<usize>, Error>,
 ) -> Result<Option<String>, Error> {
-    let repo = project.repo()?;
     if let Some(vm) = vm {
-        let worktrees: Vec<_> = git::agent_worktrees(repo)?
+        let worktrees: Vec<_> = project
+            .worktrees()?
             .into_iter()
             .filter(|worktree| name.is_none_or(|name| worktree.name == name))
             .collect();
@@ -336,6 +336,7 @@ mod tests {
             dir,
             repo: Some(repo.into()),
             state_dir: root.join("state"),
+            worktrees_root: root.join("worktrees"),
         }
     }
 
@@ -404,7 +405,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
-        let agent = temp.path().join("repo-agent-wt");
+        let agent = temp.path().join("worktrees/repo/repo-agent-wt");
         git(
             &repo,
             &[

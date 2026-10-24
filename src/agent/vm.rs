@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::Path;
 
 use super::{Created, Launch, Step};
-use crate::git::{self, AgentWorktree};
+use crate::git::{self, Worktree};
 use crate::sandbox::project::{self, CreateOptions, Project};
 use crate::sandbox::setup::{self, Backlog};
 use crate::sandbox::{self, RunnerState};
@@ -39,7 +39,7 @@ pub(crate) struct VmOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProjectStatus {
     pub(crate) project: Project,
-    pub(crate) worktrees: Vec<AgentWorktree>,
+    pub(crate) worktrees: Vec<Worktree>,
     pub(crate) vm: Option<RunnerState>,
     /// The running VM does not mount the current worktrees.
     pub(crate) restart_needed: bool,
@@ -77,7 +77,8 @@ pub(crate) fn status(project: Project) -> ProjectStatus {
 
 fn status_with(project: Project, running: &[RunnerState]) -> ProjectStatus {
     let vm = sandbox::vm_for(running, &project.dir);
-    let (worktrees, error) = match project.repo.as_deref().map(git::agent_worktrees) {
+    let listed = project.repo.is_some().then(|| project.worktrees());
+    let (worktrees, error) = match listed {
         None => (Vec::new(), None),
         Some(Ok(worktrees)) => (worktrees, None),
         Some(Err(err)) => (Vec::new(), Some(err.to_string())),
@@ -97,14 +98,14 @@ fn status_with(project: Project, running: &[RunnerState]) -> ProjectStatus {
 /// repository. `launch` starts in the first worktree with the VM.
 pub(crate) fn create(
     root: &Path,
-    worktrees_root: &Path,
     options: &CreateOptions,
     ai: Option<&str>,
     launch: Option<&Launch>,
     stderr: &mut dyn Write,
 ) -> Result<(Project, Created), Error> {
     let project = project::create(root, options, stderr)?;
-    let worktree = git::create_agent_worktree_record(&options.repo, worktrees_root, stderr)?;
+    let name = git::next_agent_worktree_name(&options.repo, &project.worktrees_root)?;
+    let worktree = git::create_worktree(&options.repo, &project.worktrees_root, &name, stderr)?;
     write_worktrees(&project)?;
     let mut steps = vec![Step::Done(format!(
         "project: {} with worktree {}",
@@ -158,7 +159,6 @@ pub(crate) fn setup(project: &Project) -> Vec<Step> {
 /// starts in it once the VM opens it in herdr.
 pub(crate) fn add_worktree(
     project: &Project,
-    worktrees_root: &Path,
     restart: bool,
     launch: Option<&Launch>,
     options: &VmOptions,
@@ -167,7 +167,9 @@ pub(crate) fn add_worktree(
     // Forget the agents of worktrees removed by hand before the new one can
     // reuse such a name.
     write_worktrees(project)?;
-    let worktree = git::create_agent_worktree_record(project.repo()?, worktrees_root, stderr)?;
+    let repo = project.repo()?;
+    let name = git::next_agent_worktree_name(repo, &project.worktrees_root)?;
+    let worktree = git::create_worktree(repo, &project.worktrees_root, &name, stderr)?;
     write_worktrees(project)?;
     let mut steps = Vec::new();
     if let Some(launch) = launch {
@@ -438,7 +440,7 @@ pub(crate) struct Synced {
 
 /// Publish agent history as host review snapshots and send normal host history
 /// to the guest's review refs. Never advance an existing branch or touch files.
-pub(crate) fn sync(project: &Project, worktree: Option<&AgentWorktree>) -> Result<Synced, Error> {
+pub(crate) fn sync(project: &Project, worktree: Option<&Worktree>) -> Result<Synced, Error> {
     let vm = sandbox::vm_for(&running_vms(), &project.dir).ok_or_else(|| {
         Error::msg(format!(
             "the VM of {} is not running; start it with `cli-toolbox agent project start {}`",
@@ -447,7 +449,7 @@ pub(crate) fn sync(project: &Project, worktree: Option<&AgentWorktree>) -> Resul
     })?;
     let worktrees = match worktree {
         Some(worktree) => vec![worktree.clone()],
-        None => git::agent_worktrees(project.repo()?)?,
+        None => project.worktrees()?,
     };
     Ok(sync_worktrees(
         &worktrees,
@@ -460,9 +462,9 @@ pub(crate) fn sync(project: &Project, worktree: Option<&AgentWorktree>) -> Resul
 }
 
 fn sync_worktrees(
-    worktrees: &[AgentWorktree],
+    worktrees: &[Worktree],
     mounted: impl Fn(&str) -> bool,
-    mut exchange: impl FnMut(&AgentWorktree) -> Result<String, Error>,
+    mut exchange: impl FnMut(&Worktree) -> Result<String, Error>,
 ) -> Synced {
     let mut synced = Synced {
         report: String::new(),
@@ -502,8 +504,8 @@ pub(crate) fn write_synced(synced: &Synced, out: &mut dyn Write) -> Result<(), E
 }
 
 /// The project's agent worktree named `name` (or its only one).
-pub(crate) fn select_worktree(project: &Project, name: &str) -> Result<AgentWorktree, Error> {
-    let mut selected = git::select_agent_worktrees(project.repo()?, name, false)?;
+pub(crate) fn select_worktree(project: &Project, name: &str) -> Result<Worktree, Error> {
+    let mut selected = git::select_worktrees(project.worktrees()?, name, false)?;
     Ok(selected.remove(0))
 }
 
@@ -511,7 +513,7 @@ pub(crate) fn select_worktree(project: &Project, name: &str) -> Result<AgentWork
 /// to lose work unless forced. Stops the VM when it was the last worktree.
 pub(crate) fn done(
     project: &Project,
-    worktree: &AgentWorktree,
+    worktree: &Worktree,
     options: &VmOptions,
     stderr: &mut dyn Write,
 ) -> Result<Vec<Step>, Error> {
@@ -527,7 +529,7 @@ pub(crate) fn done(
         // Uncommitted and untracked files were checked above.
         force: true,
     };
-    git::remove_agent_worktree(project.repo()?, worktree, remove, stderr)?;
+    git::remove_worktree(project.repo()?, worktree, remove, stderr)?;
     let mut steps = vec![Step::Done(format!(
         "worktree: removed {}; branch {} kept for review",
         worktree.name, worktree.branch
@@ -548,7 +550,7 @@ pub(crate) fn done(
 /// Why `done` would lose work, if it would.
 fn done_blocker(
     project: &Project,
-    worktree: &AgentWorktree,
+    worktree: &Worktree,
     vm: Option<&RunnerState>,
     force: bool,
     report: &mut dyn Write,
@@ -612,11 +614,11 @@ fn list_lines(status: &ProjectStatus) -> String {
 }
 
 /// Write `worktrees.nix` from the repository's agent worktrees.
-fn write_worktrees(project: &Project) -> Result<Vec<AgentWorktree>, Error> {
-    let Some(repo) = project.repo.as_deref() else {
+fn write_worktrees(project: &Project) -> Result<Vec<Worktree>, Error> {
+    if project.repo.is_none() {
         return Ok(Vec::new());
-    };
-    let worktrees = git::agent_worktrees(repo)?;
+    }
+    let worktrees = project.worktrees()?;
     project.write_worktrees(&worktrees)?;
     // A later worktree of the same name must not inherit a removed one's agent.
     let mut launches = launches(project);
@@ -634,7 +636,7 @@ fn write_worktrees(project: &Project) -> Result<Vec<AgentWorktree>, Error> {
 fn herdr_steps(
     project: &Project,
     machine: &str,
-    worktrees: &[AgentWorktree],
+    worktrees: &[Worktree],
     agent: Option<&str>,
 ) -> Vec<Step> {
     if !herdr::available() {
@@ -796,14 +798,17 @@ mod tests {
             format!("{{\"repo\": \"{}\"}}", repo.display()),
         )
         .unwrap();
-        project::load(root, "demo").unwrap()
+        Project {
+            worktrees_root: root.join("worktrees"),
+            ..project::load(root, "demo").unwrap()
+        }
     }
 
     #[test]
     fn sync_skips_unmounted_worktrees_and_continues_after_transport_errors() {
         let worktrees: Vec<_> = ["unmounted", "broken", "ready"]
             .into_iter()
-            .map(|name| AgentWorktree {
+            .map(|name| Worktree {
                 name: name.into(),
                 path: "/unused".into(),
                 branch: name.into(),
@@ -849,27 +854,10 @@ mod tests {
         let repo = temp.path().join("demo");
         init_git_repo(&repo);
         let project = project(&temp.path().join("sandbox"), &repo);
-        let worktrees_root = temp.path().join("worktrees");
         let options = VmOptions::default();
 
-        let first = add_worktree(
-            &project,
-            &worktrees_root,
-            false,
-            None,
-            &options,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        let second = add_worktree(
-            &project,
-            &worktrees_root,
-            false,
-            None,
-            &options,
-            &mut Vec::new(),
-        )
-        .unwrap();
+        let first = add_worktree(&project, false, None, &options, &mut Vec::new()).unwrap();
+        let second = add_worktree(&project, false, None, &options, &mut Vec::new()).unwrap();
         assert_eq!(second.worktree.name, "demo-agent-wt-2");
         assert!(matches!(&first.steps[..], [Step::Skipped(text)] if text.contains("stopped")));
 
@@ -892,12 +880,10 @@ mod tests {
         let repo = temp.path().join("demo");
         init_git_repo(&repo);
         let project = project(&temp.path().join("sandbox"), &repo);
-        let worktrees_root = temp.path().join("worktrees");
         let launch = Launch::new("codex", Some("Add a --json flag".into()));
 
         let created = add_worktree(
             &project,
-            &worktrees_root,
             false,
             Some(&launch),
             &VmOptions::default(),
@@ -914,7 +900,7 @@ mod tests {
         );
 
         // Removed some other way: the next worktree reuses its name.
-        git::remove_agent_worktree(
+        git::remove_worktree(
             &repo,
             &created.worktree,
             git::RemoveOptions::default(),
@@ -923,7 +909,6 @@ mod tests {
         .unwrap();
         let again = add_worktree(
             &project,
-            &worktrees_root,
             false,
             None,
             &VmOptions::default(),
@@ -959,7 +944,6 @@ mod tests {
         let project = project(&temp.path().join("sandbox"), &repo);
         let created = add_worktree(
             &project,
-            &temp.path().join("worktrees"),
             false,
             None,
             &VmOptions::default(),
@@ -1023,7 +1007,7 @@ mod tests {
             ..VmOptions::default()
         };
         done(&project, &worktree, &forced, &mut Vec::new()).unwrap();
-        assert!(git::agent_worktrees(&repo).unwrap().is_empty());
+        assert!(project.worktrees().unwrap().is_empty());
         let mounted = std::fs::read_to_string(project.dir.join("worktrees.nix")).unwrap();
         assert!(!mounted.contains("demo-agent-wt"), "{mounted}");
     }
@@ -1036,8 +1020,9 @@ mod tests {
                 dir: "/sandbox/projects/demo".into(),
                 repo: Some("/p/demo".into()),
                 state_dir: "/sandbox/state/demo".into(),
+                worktrees_root: "/wt".into(),
             },
-            worktrees: vec![AgentWorktree {
+            worktrees: vec![Worktree {
                 name: "demo-agent-wt".into(),
                 path: "/wt/demo-agent-wt".into(),
                 branch: "demo-agent-wt".into(),
@@ -1098,6 +1083,7 @@ mod tests {
                 dir: root.join("projects").join(name),
                 repo: None,
                 state_dir: root.join("state").join(name),
+                worktrees_root: root.join("worktrees"),
             })
             .collect();
         let vms = running(&["a", "c", "gone"])
