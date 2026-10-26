@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "backlog-cli-toolbox": {
+      "args": [
+        "cli-toolbox",
+        "mcp",
+        "start"
+      ],
+      "command": "bl"
+    }
+  }
+}
