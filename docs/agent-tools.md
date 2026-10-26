@@ -15,7 +15,7 @@ ct agents set targets claude enable
 ct agents set mcp nixos enable
 ct agents set skills review enable
 ct agents sync --dry-run           # List the changes
-ct agents sync
+ct agents sync                     # --replace: overwrite differing catalog-named entries
 ct agents library install          # Download remote skills, keeping locked revisions
 ct agents library update           # Download remote skills, refreshing revisions
 ```
@@ -44,22 +44,35 @@ Some agents only read project MCP servers in projects you trust: Codex and Pi
 ask the first time they start there. Claude Code asks before starting servers
 from `.mcp.json` unless they are approved in its settings.
 
-## Committed files
+## State
+
+Only the agents' own files go into the repository; commit them like any other
+agent configuration. `ct agents` keeps its own state outside the checkout:
 
 | File | Purpose |
 | --- | --- |
-| `.cli-toolbox/agents.json` | The choices |
-| `.cli-toolbox/agents.lock.json` | What sync wrote: each target's servers and every skill file's hash |
-| The targets' files above | What the agents read |
+| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<repo>-<hash>/choices.json` | The repository's choices, shared by its linked worktrees |
+| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<repo>-<hash>/locks/<hash>.json` | What sync wrote in one checkout |
 
-Commit all of them. The lock lets any checkout sync: it updates and removes
-exactly what an earlier sync wrote. Sync never overwrites anything else:
+`XDG_STATE_HOME` defaults to `~/.local/state`. The directory is named after the
+repository and a hash of its Git directory. Sync updates and removes exactly
+what the lock records and never overwrites anything else:
 
 - servers and settings it did not write stay, and an existing server with the
   same name and content is adopted;
 - a server or skill file it wrote and someone edited, or a different server or
-  file in the way, stops the sync with an error to resolve by hand;
+  file in the way, stops the sync; `--replace` overwrites it instead;
 - a section, file or folder left empty is removed.
+
+Without saved state, in a fresh clone, on another machine or after moving the
+repository, the choices are worked out from the agent files: catalog-named
+servers in a target's MCP file turn on that target and server, and
+catalog-named skill folders turn on the skill (and Claude Code, for
+`.claude/skills`). Agents that read only `.agents/skills` cannot be told
+apart, so choose those again. Catalog-named servers and skills that match what
+sync would write are adopted; ones that differ, such as copies from an older
+catalog, need `ct agents sync --replace`. `ct agents status` says when the
+choices were worked out.
 
 Committed files have to work on every machine, so sync refuses servers whose
 command, arguments or environment contain absolute or home paths. Catalog

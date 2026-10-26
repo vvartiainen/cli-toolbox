@@ -29,6 +29,7 @@ struct Fixture {
     temp: TempDir,
     root: PathBuf,
     library: PathBuf,
+    state: PathBuf,
     catalog: Value,
 }
 impl Fixture {
@@ -38,15 +39,25 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         run_command("git", &["init", "-q"], &root).unwrap();
         let library = temp.path().join("library");
+        let state = temp.path().join("state");
         Self {
             temp,
             root,
             library,
+            state,
             catalog: json!({"version":1,"mcp":{"nixos":{"type":"stdio","command":"mcp-nixos","args":["--stdio"],"env":{"LEVEL":"1"}}},"sources":[]}),
         }
     }
     fn project(&self) -> Project {
-        Project::new(&self.root, self.catalog.clone(), &self.library).unwrap()
+        Project::new(&self.root, self.catalog.clone(), &self.library, &self.state).unwrap()
+    }
+    /// The repository's state directory, outside the checkout.
+    fn state_dir(&self) -> PathBuf {
+        state_dir(&self.state, &self.root.canonicalize().unwrap()).unwrap()
+    }
+    fn lock(&self) -> Value {
+        let root = self.root.canonicalize().unwrap();
+        load_json(&lock_path(&self.state_dir(), &root), Value::Null).unwrap()
     }
     fn choose(&self, entries: &[(&str, &str)]) {
         let mut project = self.project();
@@ -59,7 +70,7 @@ impl Fixture {
     }
     fn sync(&self) -> Result<String, Error> {
         let mut out = Vec::new();
-        self.project().sync(false, &mut out)?;
+        self.project().sync(false, false, &mut out)?;
         Ok(String::from_utf8(out).unwrap())
     }
     fn json(&self, relative: &str) -> Value {
@@ -103,11 +114,13 @@ fn targets_start_off_so_choices_alone_write_nothing_else() {
             .all(|e| e.group != "targets" || !e.enabled)
     );
     assert_eq!(f.sync().unwrap(), "Up to date.\n");
-    assert_eq!(files(&f.root), [CHOICES]);
+    // Nothing of ct's own lands in the checkout.
+    assert!(files(&f.root).is_empty());
     assert_eq!(
-        f.json(CHOICES),
+        load_json(&f.state_dir().join(CHOICES), Value::Null).unwrap(),
         json!({"version":1,"mcp":{"nixos":"enable"}})
     );
+    assert!(f.lock().is_null());
 }
 
 #[test]
@@ -157,7 +170,7 @@ fn sync_writes_every_targets_native_files_and_a_lock() {
             0
         );
     }
-    let lock = f.json(LOCK);
+    let lock = f.lock();
     assert_eq!(lock["mcp"]["claude"]["nixos"], claude);
     assert!(lock["skills"][".claude/skills/review/SKILL.md"].is_object());
     // Committed files are plain files anyone can read.
@@ -219,7 +232,8 @@ fn turning_things_off_removes_only_what_sync_wrote() {
 
     f.drop_choice("targets", "codex");
     f.sync().unwrap();
-    assert_eq!(files(&f.root), [".cli-toolbox/agents.json", ".mcp.json"]);
+    assert_eq!(files(&f.root), [".mcp.json"]);
+    assert!(f.lock().is_null());
     assert_eq!(f.json(".mcp.json"), original);
 }
 
@@ -232,14 +246,14 @@ fn foreign_and_edited_files_are_never_overwritten() {
         ("mcp", "nixos"),
         ("skills", "review"),
     ]);
-    // A different server of the same name belongs to someone else.
+    // A different server of a catalog name is only replaced when asked.
     write_json(
         &f.root.join(".mcp.json"),
         &json!({"mcpServers":{"nixos":{"command":"custom"}}}),
     )
     .unwrap();
     let before = snapshot(&f.root);
-    assert_error(f.sync(), "already has another MCP server named nixos");
+    assert_error(f.sync(), "differs from what ct agents wrote");
     assert_eq!(snapshot(&f.root), before);
     // An identical one is adopted.
     write_json(
@@ -255,14 +269,14 @@ fn foreign_and_edited_files_are_never_overwritten() {
         &json!({"mcpServers":{"nixos":{"command":"edited"}}}),
     )
     .unwrap();
-    assert_error(f.sync(), "was edited");
+    assert_error(f.sync(), "differs from what ct agents wrote");
     fs::remove_file(f.root.join(".mcp.json")).unwrap();
     f.sync().unwrap();
 
     let skill = f.root.join(".claude/skills/review/SKILL.md");
     fs::write(&skill, "local edit").unwrap();
     f.drop_choice("skills", "review");
-    assert_error(f.sync(), "was edited");
+    assert_error(f.sync(), "differs from what ct agents wrote");
     fs::remove_dir_all(f.root.join(".claude")).unwrap();
     f.sync().unwrap();
 
@@ -287,11 +301,12 @@ fn servers_with_machine_paths_cannot_be_committed() {
 }
 
 #[test]
-fn another_checkout_with_the_committed_files_continues_where_this_one_left() {
+fn another_machine_works_out_the_choices_from_the_agent_files() {
     let f = Fixture::new();
     f.add_skill();
     f.choose(&[
         ("targets", "claude"),
+        ("targets", "codex"),
         ("mcp", "nixos"),
         ("skills", "review"),
     ]);
@@ -305,11 +320,94 @@ fn another_checkout_with_the_committed_files_continues_where_this_one_left() {
         let mode = fs::metadata(&source).unwrap().permissions().mode() & 0o777;
         write_file(&clone.join(&file), &fs::read(&source).unwrap(), mode).unwrap();
     }
-    let mut other = Project::new(&clone, f.catalog.clone(), &f.library).unwrap();
-    assert!(other.is_synced().unwrap());
-    other.set_choice("targets", "claude", false).unwrap();
-    other.sync(false, &mut Vec::new()).unwrap();
-    assert_eq!(files(&clone), [CHOICES]);
+    // A machine with no saved state.
+    let elsewhere = f.temp.path().join("elsewhere");
+    let other = || Project::new(&clone, f.catalog.clone(), &f.library, &elsewhere).unwrap();
+    let on: Vec<_> = other()
+        .overview()
+        .into_iter()
+        .filter(|e| e.enabled)
+        .map(|e| format!("{} {}", e.group, e.name))
+        .collect();
+    assert_eq!(
+        on,
+        [
+            "targets claude",
+            "targets codex",
+            "mcp nixos",
+            "skills review"
+        ]
+    );
+    let mut out = Vec::new();
+    other().status(&mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("worked out from the agent files")
+    );
+    assert!(other().is_synced().unwrap());
+
+    // What differs from the catalog is only replaced when asked.
+    write_json(
+        &clone.join(".mcp.json"),
+        &json!({"mcpServers":{"nixos":{"command":"older"}}}),
+    )
+    .unwrap();
+    assert_error(
+        other().sync(false, false, &mut Vec::new()),
+        "differs from what ct agents wrote",
+    );
+    other().sync(false, true, &mut Vec::new()).unwrap();
+    assert_eq!(
+        load_json(&clone.join(".mcp.json"), Value::Null).unwrap()["mcpServers"]["nixos"]["command"],
+        "mcp-nixos"
+    );
+    // Now saved, turning things off removes exactly what was written.
+    let mut project = other();
+    project.set_choice("targets", "claude", false).unwrap();
+    project.set_choice("targets", "codex", false).unwrap();
+    project.sync(false, false, &mut Vec::new()).unwrap();
+    assert!(files(&clone).is_empty());
+}
+
+#[test]
+fn worktrees_share_choices_and_keep_their_own_lock() {
+    let f = Fixture::new();
+    run_command(
+        "git",
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+            "--allow-empty",
+        ],
+        &f.root,
+    )
+    .unwrap();
+    let linked = f.temp.path().join("linked");
+    run_command(
+        "git",
+        &["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
+        &f.root,
+    )
+    .unwrap();
+    f.choose(&[("targets", "pi"), ("mcp", "nixos")]);
+    f.sync().unwrap();
+    let mut worktree = Project::new(&linked, f.catalog.clone(), &f.library, &f.state).unwrap();
+    assert!(worktree.enabled("mcp", "nixos"));
+    assert!(!worktree.is_synced().unwrap());
+    worktree.sync(false, false, &mut Vec::new()).unwrap();
+    assert!(linked.join(".pi/mcp.json").exists());
+    let linked = linked.canonicalize().unwrap();
+    assert_ne!(
+        lock_path(&f.state_dir(), &linked),
+        lock_path(&f.state_dir(), &f.root.canonicalize().unwrap())
+    );
+    assert_eq!(state_dir(&f.state, &linked).unwrap(), f.state_dir());
 }
 
 #[test]
@@ -318,11 +416,10 @@ fn preview_changes_nothing_and_unknown_names_are_rejected() {
     f.choose(&[("targets", "claude"), ("mcp", "nixos")]);
     let before = snapshot(&f.root);
     let mut out = Vec::new();
-    f.project().sync(true, &mut out).unwrap();
+    f.project().sync(true, false, &mut out).unwrap();
     assert_eq!(snapshot(&f.root), before);
     let out = String::from_utf8(out).unwrap();
     assert!(out.contains("create .mcp.json"), "{out}");
-    assert!(out.contains(&format!("create {LOCK}")), "{out}");
     assert_error(
         f.project().set_choice("mcp", "typo", true),
         "unknown mcp entry",
@@ -351,12 +448,12 @@ fn local_skills_need_no_install_and_must_be_safe() {
     f.add_skill();
     f.catalog["localSkills"] = json!({"review": skill});
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library),
+        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
         "clashes",
     );
     f.catalog["localSkills"] = json!({"notes": "relative"});
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library),
+        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
         "absolute path",
     );
 }
@@ -412,7 +509,7 @@ fn library_edits_and_lockfile_edits_are_reported() {
     )
     .unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library),
+        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
         "library was edited",
     );
     f.add_skill();
@@ -420,7 +517,7 @@ fn library_edits_and_lockfile_edits_are_reported() {
     write_receipt(&f.library, &f.catalog).unwrap();
     write_json(&f.library.join("rulesync.lock"), &json!({"revision":"two"})).unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library),
+        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
         "lockfile changed",
     );
 }

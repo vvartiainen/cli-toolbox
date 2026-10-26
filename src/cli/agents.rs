@@ -24,6 +24,10 @@ enum AgentsCommand {
         /// List the changes without making them.
         #[arg(long)]
         dry_run: bool,
+        /// Replace catalog-named servers and skills that differ from what
+        /// sync would write, instead of stopping.
+        #[arg(long)]
+        replace: bool,
     },
     /// Install locked skill sources or explicitly update their revisions.
     Library {
@@ -67,7 +71,9 @@ impl AgentsCmd {
                     &name,
                     matches!(choice, Toggle::Enable),
                 ),
-                Some(AgentsCommand::Sync { dry_run }) => project.sync(dry_run, stdout),
+                Some(AgentsCommand::Sync { dry_run, replace }) => {
+                    project.sync(dry_run, replace, stdout)
+                }
                 None => project.interactive(stdout),
                 Some(AgentsCommand::Library { .. }) => unreachable!(),
             }),
@@ -96,6 +102,7 @@ mod tests {
             vec!["agents", "set", "skills", "review", "disable"],
             vec!["agents", "sync"],
             vec!["agents", "sync", "--dry-run"],
+            vec!["agents", "sync", "--replace"],
             vec!["agents", "library", "install"],
             vec!["agents", "library", "update"],
         ] {

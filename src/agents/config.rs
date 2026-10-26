@@ -1,10 +1,7 @@
 use super::*;
 
-/// The repository's choices, committed with it.
-pub(super) const CHOICES: &str = ".cli-toolbox/agents.json";
-/// What sync wrote, so it can update and remove exactly that; committed too,
-/// so any checkout can sync.
-pub(super) const LOCK: &str = ".cli-toolbox/agents.lock.json";
+/// A repository's choices, in its state directory (`state_dir`).
+pub(super) const CHOICES: &str = "choices.json";
 pub(super) const GROUPS: [&str; 3] = ["targets", "mcp", "skills"];
 /// The agents sync writes for, by command name.
 pub(super) const TARGETS: [&str; 6] = ["claude", "codex", "copilot", "cursor", "opencode", "pi"];
@@ -158,9 +155,50 @@ pub(crate) fn project_root(cwd: &Path) -> Result<PathBuf, Error> {
     fs::canonicalize(run_command("git", &["rev-parse", "--show-toplevel"], cwd)?)
         .map_err(Into::into)
 }
+/// A repository's directory under `state`, shared by its linked worktrees:
+/// named after the repository's folder and a hash of its Git directory.
+pub(super) fn state_dir(state: &Path, root: &Path) -> Result<PathBuf, Error> {
+    let common = fs::canonicalize(run_command(
+        "git",
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        root,
+    )?)?;
+    // A non-bare repository's Git directory is `<repo>/.git`.
+    let folder = if common.file_name().is_some_and(|n| n == ".git") {
+        common.parent().unwrap_or(&common)
+    } else {
+        &common
+    };
+    let name: String = folder
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let hash = digest(common.as_os_str().as_encoded_bytes());
+    Ok(state
+        .join("projects")
+        .join(format!("{name}-{}", &hash[..12])))
+}
+/// What sync wrote in one checkout, in its repository's state directory.
+pub(super) fn lock_path(state_dir: &Path, root: &Path) -> PathBuf {
+    let hash = digest(root.as_os_str().as_encoded_bytes());
+    state_dir
+        .join("locks")
+        .join(format!("{}.json", &hash[..12]))
+}
 pub(crate) struct Environment {
     pub catalog: Value,
     pub library: PathBuf,
+    /// Choices and locks of each repository.
+    pub state: PathBuf,
 }
 impl Environment {
     pub fn discover() -> Result<Self, Error> {
@@ -173,9 +211,13 @@ impl Environment {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"));
-        if !config.is_absolute() || !data.is_absolute() {
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"));
+        if !config.is_absolute() || !data.is_absolute() || !state.is_absolute() {
             return Err(Error::msg(
-                "XDG config and data directories must be absolute",
+                "XDG config, data and state directories must be absolute",
             ));
         }
         let path = config.join("cli-toolbox/agents/catalog.json");
@@ -190,6 +232,7 @@ impl Environment {
         Ok(Self {
             catalog,
             library: data.join("cli-toolbox/agents/library"),
+            state: state.join("cli-toolbox/agents"),
         })
     }
     pub fn with_project<T>(
@@ -203,6 +246,7 @@ impl Environment {
             &root,
             self.catalog.clone(),
             &self.library,
+            &self.state,
         )?)
     }
     pub fn install(&self, update: bool) -> Result<(), Error> {
