@@ -1,8 +1,15 @@
 use super::*;
 
 pub(super) const SHARED: &str = ".cli-toolbox/agents.json";
-pub(super) const PERSONAL: &str = ".cli-toolbox/agents.local.json";
-pub(super) const STATE: &str = ".cli-toolbox/agents.state.json";
+// Personal choices and ownership live outside the checkout, in its private
+// directory (`private_dir`).
+pub(super) const PERSONAL: &str = "choices.json";
+pub(super) const STATE: &str = "state.json";
+/// Where older versions kept them, inside the checkout; moved on the next write.
+pub(super) const LEGACY: [(&str, &str); 2] = [
+    (".cli-toolbox/agents.local.json", PERSONAL),
+    (".cli-toolbox/agents.state.json", STATE),
+];
 pub(super) const GROUPS: [&str; 3] = ["targets", "mcp", "skills"];
 pub(super) const TARGETS: [&str; 6] = [
     "codexcli",
@@ -122,6 +129,27 @@ pub(crate) fn project_root(cwd: &Path) -> Result<PathBuf, Error> {
     fs::canonicalize(run_command("git", &["rev-parse", "--show-toplevel"], cwd)?)
         .map_err(Into::into)
 }
+/// The checkout's private directory under `state`: its folder name for
+/// reading, and a hash of its path so each checkout and worktree has its own.
+pub(super) fn private_dir(state: &Path, root: &Path) -> PathBuf {
+    let name: String = root
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let hash = digest(root.as_os_str().as_encoded_bytes());
+    state
+        .join("projects")
+        .join(format!("{name}-{}", &hash[..12]))
+}
 const EXCLUDE_BEGIN: &str = "# cli-toolbox agents: generated files";
 const EXCLUDE_END: &str = "# end cli-toolbox agents";
 /// `generated` replaces the block of excluded generated files; `None` keeps it.
@@ -177,24 +205,21 @@ pub(super) fn exclusion_change(
         }
         old = kept.into_bytes();
     }
-    let text = std::str::from_utf8(&old).map_err(Error::msg)?;
-    let additions: Vec<_> = [PERSONAL, STATE]
-        .iter()
-        .map(|p| format!("/{p}"))
-        .filter(|p| !text.lines().any(|line| line == p))
+    // Older versions listed the in-checkout personal files here.
+    let text = String::from_utf8(old).map_err(Error::msg)?;
+    let legacy: Vec<_> = LEGACY.iter().map(|(old, _)| format!("/{old}")).collect();
+    let kept: String = text
+        .split_inclusive('\n')
+        .filter(|line| !legacy.iter().any(|old| line.trim_end() == old))
         .collect();
-    if !additions.is_empty() {
-        if !old.is_empty() && !old.ends_with(b"\n") {
-            old.push(b'\n');
-        }
-        old.extend_from_slice(format!("{}\n", additions.join("\n")).as_bytes());
-    }
-    Ok((path, old))
+    Ok((path, kept.into_bytes()))
 }
 
 pub(crate) struct Environment {
     pub catalog: Value,
     pub library: PathBuf,
+    /// Personal choices and ownership of each checkout.
+    pub state: PathBuf,
 }
 impl Environment {
     pub fn discover() -> Result<Self, Error> {
@@ -207,9 +232,13 @@ impl Environment {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"));
-        if !config.is_absolute() || !data.is_absolute() {
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"));
+        if !config.is_absolute() || !data.is_absolute() || !state.is_absolute() {
             return Err(Error::msg(
-                "XDG config and data directories must be absolute",
+                "XDG config, data and state directories must be absolute",
             ));
         }
         let path = config.join("cli-toolbox/agents/catalog.json");
@@ -224,6 +253,7 @@ impl Environment {
         Ok(Self {
             catalog,
             library: data.join("cli-toolbox/agents/library"),
+            state: state.join("cli-toolbox/agents"),
         })
     }
     pub fn with_project<T>(
@@ -238,6 +268,7 @@ impl Environment {
             &root,
             self.catalog.clone(),
             &self.library,
+            &self.state,
             &backend,
         )?)
     }

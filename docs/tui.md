@@ -54,7 +54,7 @@ Shows the launch directory repository's `ct agents` choices (see
 [agent-tools.md](agent-tools.md)): whether generated files are in sync,
 whether they are excluded from Git, then each MCP server, skill and target.
 A row shows the effective state, then the repository's choice
-(`.cli-toolbox/agents.json`, committed) and yours (personal, git-excluded):
+(`.cli-toolbox/agents.json`, committed) and yours (personal, kept outside the repository):
 `on`, `off`, or `–` to inherit. Yours wins over the repository's, which wins
 over the catalog default; yours is highlighted when it overrides.
 

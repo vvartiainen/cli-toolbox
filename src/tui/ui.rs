@@ -201,7 +201,10 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                         "^R",
                         "cycle the repository choice (.cli-toolbox/agents.json)",
                     ),
-                    entry("^T", "cycle your own choice (personal, git-excluded)"),
+                    entry(
+                        "^T",
+                        "cycle your own choice (personal, kept outside the repository)",
+                    ),
                     entry("⏎", "sync, or toggle excluding generated files from Git"),
                     entry("^S", "sync generated agent files"),
                     entry("^D", "preview the sync without changing files"),

@@ -42,6 +42,7 @@ struct Fixture {
     temp: TempDir,
     root: PathBuf,
     library: PathBuf,
+    state: PathBuf,
     catalog: Value,
 }
 impl Fixture {
@@ -51,10 +52,12 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         run_command("git", &["init", "-q"], &root).unwrap();
         let library = temp.path().join("library");
+        let state = temp.path().join("state");
         Self {
             temp,
             root,
             library,
+            state,
             catalog: json!({"version":1,"targets":["claudecode"],"mcp":{"nixos":{"type":"stdio","command":"mcp-nixos"}},"sources":[],"defaults":{"targets":{"claudecode":"enable"}}}),
         }
     }
@@ -63,18 +66,24 @@ impl Fixture {
             &self.root,
             self.catalog.clone(),
             &self.library,
+            &self.state,
             &FakeBackend,
         )
         .unwrap()
     }
+    /// A personal file of the checkout, outside it.
+    fn private(&self, name: &str) -> PathBuf {
+        private_dir(&self.state, &self.root.canonicalize().unwrap()).join(name)
+    }
     fn choices(&self, shared: bool, groups: Value) {
         let mut groups = groups;
         groups["version"] = json!(1);
-        write_json(
-            &self.root.join(if shared { SHARED } else { PERSONAL }),
-            &groups,
-        )
-        .unwrap();
+        let path = if shared {
+            self.root.join(SHARED)
+        } else {
+            self.private(PERSONAL)
+        };
+        write_json(&path, &groups).unwrap();
     }
     fn sync(&self) -> Result<bool, Error> {
         self.project().sync(false, &[], &mut Vec::new())
@@ -247,13 +256,48 @@ fn edited_managed_server_is_not_overwritten() {
 }
 
 #[test]
-fn personal_choices_are_locally_excluded() {
+fn personal_choices_and_ownership_live_outside_the_checkout() {
     let f = Fixture::new();
     f.project()
         .set_choice("mcp", "nixos", "enable", false)
         .unwrap();
-    run_command("git", &["check-ignore", PERSONAL, STATE], &f.root).unwrap();
-    assert!(!f.root.join(".gitignore").exists());
+    f.sync().unwrap();
+    assert!(f.private(PERSONAL).exists());
+    assert!(f.private(STATE).exists());
+    assert!(!f.root.join(".cli-toolbox").exists());
+    let exclude = fs::read_to_string(f.root.join(".git/info/exclude")).unwrap();
+    assert!(!exclude.contains(".cli-toolbox"));
+}
+
+#[test]
+fn files_in_the_checkout_from_older_versions_move_out_on_the_next_write() {
+    let f = Fixture::new();
+    f.choices(true, json!({}));
+    let legacy = |i: usize| f.root.join(LEGACY[i].0);
+    write_json(&legacy(0), &json!({"version":1,"mcp":{"nixos":"enable"}})).unwrap();
+    let exclude = f.root.join(".git/info/exclude");
+    fs::write(
+        &exclude,
+        format!("# mine\n/{}\n/{}\n", LEGACY[0].0, LEGACY[1].0),
+    )
+    .unwrap();
+    assert!(f.project().enabled("mcp", "nixos"));
+    // A preview moves nothing.
+    f.project().sync(true, &[], &mut Vec::new()).unwrap();
+    assert!(legacy(0).exists());
+    f.sync().unwrap();
+    // Ownership written before the move is read from the old place too.
+    let state = fs::read(f.private(STATE)).unwrap();
+    fs::rename(f.private(STATE), legacy(1)).unwrap();
+    assert!(f.project().is_synced().unwrap());
+    f.project()
+        .set_choice("mcp", "nixos", "enable", false)
+        .unwrap();
+    assert!(!legacy(0).exists() && !legacy(1).exists());
+    assert_eq!(fs::read(f.private(STATE)).unwrap(), state);
+    assert!(f.private(PERSONAL).exists());
+    assert_eq!(fs::read_to_string(&exclude).unwrap(), "# mine\n");
+    assert!(f.root.join(SHARED).exists());
 }
 
 #[test]
@@ -285,12 +329,24 @@ fn local_skills_need_no_install_and_disable_removes_owned_files() {
     f.add_skill();
     f.catalog["localSkills"] = json!({"review": skill});
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "clashes",
     );
     f.catalog["localSkills"] = json!({"notes": "relative"});
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "absolute path",
     );
 }
@@ -317,11 +373,16 @@ fn exclude_hides_untracked_generated_files_and_is_personal() {
     f.project().set_exclude(false).unwrap();
     f.sync().unwrap();
     assert!(run_command("git", &["check-ignore", skill], &f.root).is_err());
-    run_command("git", &["check-ignore", PERSONAL], &f.root).unwrap();
 
     f.choices(true, json!({"exclude":true}));
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "personal choice",
     );
 }
@@ -357,12 +418,21 @@ fn subdirectories_and_linked_worktrees_have_independent_state() {
         project_root(&subdir).unwrap(),
         linked.canonicalize().unwrap()
     );
-    let mut project = Project::new(&linked, f.catalog.clone(), &f.library, &FakeBackend).unwrap();
+    let mut project = Project::new(
+        &linked,
+        f.catalog.clone(),
+        &f.library,
+        &f.state,
+        &FakeBackend,
+    )
+    .unwrap();
     project.set_choice("mcp", "nixos", "enable", false).unwrap();
     project.sync(false, &[], &mut Vec::new()).unwrap();
     assert!(linked.join(".mcp.json").exists());
     assert!(!f.root.join(".mcp.json").exists());
-    run_command("git", &["check-ignore", PERSONAL, STATE], &linked).unwrap();
+    let linked = linked.canonicalize().unwrap();
+    assert!(private_dir(&f.state, &linked).join(STATE).exists());
+    assert!(!f.private(STATE).exists());
 }
 
 #[test]
@@ -377,13 +447,25 @@ fn rejects_symlinks_path_escape_unknown_choices_and_stale_library() {
     assert_error(safe_path(&f.root, "../escape"), "unsafe");
     f.choices(false, json!({"mcp":{"typo":"enable"}}));
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "unknown mcp",
     );
     f.choices(false, json!({}));
     f.catalog["sources"] = json!([{"source":"example/skills"}]);
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "library install",
     );
 }
@@ -401,12 +483,18 @@ fn status_detects_selection_and_file_drift_without_backend() {
 #[test]
 fn corrupt_manifest_and_invalid_config_never_allow_writes() {
     let f = Fixture::new();
-    write_json(&f.root.join(STATE), &json!({"version":999})).unwrap();
+    write_json(&f.private(STATE), &json!({"version":999})).unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "state",
     );
-    fs::remove_file(f.root.join(STATE)).unwrap();
+    fs::remove_file(f.private(STATE)).unwrap();
     f.choices(false, json!({"mcp":{"nixos":"enable"}}));
     fs::write(f.root.join(".mcp.json"), "{\"mcpServers\":{},\"broken\":").unwrap();
     let before = snapshot(&f.root);
@@ -481,7 +569,7 @@ fn changes_during_preview_abort_apply() {
         load_json(&f.root.join(".mcp.json"), Value::Null).unwrap(),
         json!({"runtime":"edited"})
     );
-    assert!(!f.root.join(STATE).exists());
+    assert!(!f.private(STATE).exists());
 }
 
 #[test]
@@ -536,7 +624,13 @@ fn library_edits_and_lockfile_edits_are_reported() {
     )
     .unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "library was edited",
     );
     f.add_skill();
@@ -544,7 +638,13 @@ fn library_edits_and_lockfile_edits_are_reported() {
     write_receipt(&f.library, &f.catalog).unwrap();
     write_json(&f.library.join("rulesync.lock"), &json!({"revision":"two"})).unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "lockfile changed",
     );
 }
@@ -557,12 +657,18 @@ fn unsafe_manifest_paths_and_directory_collisions_fail_before_writes() {
     let rec = serde_json::to_value(record(b"keep", 0o644)).unwrap();
     state["skills"] = json!({".claude/skills/../../victim":rec});
     state["files"] = state["skills"].clone();
-    write_json(&f.root.join(STATE), &state).unwrap();
+    write_json(&f.private(STATE), &state).unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        Project::new(
+            &f.root,
+            f.catalog.clone(),
+            &f.library,
+            &f.state,
+            &FakeBackend,
+        ),
         "unsafe",
     );
-    fs::remove_file(f.root.join(STATE)).unwrap();
+    fs::remove_file(f.private(STATE)).unwrap();
     fs::create_dir(f.root.join(".mcp.json")).unwrap();
     assert_error(f.sync(), "regular file");
 }
@@ -637,7 +743,8 @@ fn rulesync_all_six_targets_enable_repeat_dry_run_disable_offline() {
         true,
         json!({"mcp":{"nixos":"enable"},"skills":{"review":"enable"}}),
     );
-    let project = || Project::new(&f.root, f.catalog.clone(), &f.library, &backend).unwrap();
+    let project =
+        || Project::new(&f.root, f.catalog.clone(), &f.library, &f.state, &backend).unwrap();
     let adopt: Vec<_> = TARGETS.into_iter().map(str::to_owned).collect();
     let before = snapshot(&f.root);
     let library_before = snapshot(&f.library);

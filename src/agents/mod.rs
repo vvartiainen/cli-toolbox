@@ -117,6 +117,8 @@ pub(crate) struct Overview {
 }
 pub(crate) struct Project<'a> {
     root: PathBuf,
+    /// Personal choices and ownership, outside the checkout.
+    private: PathBuf,
     catalog: Value,
     library: PathBuf,
     backend: &'a dyn Backend,
@@ -133,10 +135,12 @@ impl<'a> Project<'a> {
         root: &Path,
         catalog: Value,
         library: &Path,
+        state_home: &Path,
         backend: &'a dyn Backend,
     ) -> Result<Self, Error> {
         validate_catalog(&catalog)?;
         let root = root.canonicalize()?;
+        let private = private_dir(state_home, &root);
         let skills = library_skills(library, &catalog)?;
         let names = BTreeMap::from([
             (
@@ -155,19 +159,32 @@ impl<'a> Project<'a> {
             ("skills".into(), skills.keys().cloned().collect()),
         ]);
         let mut inputs = BTreeMap::new();
-        for relative in [SHARED, PERSONAL, STATE] {
-            let path = safe_path(&root, relative)?;
-            inputs.insert(path.clone(), optional_record(&path)?);
+        let shared_path = safe_path(&root, SHARED)?;
+        inputs.insert(shared_path.clone(), optional_record(&shared_path)?);
+        // Read a file from where older versions kept it until it is moved.
+        let mut located = BTreeMap::new();
+        for (legacy, name) in LEGACY {
+            let path = private.join(name);
+            let legacy = safe_path(&root, legacy)?;
+            for path in [&path, &legacy] {
+                inputs.insert(path.clone(), optional_record(path)?);
+            }
+            let found = if !path.exists() && legacy.exists() {
+                legacy
+            } else {
+                path
+            };
+            located.insert(name, found);
         }
-        let shared = load_json(&safe_path(&root, SHARED)?, json!({"version":1}))?;
-        let personal = load_json(&safe_path(&root, PERSONAL)?, json!({"version":1}))?;
+        let shared = load_json(&shared_path, json!({"version":1}))?;
+        let personal = load_json(&located[PERSONAL], json!({"version":1}))?;
         for layer in [&shared, &personal] {
             if layer.get("version") != Some(&json!(1)) {
                 return Err(Error::msg("unsupported choices version"));
             }
         }
         let value = load_json(
-            &safe_path(&root, STATE)?,
+            &located[STATE],
             serde_json::to_value(State::default()).map_err(Error::msg)?,
         )?;
         if value.get("version") != Some(&json!(1)) {
@@ -214,6 +231,7 @@ impl<'a> Project<'a> {
         }
         let mut project = Self {
             root,
+            private,
             catalog,
             library: library.to_path_buf(),
             backend,
@@ -332,6 +350,33 @@ impl<'a> Project<'a> {
     fn verify_inputs(&self) -> Result<(), Error> {
         verify_observed(&self.inputs)
     }
+    /// Record the inputs a write changed.
+    fn observe(&mut self, changes: &Changes) -> Result<(), Error> {
+        for (path, record) in self.inputs.iter_mut() {
+            if changes.contains_key(path) {
+                *record = optional_record(path)?;
+            }
+        }
+        Ok(())
+    }
+    /// Move the files older versions kept in the checkout to the private
+    /// directory.
+    fn migration(&self) -> Result<Changes, Error> {
+        let mut changes = Changes::new();
+        for (legacy, name) in LEGACY {
+            let legacy = safe_path(&self.root, legacy)?;
+            if legacy.exists() {
+                let data = if name == PERSONAL {
+                    json_bytes(&self.personal)?
+                } else {
+                    json_bytes(&self.state)?
+                };
+                changes.insert(self.private.join(name), (Some(data), 0o600));
+                changes.insert(legacy, (None, 0o600));
+            }
+        }
+        Ok(changes)
+    }
     pub fn set_choice(
         &mut self,
         group: &str,
@@ -357,22 +402,26 @@ impl<'a> Project<'a> {
     }
     fn save_choices(&mut self, layer: Value, shared: bool) -> Result<(), Error> {
         self.validate_choices(&layer)?;
-        let path = safe_path(&self.root, if shared { SHARED } else { PERSONAL })?;
+        let path = if shared {
+            safe_path(&self.root, SHARED)?
+        } else {
+            self.private.join(PERSONAL)
+        };
         let (exclude, _) = exclusion_change(&self.root, None)?;
         let _guard = lock(&exclude)?;
         self.verify_inputs()?;
         let (exclude, content) = exclusion_change(&self.root, None)?;
-        apply_changes(&BTreeMap::from([
-            (exclude, (Some(content), 0o644)),
+        let mut changes = self.migration()?;
+        changes.insert(exclude, (Some(content), 0o644));
+        changes.insert(
+            path,
             (
-                path.clone(),
-                (
-                    Some(json_bytes(&layer)?),
-                    if shared { 0o644 } else { 0o600 },
-                ),
+                Some(json_bytes(&layer)?),
+                if shared { 0o644 } else { 0o600 },
             ),
-        ]))?;
-        self.inputs.insert(path.clone(), optional_record(&path)?);
+        );
+        apply_changes(&changes)?;
+        self.observe(&changes)?;
         if shared {
             self.shared = layer;
         } else {
@@ -757,8 +806,9 @@ impl<'a> Project<'a> {
             let (exclude, _) = exclusion_change(&self.root, None)?;
             let _guard = lock(&exclude)?;
             verify_observed(&observed)?;
-            // Recheck paths, library and selection inputs after reporting the preview.
-            for path in observed.keys() {
+            // Recheck paths, library and selection inputs after reporting the
+            // preview. The private files are not in the checkout.
+            for path in observed.keys().filter(|p| !p.starts_with(&self.private)) {
                 safe_path(
                     &self.root,
                     path.strip_prefix(&self.root)
@@ -780,17 +830,16 @@ impl<'a> Project<'a> {
             if !exclude.exists() || fs::read(&exclude)? != content {
                 changes.insert(exclude, (Some(content), 0o644));
             }
+            changes.extend(self.migration()?);
             if next_state != self.state {
                 changes.insert(
-                    safe_path(&self.root, STATE)?,
+                    self.private.join(STATE),
                     (Some(json_bytes(&next_state)?), 0o600),
                 );
             }
             apply_changes(&changes)?;
             self.state = next_state;
-            let state_path = safe_path(&self.root, STATE)?;
-            self.inputs
-                .insert(state_path.clone(), optional_record(&state_path)?);
+            self.observe(&changes)?;
         }
         Ok(!changes.is_empty())
     }

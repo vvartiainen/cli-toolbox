@@ -35,13 +35,18 @@ in this order: central defaults → shared choices → personal choices. A perso
 | `$XDG_CONFIG_HOME/cli-toolbox/agents/catalog.json` | Central catalog and defaults |
 | `$XDG_DATA_HOME/cli-toolbox/agents/library/` | Installed skills, locks and receipt |
 | `.cli-toolbox/agents.json` | Shared project choices; commit these when appropriate |
-| `.cli-toolbox/agents.local.json` | Personal choices for this checkout |
-| `.cli-toolbox/agents.state.json` | Ownership records for this checkout |
+| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/choices.json` | Personal choices for this checkout |
+| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/state.json` | Ownership records for this checkout |
 
-XDG directories default to `~/.config` and `~/.local/share`. Personal choices and
-ownership are added to Git's local `info/exclude`, located through Git so linked
-worktrees work correctly. The exclude file is shared by linked worktrees; their
-choices and ownership remain independent. Generated output remains visible to Git.
+XDG directories default to `~/.config`, `~/.local/share` and `~/.local/state`.
+Only shared choices and generated output live in the checkout. Personal choices
+and ownership are kept outside it, in a directory named after the checkout's
+folder and a hash of its path, so linked worktrees have independent ones.
+Moving or renaming a checkout starts it with fresh personal choices and no
+ownership records. Older versions kept these in `.cli-toolbox/agents.local.json`
+and `.cli-toolbox/agents.state.json`; they are still read, and moved out (with
+their `info/exclude` lines removed) on the next save or sync. Generated output
+remains visible to Git.
 
 A minimal catalog:
 
