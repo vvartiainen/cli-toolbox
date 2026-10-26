@@ -1,3 +1,4 @@
+use crate::agents::Entry;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -5,9 +6,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
 use super::app::{
-    AgentRow, App, Category, ConfirmState, DetailsState, FormField, LaunchForm, MenuState,
-    NewWorktree, PickerState, ProjectCommand, ProjectField, ProjectForm, ProjectState, Resource,
-    ResultState, Screen, TailorState, ToolId, branch_label,
+    App, Category, ConfirmState, DetailsState, FormField, LaunchForm, MenuState, NewWorktree,
+    PickerState, ProjectCommand, ProjectField, ProjectForm, ProjectState, Resource, ResultState,
+    Screen, TailorState, ToolId, branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -19,8 +20,7 @@ const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
 const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
-const HELP_AGENTS: &str =
-    "type to filter · ^R repo · ^T mine · ⏎ run row · ^S sync · ^D preview · F1 help · esc back";
+const HELP_AGENTS: &str = "type to filter · ⏎ toggle · F5 refresh · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · ? help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
@@ -196,19 +196,10 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                     entry("^X", "stop the highlighted project's VM (asks first)"),
                 ]);
             } else if picker.tool == ToolId::AgentTools {
-                entries.extend([
-                    entry(
-                        "^R",
-                        "cycle the repository choice (.cli-toolbox/agents.json)",
-                    ),
-                    entry(
-                        "^T",
-                        "cycle your own choice (personal, kept outside the repository)",
-                    ),
-                    entry("⏎", "sync, or toggle excluding generated files from Git"),
-                    entry("^S", "sync generated agent files"),
-                    entry("^D", "preview the sync without changing files"),
-                ]);
+                entries.push(entry(
+                    "⏎",
+                    "toggle for this repository; agents get it through ct agents launch",
+                ));
             } else if picker.tool == ToolId::SandboxVms {
                 entries.extend([
                     entry(
@@ -529,9 +520,7 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
             Resource::Worktree(worktree) => Some(clean_text(&worktree.name).chars().count()),
             Resource::Project(status) => Some(clean_text(&status.project.name).chars().count()),
             Resource::Vm(vm) => Some(clean_text(&vm.name).chars().count()),
-            Resource::Agent(AgentRow::Choice(entry)) => {
-                Some(clean_text(&entry.name).chars().count())
-            }
+            Resource::Agent(entry) => Some(clean_text(&entry.name).chars().count()),
             _ => None,
         })
         .max()
@@ -609,70 +598,25 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
             }
             Line::from(spans)
         }
-        Resource::Agent(row) => agent_line(row, name_width),
+        Resource::Agent(entry) => agent_line(entry, name_width),
         _ => Line::from(format!(" {}", clean_text(&resource.label()))),
     }
 }
 
-/// An agent tools row: group, name, on/off and where the choice comes from.
-fn agent_line(row: &AgentRow, name_width: usize) -> Line<'static> {
-    let state = |on: bool| {
-        if on {
+/// An agent tools row: group, name and whether the repository uses it.
+fn agent_line(entry: &Entry, name_width: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!(
+            " {:<8} {:<name_width$}  ",
+            entry.group,
+            clean_text(&entry.name)
+        )),
+        if entry.enabled {
             Span::styled("[on] ", Style::new().fg(Color::Green))
         } else {
             "[off]".dark_gray()
-        }
-    };
-    match row {
-        AgentRow::Sync(true) => Line::from(vec![
-            Span::raw(" sync     "),
-            Span::styled(
-                "generated files are up to date",
-                Style::new().fg(Color::Green),
-            ),
-        ]),
-        AgentRow::Sync(false) => Line::from(vec![
-            Span::raw(" sync     "),
-            Span::styled(
-                "pending changes · ⏎ or ^S to sync, ^D to preview",
-                Style::new().fg(Color::Yellow),
-            ),
-        ]),
-        AgentRow::Exclude(on) => Line::from(vec![
-            Span::raw(" git      "),
-            state(*on),
-            Span::raw(" exclude generated files from Git"),
-        ]),
-        AgentRow::Choice(entry) => {
-            // A layer's choice, or a dash when it inherits.
-            let layer = |label: &str, choice: Option<bool>, style: Style| match choice {
-                Some(on) => Span::styled(
-                    format!("  {label} {:<3}", if on { "on" } else { "off" }),
-                    style,
-                ),
-                None => format!("  {label} –  ").dark_gray(),
-            };
-            // Your choice stands out when it overrides the repository's.
-            let mine = if entry
-                .personal
-                .is_some_and(|on| on != entry.shared.unwrap_or(entry.default))
-            {
-                Style::new().fg(Color::Yellow)
-            } else {
-                Style::new()
-            };
-            Line::from(vec![
-                Span::raw(format!(
-                    " {:<8} {:<name_width$}  ",
-                    entry.group,
-                    clean_text(&entry.name)
-                )),
-                state(entry.enabled()),
-                layer("repo", entry.shared, Style::new()),
-                layer("mine", entry.personal, mine),
-            ])
-        }
-    }
+        },
+    ])
 }
 
 fn draw_details(frame: &mut Frame<'_>, app: &App, details: &DetailsState) {
@@ -1508,43 +1452,26 @@ mod tests {
     }
 
     #[test]
-    fn renders_agent_tools_with_both_layers() {
+    fn renders_agent_tools_as_toggles() {
         let mut app = App::new("/tmp/project".into());
-        let choice = |group: &str, name: &str, shared, personal| {
-            Resource::Agent(super::AgentRow::Choice(crate::agents::Entry {
+        let choice = |group: &str, name: &str, enabled| {
+            Resource::Agent(crate::agents::Entry {
                 group: group.into(),
                 name: name.into(),
-                default: false,
-                shared,
-                personal,
-            }))
+                enabled,
+            })
         };
         app.loaded(
             ToolId::AgentTools,
             Ok(vec![
-                Resource::Agent(super::AgentRow::Sync(false)),
-                Resource::Agent(super::AgentRow::Exclude(true)),
-                choice("mcp", "backlog-work", None, Some(true)),
-                choice("mcp", "nixos", Some(true), Some(false)),
-                choice("skills", "review", None, None),
+                choice("mcp", "backlog-work", true),
+                choice("skills", "review", false),
             ]),
         );
         let list = rendered(&app, 120, super::HEIGHT);
-        assert!(list.contains("pending changes"), "{list}");
-        assert!(list.contains("[on]  exclude generated files"), "{list}");
-        assert!(
-            list.contains("mcp      backlog-work  [on]   repo –    mine on"),
-            "{list}"
-        );
-        assert!(
-            list.contains("mcp      nixos         [off]  repo on   mine off"),
-            "{list}"
-        );
-        assert!(
-            list.contains("skills   review        [off]  repo –    mine –"),
-            "{list}"
-        );
-        assert!(list.contains("^S sync"), "{list}");
+        assert!(list.contains("mcp      backlog-work  [on]"), "{list}");
+        assert!(list.contains("skills   review        [off]"), "{list}");
+        assert!(list.contains("⏎ toggle"), "{list}");
     }
 
     #[test]

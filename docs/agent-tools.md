@@ -1,93 +1,80 @@
-# Project MCP and skills
+# Opt-in MCP servers and skills
 
-`ct agents` manages project choices in Rust, using [Rulesync](https://github.com/dyoshikawa/rulesync)
-for native MCP and skill conversion. `ct` below is an alias for `cli-toolbox`.
-Install Rulesync separately and put `rulesync` on `PATH`; version 38.0.0 is tested.
-`status` and `set` do not run Rulesync. A Git repository is required for project
-commands, including the interactive picker. Subdirectories and linked worktrees
-resolve to their own checkout root.
+`ct agents` turns MCP servers and skills from a central catalog on per
+repository, and gives them to coding agents when they start. Nothing is
+written to the repository or to the agents' global settings, so other
+repositories and other developers are unaffected, and whatever a repository
+commits for its agents keeps working alongside. `ct` below is an alias for
+`cli-toolbox`. A Git repository is required for choices; subdirectories and
+linked worktrees resolve to their own checkout, and each checkout has its own
+choices.
 
 ```sh
-ct agents                        # Pick choices with fzf or the built-in picker
-ct tui                           # Git › Agent tools: toggle, sync, preview
-ct agents --shared               # Edit portable choices
-ct agents status                 # Effective selections, origins and file drift
+ct agents                          # Toggle choices with fzf or the built-in picker
+ct tui                             # Git › Agent tools: the same, in the launcher
+ct agents status                   # What this repository uses
 ct agents set mcp nixos enable
-ct agents set targets pi disable --shared
-ct agents set mcp nixos inherit   # Remove the override
-ct agents sync --dry-run         # Preview generated file changes
-ct agents sync                   # Apply; never downloads skills
-ct agents exclude enable         # Keep generated files out of Git here
-ct agents library install        # Explicit download, retaining locked revisions
-ct agents library update         # Explicit download, refreshing revisions
+ct agents set skills review disable
+ct agents launch claude -- <args>  # Start an agent with them
+ct agents library install          # Download remote skills, keeping locked revisions
+ct agents library update           # Download remote skills, refreshing revisions
 ```
 
-Interactive selection saves only when you select **Save choices**. Escape cancels.
-Sync is always explicit. Choices are `inherit`, `enable`, and `disable` and resolve
-in this order: central defaults → shared choices → personal choices. A personal
-`inherit` leaves the shared choice in effect. Unspecified defaults are disabled.
-`--shared` works before or after subcommands and affects only saved choices.
+## Starting agents
+
+`ct agents launch <agent> [--bin <path>] [-- <args>]` replaces itself with the
+agent, its options for the chosen tools first, then `<args>`. `--bin` names the
+executable, which matters when a wrapper of the same name comes first on
+`PATH`. Outside a repository the agent starts unchanged; if the choices cannot
+be read, it starts without them after a warning.
+
+| Agent | MCP servers | Skills |
+| --- | --- | --- |
+| `claude` | `--plugin-dir`: a `ct-agents` plugin with both | Same plugin, named `ct-agents:<skill>` |
+| `codex` | `-c mcp_servers.<name>=…` | Not at launch |
+| `copilot` | `--additional-mcp-config` | `--plugin-dir`: a `ct-agents` plugin |
+| `pi` | Not at launch | `--skill <path>` |
+| `opencode` | Not at launch | Not at launch |
+
+What an agent cannot load is skipped with a note on stderr. OpenCode sessions
+share a background server that keeps the configuration it started with, so
+tools given at launch would leak between repositories. Pi's management
+commands (`pi mcp`, `pi install` and the like) start without options.
+
+Plugins live in the checkout's private directory, named after a hash of their
+content, so launches with the same choices share one.
 
 ## Files and catalog
 
 | File | Purpose |
 | --- | --- |
-| `$XDG_CONFIG_HOME/cli-toolbox/agents/catalog.json` | Central catalog and defaults |
+| `$XDG_CONFIG_HOME/cli-toolbox/agents/catalog.json` | Central catalog |
 | `$XDG_DATA_HOME/cli-toolbox/agents/library/` | Installed skills, locks and receipt |
-| `.cli-toolbox/agents.json` | Shared project choices; commit these when appropriate |
-| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/choices.json` | Personal choices for this checkout |
-| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/state.json` | Ownership records for this checkout |
+| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/choices.json` | Choices of one checkout |
+| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/launch/` | Plugins for its launches |
 
 XDG directories default to `~/.config`, `~/.local/share` and `~/.local/state`.
-Only shared choices and generated output live in the checkout. Personal choices
-and ownership are kept outside it, in a directory named after the checkout's
-folder and a hash of its path, so linked worktrees have independent ones.
-Moving or renaming a checkout starts it with fresh personal choices and no
-ownership records. Older versions kept these in `.cli-toolbox/agents.local.json`
-and `.cli-toolbox/agents.state.json`; they are still read, and moved out (with
-their `info/exclude` lines removed) on the next save or sync. Generated output
-remains visible to Git.
+The private directory is named after the checkout's folder and a hash of its
+path; moving or renaming a checkout starts it with no choices.
 
 A minimal catalog:
 
 ```json
 {
   "version": 1,
-  "targets": ["codexcli", "claudecode", "opencode", "cursor", "copilotcli", "pi"],
   "mcp": {
-    "nixos": { "type": "stdio", "command": "mcp-nixos" }
+    "nixos": { "type": "stdio", "command": "/nix/store/...-mcp-nixos/bin/mcp-nixos" }
   },
-  "sources": [],
-  "defaults": {
-    "targets": {
-      "codexcli": "enable",
-      "claudecode": "enable",
-      "opencode": "enable",
-      "cursor": "enable",
-      "copilotcli": "enable",
-      "pi": "enable"
-    },
-    "mcp": {},
-    "skills": {}
-  }
+  "sources": []
 }
 ```
 
-Choices files use `{"version":1,"mcp":{"nixos":"enable"}}` and optionally
-`targets` and `skills` maps. Personal choices may also set `"exclude": true`. Unknown names, groups, choices and versions are errors.
-MCP and installed skill names use lowercase letters and digits separated by single
-hyphens or underscores. Ambiguous MCP aliases such as `some-server` and
-`some_server` cannot coexist. Use choices to enable servers; do not put
-`enabled`, `disabled`, or `targets` on catalog MCP entries.
-
-## Excluding generated output
-
-Generated MCP files can contain machine-specific paths, such as Nix store
-commands. `ct agents exclude enable` records `"exclude": true` in personal
-choices; each sync then lists the untracked files it owns in a marked block of
-Git's local `info/exclude`. Tracked files are never listed, since excluding
-them has no effect. `ct agents exclude disable` and the next sync remove the
-block. Shared choices cannot set `exclude`.
+Servers are stdio servers with `command` and optional `args` and `env`; store
+paths are fine, since nothing leaves the machine. Choices files look like
+`{"version":1,"mcp":{"nixos":"enable"}}`. Choices of names the catalog no
+longer has are ignored. MCP and skill names use lowercase letters and digits
+separated by single hyphens or underscores; aliases such as `some-server` and
+`some_server` cannot coexist.
 
 ## Skill library
 
@@ -98,8 +85,7 @@ Local skills need no download. Map names to absolute directories containing
 "localSkills": { "commit-style": "/nix/store/...-commit-style" }
 ```
 
-They are selected like installed skills and must not share a name with one.
-Their content is part of the sync signature, so `status` reports edits.
+They are chosen like installed skills and must not share a name with one.
 
 For remote skills, add [Rulesync skill sources](https://rulesync.dyoshikawa.com/guide/declarative-sources.html)
 to the catalog, then install them explicitly:
@@ -113,8 +99,6 @@ to the catalog, then install them explicitly:
 ```sh
 ct agents library install
 ct agents set skills skill-creator enable
-ct agents sync --dry-run
-ct agents sync
 ```
 
 Rulesync installs into the library's `.rulesync/skills/.curated/`, outside agent
@@ -126,63 +110,16 @@ beside the existing one, then swaps it in. Download or validation failures leave
 the previous installation intact. Removing sources and installing clears their
 cached skills.
 
-Normal sync uses only the installed copies and never calls install or update.
-Changing sources requires another library install before project commands can
-resolve skill choices. The receipt checks library content, executable bits and
-locks; local library edits are reported. Install again to restore locked content.
-
-## Native output and ownership
-
-| Target | MCP section | Skills |
-| --- | --- | --- |
-| `codexcli` | `.codex/config.toml`: `mcp_servers` | `.agents/skills` |
-| `claudecode` | `.mcp.json`: `mcpServers` | `.claude/skills` |
-| `opencode` | `opencode.json(c)`: `mcp` | `.opencode/skills` |
-| `cursor` | `.cursor/mcp.json`: `mcpServers` | `.cursor/skills` |
-| `copilotcli` | `.github/mcp.json`: `mcpServers` | `.github/skills` |
-| `pi` | `.pi/mcp.json`: `mcpServers` | `.pi/skills` |
-
-Rulesync generates only MCP and skills from filtered inputs into temporary output
-directories. Broad deletion and global mode are disabled. cli-toolbox then merges
-native MCP entries into existing settings, preserving unrelated servers,
-authentication, profiles and runtime settings. TOML editing preserves unrelated
-formatting and comments. Changed JSONC MCP files are rewritten as JSON, so their
-comments are lost. OpenCode uses an existing root `.json` or `.jsonc` file; having
-both is an error. MCP overrides in `.opencode/opencode.json(c)` must be consolidated
-into the root configuration first.
-
-Existing nonempty MCP sections require explicit adoption for each target:
-
-```sh
-ct agents sync --dry-run --adopt-mcp codexcli --adopt-mcp claudecode
-ct agents sync --adopt-mcp codexcli --adopt-mcp claudecode
-```
-
-Adoption preserves unrelated servers and permits selected catalog entries to
-replace same-named entries. Subsequent edits to owned entries abort sync. Save
-customizations elsewhere, then restore or remove the conflicting managed entry
-before retrying. Newly added unrelated servers are preserved.
-
-Every generated skill file has an ownership hash and executable-bit record.
-Disabling a skill or target removes only unchanged owned files. An MCP section
-left empty is removed, and so is a file left empty, along with its empty
-directories. Extra files and independent skills remain. Edited managed files and unowned collisions abort the
-entire sync during preflight. Existing checked-in files in a fresh checkout are
-unowned and need manual reconciliation. Preserve the ownership manifest; deleting
-it loses the evidence needed for safe removal. Symlinks, path escapes, malformed
-configurations and corrupt manifests are rejected. Sync checks for files changing
-while preparing its plan and rolls back completed writes on I/O failure.
-
-Dry runs change no project files, library, ownership, or Git exclusions, including
-when adoption is requested. Status checks selection and file drift without invoking
-Rulesync. Selection controls generation; an agent may still discover another
-target's shared skill directory through its own discovery rules.
+Launches use only the installed copies and never download. Changing sources
+requires another library install before choices can be read. The receipt checks
+library content, executable bits and locks; local library edits are reported.
+Install again to restore locked content.
 
 ## Nix integration boundary
 
 nix-config generates the catalog (MCP servers with store paths, skill sources
-and `localSkills`) and installs Rulesync. cli-toolbox has no runtime
-dependency on nix-config.
+and `localSkills`), installs Rulesync and starts the agents through
+`ct agents launch`. cli-toolbox has no runtime dependency on nix-config.
 
 ## Verification
 
@@ -194,23 +131,14 @@ just fmt
 just build
 ```
 
-The Rust suite ports the prototype's ownership, inheritance, library, worktree,
-JSONC, preflight and rollback tests. Real Rulesync lifecycle tests are opt-in:
+The real Rulesync library test is opt-in:
 
 ```sh
 AGENTS_RULESYNC_TEST_BIN="$(command -v rulesync)" \
   cargo test agents::tests::rulesync --lib -- --ignored --nocapture
 ```
 
-The six-target test covers dry-run, enable, repeat and disable, native MCP merges,
-independent skills, supporting scripts, executable bits, and unchanged library
-content. It allows only Rulesync's `generate` command and sets nonfunctional HTTP
-proxies during generation. This checks that normal sync needs no installer or
-network access; it is not an OS-level network sandbox.
-
-The second real Rulesync test installs from a temporary local Git repository,
-advances its branch, verifies locked install versus explicit update, and checks
-that a failed update preserves the library. These tests were executed with the
-npm distribution of Rulesync 38.0.0 on macOS; other platforms and Nix's standalone
-Rulesync package were not exercised here. nix-config activation and its global
-migration remain outside this repository's verification.
+It installs from a temporary local Git repository, advances its branch, and
+verifies locked install versus explicit update, and that a failed update
+preserves the library. It was run with the npm distribution of Rulesync 38.0.0
+on macOS.

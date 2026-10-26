@@ -126,7 +126,8 @@ pub(super) fn install_library(
     }
     write_json(
         &stage.join("rulesync.jsonc"),
-        &json!({"targets":catalog["targets"],"features":["skills"],"delete":false,"global":false,"sources":catalog["sources"]}),
+        // Rulesync requires a target, though installing only fills the library.
+        &json!({"targets":["claudecode"],"features":["skills"],"delete":false,"global":false,"sources":catalog["sources"]}),
     )?;
     if !catalog["sources"].as_array().unwrap().is_empty() {
         backend.install(&stage, update)?;

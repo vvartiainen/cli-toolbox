@@ -50,32 +50,16 @@ review checkouts (see [agents.md](agents.md#git-worktrees)):
 
 ## Git › Agent tools
 
-Shows the launch directory repository's `ct agents` choices (see
-[agent-tools.md](agent-tools.md)): whether generated files are in sync,
-whether they are excluded from Git, then each MCP server, skill and target.
-A row shows the effective state, then the repository's choice
-(`.cli-toolbox/agents.json`, committed) and yours (personal, kept outside the repository):
-`on`, `off`, or `–` to inherit. Yours wins over the repository's, which wins
-over the catalog default; yours is highlighted when it overrides.
+Lists the catalog's MCP servers and skills with whether the launch
+directory's repository uses them (see [agent-tools.md](agent-tools.md)).
+Enter toggles the highlighted one right away. Nothing is written to the
+repository: agents started with `ct agents launch` get the ones that are on.
 
 ```text
-mcp      nixos              [on]   repo on   mine –
-mcp      backlog-nix-config [off]  repo on   mine off
+mcp      nixos              [on]
+mcp      backlog-nix-config [off]
+skills   review             [off]
 ```
-
-Ctrl-R and Ctrl-T cycle a layer: from `–` to the opposite of what it
-inherits, then the inherited value, then `–` again. Choices are saved right
-away; generated files change only when you sync. A target with nothing left
-to generate gets no file: sync removes MCP sections it emptied, files left
-empty and their empty directories.
-
-| Key | Action |
-| --- | --- |
-| Ctrl-R | Cycle the repository choice |
-| Ctrl-T | Cycle your own choice |
-| Enter | On the sync row, sync; on the Git row, toggle excluding generated files |
-| Ctrl-S | Sync generated agent files |
-| Ctrl-D | Preview the sync without changing files |
 
 ## Sandbox › Projects
 

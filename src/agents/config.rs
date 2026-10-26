@@ -1,45 +1,8 @@
 use super::*;
 
-pub(super) const SHARED: &str = ".cli-toolbox/agents.json";
-// Personal choices and ownership live outside the checkout, in its private
-// directory (`private_dir`).
-pub(super) const PERSONAL: &str = "choices.json";
-pub(super) const STATE: &str = "state.json";
-/// Where older versions kept them, inside the checkout; moved on the next write.
-pub(super) const LEGACY: [(&str, &str); 2] = [
-    (".cli-toolbox/agents.local.json", PERSONAL),
-    (".cli-toolbox/agents.state.json", STATE),
-];
-pub(super) const GROUPS: [&str; 3] = ["targets", "mcp", "skills"];
-pub(super) const TARGETS: [&str; 6] = [
-    "codexcli",
-    "claudecode",
-    "opencode",
-    "cursor",
-    "copilotcli",
-    "pi",
-];
-pub(super) struct Target {
-    pub mcp: &'static [&'static str],
-    pub key: &'static str,
-    pub skills: &'static str,
-}
-pub(super) fn target_spec(name: &str) -> Result<Target, Error> {
-    let (mcp, key, skills): (&[&str], _, _) = match name {
-        "codexcli" => (&[".codex/config.toml"], "mcp_servers", ".agents/skills"),
-        "claudecode" => (&[".mcp.json"], "mcpServers", ".claude/skills"),
-        "opencode" => (
-            &["opencode.jsonc", "opencode.json"],
-            "mcp",
-            ".opencode/skills",
-        ),
-        "cursor" => (&[".cursor/mcp.json"], "mcpServers", ".cursor/skills"),
-        "copilotcli" => (&[".github/mcp.json"], "mcpServers", ".github/skills"),
-        "pi" => (&[".pi/mcp.json"], "mcpServers", ".pi/skills"),
-        _ => return Err(Error::msg(format!("unknown target: {name}"))),
-    };
-    Ok(Target { mcp, key, skills })
-}
+/// Personal choices of a checkout, in its private directory (`private_dir`).
+pub(super) const CHOICES: &str = "choices.json";
+pub(super) const GROUPS: [&str; 2] = ["mcp", "skills"];
 pub(super) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.split(['-', '_']).all(|part| {
@@ -57,18 +20,6 @@ pub(super) fn object(value: &Value) -> Result<&serde_json::Map<String, Value>, E
 pub(super) fn validate_catalog(catalog: &Value) -> Result<(), Error> {
     if catalog.get("version") != Some(&json!(1)) {
         return Err(Error::msg("unsupported catalog version"));
-    }
-    let targets = catalog["targets"]
-        .as_array()
-        .ok_or_else(|| Error::msg("catalog targets must name supported Rulesync targets"))?;
-    if targets.is_empty()
-        || targets
-            .iter()
-            .any(|v| !v.as_str().is_some_and(|t| TARGETS.contains(&t)))
-    {
-        return Err(Error::msg(
-            "catalog targets must name supported Rulesync targets",
-        ));
     }
     let mut aliases = BTreeSet::new();
     for (name, server) in object(&catalog["mcp"])? {
@@ -150,75 +101,10 @@ pub(super) fn private_dir(state: &Path, root: &Path) -> PathBuf {
         .join("projects")
         .join(format!("{name}-{}", &hash[..12]))
 }
-const EXCLUDE_BEGIN: &str = "# cli-toolbox agents: generated files";
-const EXCLUDE_END: &str = "# end cli-toolbox agents";
-/// `generated` replaces the block of excluded generated files; `None` keeps it.
-pub(super) fn exclusion_change(
-    root: &Path,
-    generated: Option<&[String]>,
-) -> Result<(PathBuf, Vec<u8>), Error> {
-    let path = PathBuf::from(run_command(
-        "git",
-        &[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "info/exclude",
-        ],
-        root,
-    )?);
-    // The location belongs to Git, and may be in the main checkout for a worktree.
-    let mut current = Some(path.as_path());
-    while let Some(part) = current {
-        reject_symlink(part)?;
-        current = part.parent();
-    }
-    let mut old = if path.exists() {
-        file_record(&path)?;
-        fs::read(&path)?
-    } else {
-        Vec::new()
-    };
-    if let Some(generated) = generated {
-        let text = String::from_utf8(old).map_err(Error::msg)?;
-        let mut kept = String::new();
-        let mut inside = false;
-        for line in text.lines() {
-            match line {
-                EXCLUDE_BEGIN => inside = true,
-                EXCLUDE_END => inside = false,
-                _ if !inside => {
-                    kept.push_str(line);
-                    kept.push('\n');
-                }
-                _ => {}
-            }
-        }
-        if !generated.is_empty() {
-            kept.push_str(EXCLUDE_BEGIN);
-            kept.push('\n');
-            for path in generated {
-                kept.push_str(&format!("/{path}\n"));
-            }
-            kept.push_str(EXCLUDE_END);
-            kept.push('\n');
-        }
-        old = kept.into_bytes();
-    }
-    // Older versions listed the in-checkout personal files here.
-    let text = String::from_utf8(old).map_err(Error::msg)?;
-    let legacy: Vec<_> = LEGACY.iter().map(|(old, _)| format!("/{old}")).collect();
-    let kept: String = text
-        .split_inclusive('\n')
-        .filter(|line| !legacy.iter().any(|old| line.trim_end() == old))
-        .collect();
-    Ok((path, kept.into_bytes()))
-}
-
 pub(crate) struct Environment {
     pub catalog: Value,
     pub library: PathBuf,
-    /// Personal choices and ownership of each checkout.
+    /// Personal choices of each checkout.
     pub state: PathBuf,
 }
 impl Environment {
@@ -258,18 +144,16 @@ impl Environment {
     }
     pub fn with_project<T>(
         &self,
-        action: impl FnOnce(&mut Project<'_>) -> Result<T, Error>,
+        action: impl FnOnce(&mut Project) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let root = project_root(&std::env::current_dir()?)?;
         let _project_lock = lock(&root)?;
         let _library_lock = lock(&self.library)?;
-        let backend = Rulesync::default();
         action(&mut Project::new(
             &root,
             self.catalog.clone(),
             &self.library,
             &self.state,
-            &backend,
         )?)
     }
     pub fn install(&self, update: bool) -> Result<(), Error> {

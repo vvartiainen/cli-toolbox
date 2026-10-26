@@ -148,7 +148,7 @@ impl ToolId {
             Self::GitWorktrees => {
                 "Create, inspect, cd into or remove git worktrees in ~/.worktrees"
             }
-            Self::AgentTools => "MCP servers and skills of this repository: enable, disable, sync",
+            Self::AgentTools => "Opt-in MCP servers and skills for this repository's agents",
             Self::SandboxProjects => {
                 "Project VMs in ~/.agent-sandbox: create, start, add worktrees, sync"
             }
@@ -182,27 +182,8 @@ pub(crate) enum Resource {
     Worktree(Worktree),
     Project(Box<ProjectStatus>),
     Vm(Box<RunnerState>),
-    Agent(AgentRow),
-}
-
-/// A row of the agent tools list: `ct agents` state of the launch directory's
-/// repository.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum AgentRow {
-    /// Whether generated files match the choices.
-    Sync(bool),
-    /// Whether generated files are kept out of Git.
-    Exclude(bool),
-    Choice(Entry),
-}
-
-/// A `ct agents` choice the TUI saves in place, without syncing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum AgentChange {
-    /// Group, name, `enable`/`disable`/`inherit`, and whether to save it in
-    /// the shared choices.
-    Choice(String, String, &'static str, bool),
-    Exclude(bool),
+    /// A catalog MCP server or skill of the launch directory's repository.
+    Agent(Entry),
 }
 
 impl Resource {
@@ -216,9 +197,7 @@ impl Resource {
             Self::Worktree(worktree) => worktree_label(worktree),
             Self::Project(status) => status.project.name.clone(),
             Self::Vm(vm) => vm.name.clone(),
-            Self::Agent(AgentRow::Sync(_)) => "sync".into(),
-            Self::Agent(AgentRow::Exclude(_)) => "exclude generated files".into(),
-            Self::Agent(AgentRow::Choice(entry)) => format!("{} {}", entry.group, entry.name),
+            Self::Agent(entry) => format!("{} {}", entry.group, entry.name),
         }
     }
 
@@ -296,8 +275,6 @@ pub(crate) enum Action {
     StopVm(PathBuf),
     /// Remove the runtime directories of stopped VMs whose start directory is gone.
     PruneVms,
-    /// `ct agents sync`, or its preview with `true`.
-    SyncAgents(bool),
 }
 
 /// How to tailor a new project's flake.
@@ -350,7 +327,6 @@ impl Action {
             | Self::EnterProjectWorktree(_)
             | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
-            Self::SyncAgents(_) => Some(ToolId::AgentTools),
             Self::Aws(_)
             | Self::AzureSubscription(_)
             | Self::AzureAccount(_)
@@ -386,8 +362,9 @@ pub(crate) enum Effect {
     /// Look up what a form needs before it opens; see [`Prepare`].
     Prepare(Prepare),
     Execute(Action),
-    /// Save an agent tools choice, then reload the list.
-    ChangeAgents(AgentChange),
+    /// Save an agent tools choice (the entry with its new state), then reload
+    /// the list.
+    ChangeAgents(Entry),
     Quit,
 }
 
@@ -1216,9 +1193,6 @@ impl App {
         if let Some(effect) = self.handle_vm_picker_key(key) {
             return effect;
         }
-        if let Some(effect) = self.handle_agents_picker_key(key) {
-            return effect;
-        }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
         {
@@ -1288,6 +1262,10 @@ impl App {
                     (ToolId::SandboxVms, Resource::Vm(vm)) => {
                         Effect::Prepare(Prepare::StopVm(vm.runtime_dir))
                     }
+                    (ToolId::AgentTools, Resource::Agent(entry)) => Effect::ChangeAgents(Entry {
+                        enabled: !entry.enabled,
+                        ..entry
+                    }),
                     _ => Effect::None,
                 }
             }
@@ -1364,42 +1342,6 @@ impl App {
             (KeyCode::Char('r'), Some(status)) => self.confirm_vm(&status, VmChange::Restart),
             (KeyCode::Char('x'), Some(status)) => self.confirm_vm(&status, VmChange::Stop),
             (KeyCode::Char('s' | 'r' | 'x'), None) => Effect::None,
-            _ => return None,
-        };
-        self.loading = None;
-        Some(effect)
-    }
-
-    /// Enter and Ctrl shortcuts of the agent tools list. Plain keys filter it.
-    fn handle_agents_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
-        let picker = self
-            .picker()
-            .filter(|picker| picker.tool == ToolId::AgentTools)?;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let row = match picker.selected_resource() {
-            Some(Resource::Agent(row)) => Some(row.clone()),
-            _ => None,
-        };
-        let cycle = |entry: &Entry, shared| {
-            let choice = entry.next_choice(shared);
-            AgentChange::Choice(entry.group.clone(), entry.name.clone(), choice, shared)
-        };
-        let effect = match (key.code, ctrl, row) {
-            (KeyCode::Char('s'), true, _) | (KeyCode::Enter, false, Some(AgentRow::Sync(_))) => {
-                Effect::Execute(Action::SyncAgents(false))
-            }
-            (KeyCode::Char('d'), true, _) => Effect::Execute(Action::SyncAgents(true)),
-            (KeyCode::Enter, false, Some(AgentRow::Exclude(on))) => {
-                Effect::ChangeAgents(AgentChange::Exclude(!on))
-            }
-            (KeyCode::Char('r'), true, Some(AgentRow::Choice(entry))) => {
-                Effect::ChangeAgents(cycle(&entry, true))
-            }
-            (KeyCode::Char('t'), true, Some(AgentRow::Choice(entry))) => {
-                Effect::ChangeAgents(cycle(&entry, false))
-            }
-            (KeyCode::Enter, false, None | Some(AgentRow::Choice(_)))
-            | (KeyCode::Char('t' | 'r'), true, _) => Effect::None,
             _ => return None,
         };
         self.loading = None;
@@ -2001,8 +1943,8 @@ pub(crate) fn branch_label(worktree: &Worktree) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, AgentChange, AgentRow, App, Category, Effect, NewProject, NewWorktree, Prepare,
-        Resource, Screen, Tailor, ToolId,
+        Action, App, Category, Effect, NewProject, NewWorktree, Prepare, Resource, Screen, Tailor,
+        ToolId,
     };
     use crate::agent::Launch;
     use crate::agent::Step;
@@ -2601,77 +2543,37 @@ mod tests {
         assert!(matches!(&app.screen, Screen::Result(result) if result.failed));
     }
 
-    fn agent_rows() -> Vec<Resource> {
-        let entry = |group: &str, name: &str, shared| {
-            Resource::Agent(AgentRow::Choice(Entry {
-                group: group.into(),
-                name: name.into(),
-                default: false,
-                shared,
-                personal: None,
-            }))
-        };
-        vec![
-            Resource::Agent(AgentRow::Sync(false)),
-            Resource::Agent(AgentRow::Exclude(false)),
-            entry("mcp", "nixos", None),
-            entry("skills", "review", Some(true)),
-        ]
+    fn agent_entry(group: &str, name: &str, enabled: bool) -> Entry {
+        Entry {
+            group: group.into(),
+            name: name.into(),
+            enabled,
+        }
     }
 
     #[test]
-    fn agent_tools_toggle_choices_and_sync() {
+    fn agent_tools_toggle_entries() {
         let mut app = App::new("/repo".into());
         app.handle_key(key(KeyCode::Char('g')));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('2'))),
             Effect::Load(ToolId::AgentTools)
         );
-        app.loaded(ToolId::AgentTools, Ok(agent_rows()));
+        app.loaded(
+            ToolId::AgentTools,
+            Ok(vec![
+                Resource::Agent(agent_entry("mcp", "nixos", false)),
+                Resource::Agent(agent_entry("skills", "review", true)),
+            ]),
+        );
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
-            Effect::Execute(Action::SyncAgents(false))
+            Effect::ChangeAgents(agent_entry("mcp", "nixos", true))
         );
         app.handle_key(key(KeyCode::Down));
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
-            Effect::ChangeAgents(AgentChange::Exclude(true))
-        );
-        app.handle_key(key(KeyCode::Down));
-        // Enter only runs the sync and Git rows.
-        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None);
-        assert_eq!(
-            app.handle_key(ctrl('r')),
-            Effect::ChangeAgents(AgentChange::Choice(
-                "mcp".into(),
-                "nixos".into(),
-                "enable",
-                true
-            ))
-        );
-        app.handle_key(key(KeyCode::Down));
-        // The repository enables it: ^R turns it off there, ^T for you.
-        assert_eq!(
-            app.handle_key(ctrl('r')),
-            Effect::ChangeAgents(AgentChange::Choice(
-                "skills".into(),
-                "review".into(),
-                "disable",
-                true
-            ))
-        );
-        assert_eq!(
-            app.handle_key(ctrl('t')),
-            Effect::ChangeAgents(AgentChange::Choice(
-                "skills".into(),
-                "review".into(),
-                "disable",
-                false
-            ))
-        );
-        assert_eq!(
-            app.handle_key(ctrl('d')),
-            Effect::Execute(Action::SyncAgents(true))
+            Effect::ChangeAgents(agent_entry("skills", "review", false))
         );
         // Plain keys still filter the list.
         app.handle_key(key(KeyCode::Char('n')));
@@ -2679,10 +2581,6 @@ mod tests {
             panic!("expected the agent tools list");
         };
         assert_eq!(picker.query, "n");
-        assert_eq!(
-            Action::SyncAgents(false).return_tool(),
-            Some(ToolId::AgentTools)
-        );
     }
 
     #[test]

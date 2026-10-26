@@ -6,7 +6,7 @@ use crate::azure::{self, AccountAction, Az, AzCli};
 use crate::sandbox::project::{self, CreateOptions, Project};
 use crate::{Error, agent, agents, aws, git, kitty, ssh};
 
-use super::app::{Action, AgentChange, AgentRow, NewProject, Resource, Tailor, ToolId};
+use super::app::{Action, NewProject, Resource, Tailor, ToolId};
 
 pub(super) struct Context {
     cwd: Result<PathBuf, String>,
@@ -98,24 +98,10 @@ impl Context {
                 .into_iter()
                 .map(Resource::AzureAccount)
                 .collect()),
-            ToolId::AgentTools => {
-                let overview = agents::overview()?;
-                let mut rows = vec![
-                    Resource::Agent(AgentRow::Sync(overview.synced)),
-                    Resource::Agent(AgentRow::Exclude(overview.exclude)),
-                ];
-                // What changes most often first; targets last.
-                for group in ["mcp", "skills", "targets"] {
-                    rows.extend(
-                        overview
-                            .entries
-                            .iter()
-                            .filter(|entry| entry.group == group)
-                            .map(|entry| Resource::Agent(AgentRow::Choice(entry.clone()))),
-                    );
-                }
-                Ok(rows)
-            }
+            ToolId::AgentTools => Ok(agents::overview()?
+                .into_iter()
+                .map(Resource::Agent)
+                .collect()),
             ToolId::SandboxVms => Ok(vm::running_vms()
                 .into_iter()
                 .map(|vm| Resource::Vm(Box::new(vm)))
@@ -130,13 +116,8 @@ impl Context {
     }
 
     /// Save an agent tools choice in the launch directory's repository.
-    pub fn change_agents(&self, change: &AgentChange) -> Result<(), Error> {
-        match change {
-            AgentChange::Choice(group, name, choice, shared) => {
-                agents::set_choice(group, name, choice, *shared)
-            }
-            AgentChange::Exclude(exclude) => agents::set_exclude(*exclude),
-        }
+    pub fn change_agents(&self, entry: &agents::Entry) -> Result<(), Error> {
+        agents::set_choice(&entry.group, &entry.name, entry.enabled)
     }
 
     pub fn execute(&self, action: &Action) -> Outcome {
@@ -236,19 +217,6 @@ impl Context {
                         })
                     }
                 }
-            }
-            Action::SyncAgents(dry_run) => {
-                let mut out = Vec::new();
-                agents::sync(*dry_run, &mut out)?;
-                let heading = if *dry_run {
-                    "Preview of ct agents sync; nothing was changed."
-                } else {
-                    "Synced agent tools."
-                };
-                Ok(Done::body(format!(
-                    "{heading}\n\n{}",
-                    String::from_utf8_lossy(&out)
-                )))
             }
             Action::Kitty(path) => {
                 kitty::launch_session(path, stdout, stderr)?;
