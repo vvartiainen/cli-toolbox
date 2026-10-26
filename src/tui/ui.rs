@@ -20,7 +20,8 @@ const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
 const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
-const HELP_AGENTS: &str = "type to filter · ⏎ toggle · F5 refresh · F1 help · esc back";
+const HELP_AGENTS: &str =
+    "type to filter · ⏎ toggle or sync · ^D preview · F5 refresh · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · ? help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
@@ -196,10 +197,10 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                     entry("^X", "stop the highlighted project's VM (asks first)"),
                 ]);
             } else if picker.tool == ToolId::AgentTools {
-                entries.push(entry(
-                    "⏎",
-                    "toggle for this repository; agents get it through ct agents launch",
-                ));
+                entries.extend([
+                    entry("⏎", "toggle for this repository; on the sync row, sync"),
+                    entry("^D", "preview the sync without changing files"),
+                ]);
             } else if picker.tool == ToolId::SandboxVms {
                 entries.extend([
                     entry(
@@ -599,6 +600,17 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
             Line::from(spans)
         }
         Resource::Agent(entry) => agent_line(entry, name_width),
+        Resource::AgentSync(synced) => Line::from(vec![
+            Span::raw(" sync     "),
+            if *synced {
+                Span::styled("files are up to date", Style::new().fg(Color::Green))
+            } else {
+                Span::styled(
+                    "pending changes · ⏎ to sync, ^D to preview",
+                    Style::new().fg(Color::Yellow),
+                )
+            },
+        ]),
         _ => Line::from(format!(" {}", clean_text(&resource.label()))),
     }
 }
@@ -1464,6 +1476,7 @@ mod tests {
         app.loaded(
             ToolId::AgentTools,
             Ok(vec![
+                Resource::AgentSync(false),
                 choice("mcp", "backlog-work", true),
                 choice("skills", "review", false),
             ]),
@@ -1471,7 +1484,8 @@ mod tests {
         let list = rendered(&app, 120, super::HEIGHT);
         assert!(list.contains("mcp      backlog-work  [on]"), "{list}");
         assert!(list.contains("skills   review        [off]"), "{list}");
-        assert!(list.contains("⏎ toggle"), "{list}");
+        assert!(list.contains("pending changes"), "{list}");
+        assert!(list.contains("⏎ toggle or sync"), "{list}");
     }
 
     #[test]

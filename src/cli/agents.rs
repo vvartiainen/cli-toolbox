@@ -1,12 +1,6 @@
-use crate::{
-    Error,
-    agents::{self, Agent, Environment},
-};
+use crate::{Error, agents::Environment};
 use clap::{Args, Subcommand, ValueEnum};
 use std::io::Write;
-use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Debug, Args)]
 pub struct AgentsCmd {
@@ -15,9 +9,9 @@ pub struct AgentsCmd {
 }
 #[derive(Debug, Subcommand)]
 enum AgentsCommand {
-    /// Show which catalog MCP servers and skills this repository uses.
+    /// Show the repository's choices and whether its files match them.
     Status,
-    /// Turn one MCP server or skill on or off for this repository.
+    /// Turn one target, MCP server or skill on or off, without syncing.
     Set {
         #[arg(value_enum)]
         kind: Kind,
@@ -25,16 +19,11 @@ enum AgentsCommand {
         #[arg(value_enum)]
         choice: Toggle,
     },
-    /// Start a coding agent with this repository's MCP servers and skills.
-    Launch {
-        /// claude, codex, opencode, copilot or pi.
-        agent: String,
-        /// The agent executable; its command name on PATH by default.
-        #[arg(long, value_name = "PATH")]
-        bin: Option<PathBuf>,
-        /// Arguments for the agent.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+    /// Write the chosen MCP servers and skills into the targets' project files.
+    Sync {
+        /// List the changes without making them.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Install locked skill sources or explicitly update their revisions.
     Library {
@@ -49,6 +38,7 @@ enum LibraryCommand {
 }
 #[derive(Clone, Debug, ValueEnum)]
 enum Kind {
+    Targets,
     Mcp,
     Skills,
 }
@@ -58,10 +48,7 @@ enum Toggle {
     Disable,
 }
 impl AgentsCmd {
-    pub fn run(self, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<(), Error> {
-        if let Some(AgentsCommand::Launch { agent, bin, args }) = self.command {
-            return launch(&agent, bin, args, stderr);
-        }
+    pub fn run(self, stdout: &mut dyn Write, _stderr: &mut dyn Write) -> Result<(), Error> {
         let env = Environment::discover()?;
         match self.command {
             Some(AgentsCommand::Library { command }) => {
@@ -80,49 +67,12 @@ impl AgentsCmd {
                     &name,
                     matches!(choice, Toggle::Enable),
                 ),
+                Some(AgentsCommand::Sync { dry_run }) => project.sync(dry_run, stdout),
                 None => project.interactive(stdout),
-                Some(AgentsCommand::Library { .. } | AgentsCommand::Launch { .. }) => {
-                    unreachable!()
-                }
+                Some(AgentsCommand::Library { .. }) => unreachable!(),
             }),
         }
     }
-}
-/// Replace this process with the agent, given the chosen tools. Problems
-/// finding them are reported, and the agent starts without them.
-fn launch(
-    name: &str,
-    bin: Option<PathBuf>,
-    args: Vec<String>,
-    stderr: &mut dyn Write,
-) -> Result<(), Error> {
-    let agent = Agent::parse(name).ok_or_else(|| {
-        Error::msg(format!(
-            "unknown agent: {name}; use claude, codex, opencode, copilot or pi"
-        ))
-    })?;
-    let mut command = Command::new(bin.unwrap_or_else(|| agent.name().into()));
-    if agent.starts_session(&args) {
-        match agents::launch_tools(agent) {
-            Ok(Some(tools)) => {
-                for note in &tools.notes {
-                    writeln!(stderr, "ct agents: {note}")?;
-                }
-                command.args(tools.args);
-            }
-            Ok(None) => {}
-            Err(error) => writeln!(
-                stderr,
-                "ct agents: {error}; starting {name} without chosen tools"
-            )?,
-        }
-    }
-    stderr.flush()?;
-    let error = command.args(args).exec();
-    Err(Error::msg(format!(
-        "start {}: {error}",
-        command.get_program().display()
-    )))
 }
 #[cfg(test)]
 mod tests {
@@ -134,26 +84,24 @@ mod tests {
         let mut err = Vec::new();
         run(&["agents".into(), "--help".into()], &mut out, &mut err).unwrap();
         let help = String::from_utf8(out).unwrap();
-        for name in ["status", "set", "launch", "library"] {
+        for name in ["status", "set", "sync", "library"] {
             assert!(help.contains(name), "{help}");
         }
         assert!(err.is_empty());
         for args in [
             vec!["agents"],
             vec!["agents", "status"],
+            vec!["agents", "set", "targets", "claude", "enable"],
             vec!["agents", "set", "mcp", "nixos", "enable"],
             vec!["agents", "set", "skills", "review", "disable"],
-            vec!["agents", "launch", "claude"],
-            // Agent options pass through, including ones that look like ours.
-            vec![
-                "agents", "launch", "codex", "--bin", "/x/codex", "-c", "a=1", "--help",
-            ],
+            vec!["agents", "sync"],
+            vec!["agents", "sync", "--dry-run"],
             vec!["agents", "library", "install"],
             vec!["agents", "library", "update"],
         ] {
             Cli::try_parse_from(std::iter::once("ct").chain(args)).unwrap();
         }
         assert!(Cli::try_parse_from(["ct", "agents", "set", "mcp", "nixos", "bad"]).is_err());
-        assert!(Cli::try_parse_from(["ct", "agents", "set", "targets", "pi", "enable"]).is_err());
+        assert!(Cli::try_parse_from(["ct", "agents", "launch", "claude"]).is_err());
     }
 }

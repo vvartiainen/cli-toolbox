@@ -1,85 +1,97 @@
-# Opt-in MCP servers and skills
+# Project MCP servers and skills
 
-`ct agents` turns MCP servers and skills from a central catalog on per
-repository, and gives them to coding agents when they start. Nothing is
-written to the repository or to the agents' global settings, so other
-repositories and other developers are unaffected, and whatever a repository
-commits for its agents keeps working alongside. `ct` below is an alias for
-`cli-toolbox`. A Git repository is required for choices; subdirectories and
-linked worktrees resolve to their own checkout, and each checkout has its own
-choices.
+`ct agents` bootstraps and manages the MCP servers and skills of a repository's
+coding agents. You pick the agents the project uses (targets), and MCP servers
+and skills from a central catalog; sync writes them into each target's own
+project files, which are committed with the repository like any other agent
+configuration. `ct` below is an alias for `cli-toolbox`. A Git repository is
+required; subdirectories and linked worktrees resolve to their own checkout.
 
 ```sh
-ct agents                          # Toggle choices with fzf or the built-in picker
-ct tui                             # Git › Agent tools: the same, in the launcher
-ct agents status                   # What this repository uses
+ct agents                          # Toggle choices with fzf or the built-in picker, then sync
+ct tui                             # Git › Agent tools: toggle, sync, preview
+ct agents status                   # Choices and whether the files match them
+ct agents set targets claude enable
 ct agents set mcp nixos enable
-ct agents set skills review disable
-ct agents launch claude -- <args>  # Start an agent with them
+ct agents set skills review enable
+ct agents sync --dry-run           # List the changes
+ct agents sync
 ct agents library install          # Download remote skills, keeping locked revisions
 ct agents library update           # Download remote skills, refreshing revisions
 ```
 
-## Starting agents
+Nothing is on by default, targets included: choose each agent the project
+uses. Choices are saved right away; files change only when you sync.
 
-`ct agents launch <agent> [--bin <path>] [-- <args>]` replaces itself with the
-agent, its options for the chosen tools first, then `<args>`. `--bin` names the
-executable, which matters when a wrapper of the same name comes first on
-`PATH`. Outside a repository the agent starts unchanged; if the choices cannot
-be read, it starts without them after a warning.
+## Targets and their files
 
-| Agent | MCP servers | Skills |
+| Target | MCP servers | Skills |
 | --- | --- | --- |
-| `claude` | `--plugin-dir`: a `ct-agents` plugin with both | Same plugin, named `ct-agents:<skill>` |
-| `codex` | `-c mcp_servers.<name>=…` | Not at launch |
-| `copilot` | `--additional-mcp-config` | `--plugin-dir`: a `ct-agents` plugin |
-| `pi` | Not at launch | `--skill <path>` |
-| `opencode` | Not at launch | Not at launch |
+| `claude` | `.mcp.json` | `.claude/skills` |
+| `codex` | `.codex/config.toml` | `.agents/skills` |
+| `copilot` | `.github/mcp.json` | `.agents/skills` or `.claude/skills` |
+| `cursor` | `.cursor/mcp.json` | `.agents/skills` or `.claude/skills` |
+| `opencode` | `opencode.json` (or an existing `opencode.jsonc`) | `.agents/skills` or `.claude/skills` |
+| `pi` | `.pi/mcp.json` | `.agents/skills` |
 
-What an agent cannot load is skipped with a note on stderr. OpenCode sessions
-share a background server that keeps the configuration it started with, so
-tools given at launch would leak between repositories. Pi's management
-commands (`pi mcp`, `pi install` and the like) start without options.
+Each skill is copied once per folder, into as few folders as reach every
+target: Claude Code reads only `.claude/skills`, Codex and Pi only
+`.agents/skills`, and Copilot, Cursor and OpenCode both. With `claude` and
+`codex` or `pi` chosen, both folders are written, and Copilot, Cursor and
+OpenCode list each skill twice.
 
-Plugins live in the checkout's private directory, named after a hash of their
-content, so launches with the same choices share one.
+Some agents only read project MCP servers in projects you trust: Codex and Pi
+ask the first time they start there. Claude Code asks before starting servers
+from `.mcp.json` unless they are approved in its settings.
 
-## Files and catalog
+## Committed files
+
+| File | Purpose |
+| --- | --- |
+| `.cli-toolbox/agents.json` | The choices |
+| `.cli-toolbox/agents.lock.json` | What sync wrote: each target's servers and every skill file's hash |
+| The targets' files above | What the agents read |
+
+Commit all of them. The lock lets any checkout sync: it updates and removes
+exactly what an earlier sync wrote. Sync never overwrites anything else:
+
+- servers and settings it did not write stay, and an existing server with the
+  same name and content is adopted;
+- a server or skill file it wrote and someone edited, or a different server or
+  file in the way, stops the sync with an error to resolve by hand;
+- a section, file or folder left empty is removed.
+
+Committed files have to work on every machine, so sync refuses servers whose
+command, arguments or environment contain absolute or home paths. Catalog
+servers use commands on `PATH`.
+
+## Catalog and library
 
 | File | Purpose |
 | --- | --- |
 | `$XDG_CONFIG_HOME/cli-toolbox/agents/catalog.json` | Central catalog |
 | `$XDG_DATA_HOME/cli-toolbox/agents/library/` | Installed skills, locks and receipt |
-| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/choices.json` | Choices of one checkout |
-| `$XDG_STATE_HOME/cli-toolbox/agents/projects/<name>-<hash>/launch/` | Plugins for its launches |
 
-XDG directories default to `~/.config`, `~/.local/share` and `~/.local/state`.
-The private directory is named after the checkout's folder and a hash of its
-path; moving or renaming a checkout starts it with no choices.
-
-A minimal catalog:
+XDG directories default to `~/.config` and `~/.local/share`. A minimal catalog:
 
 ```json
 {
   "version": 1,
   "mcp": {
-    "nixos": { "type": "stdio", "command": "/nix/store/...-mcp-nixos/bin/mcp-nixos" }
+    "nixos": { "type": "stdio", "command": "mcp-nixos" }
   },
   "sources": []
 }
 ```
 
-Servers are stdio servers with `command` and optional `args` and `env`; store
-paths are fine, since nothing leaves the machine. Choices files look like
-`{"version":1,"mcp":{"nixos":"enable"}}`. Choices of names the catalog no
-longer has are ignored. MCP and skill names use lowercase letters and digits
-separated by single hyphens or underscores; aliases such as `some-server` and
-`some_server` cannot coexist.
-
-## Skill library
+Servers are stdio servers with `command` and optional `args` and `env`. MCP
+and skill names use lowercase letters and digits separated by single hyphens
+or underscores; aliases such as `some-server` and `some_server` cannot
+coexist. Choices of names the catalog no longer has are ignored.
 
 Local skills need no download. Map names to absolute directories containing
-`SKILL.md`, typically Nix store paths:
+`SKILL.md`, typically Nix store paths; sync copies their content, so no path
+reaches the repository:
 
 ```json
 "localSkills": { "commit-style": "/nix/store/...-commit-style" }
@@ -99,6 +111,7 @@ to the catalog, then install them explicitly:
 ```sh
 ct agents library install
 ct agents set skills skill-creator enable
+ct agents sync
 ```
 
 Rulesync installs into the library's `.rulesync/skills/.curated/`, outside agent
@@ -110,16 +123,16 @@ beside the existing one, then swaps it in. Download or validation failures leave
 the previous installation intact. Removing sources and installing clears their
 cached skills.
 
-Launches use only the installed copies and never download. Changing sources
+Sync uses only the installed copies and never downloads. Changing sources
 requires another library install before choices can be read. The receipt checks
 library content, executable bits and locks; local library edits are reported.
 Install again to restore locked content.
 
 ## Nix integration boundary
 
-nix-config generates the catalog (MCP servers with store paths, skill sources
-and `localSkills`), installs Rulesync and starts the agents through
-`ct agents launch`. cli-toolbox has no runtime dependency on nix-config.
+nix-config generates the catalog (portable server commands it installs on
+`PATH`, skill sources and `localSkills`) and installs Rulesync. cli-toolbox has
+no runtime dependency on nix-config.
 
 ## Verification
 

@@ -50,16 +50,23 @@ review checkouts (see [agents.md](agents.md#git-worktrees)):
 
 ## Git › Agent tools
 
-Lists the catalog's MCP servers and skills with whether the launch
-directory's repository uses them (see [agent-tools.md](agent-tools.md)).
-Enter toggles the highlighted one right away. Nothing is written to the
-repository: agents started with `ct agents launch` get the ones that are on.
+The launch directory repository's `ct agents` choices (see
+[agent-tools.md](agent-tools.md)): first whether its files are in sync, then
+each target, MCP server and skill. Enter toggles the highlighted entry right
+away; files change only when you sync.
 
 ```text
-mcp      nixos              [on]
-mcp      backlog-nix-config [off]
-skills   review             [off]
+sync     pending changes · ⏎ to sync, ^D to preview
+targets  claude              [on]
+targets  codex               [off]
+mcp      nixos               [on]
+skills   review              [off]
 ```
+
+| Key | Action |
+| --- | --- |
+| Enter | Toggle the entry; on the sync row, sync |
+| Ctrl-D | Preview the sync without changing files |
 
 ## Sandbox › Projects
 

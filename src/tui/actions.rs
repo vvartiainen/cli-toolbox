@@ -98,10 +98,12 @@ impl Context {
                 .into_iter()
                 .map(Resource::AzureAccount)
                 .collect()),
-            ToolId::AgentTools => Ok(agents::overview()?
-                .into_iter()
-                .map(Resource::Agent)
-                .collect()),
+            ToolId::AgentTools => {
+                let (entries, synced) = agents::overview()?;
+                Ok(std::iter::once(Resource::AgentSync(synced))
+                    .chain(entries.into_iter().map(Resource::Agent))
+                    .collect())
+            }
             ToolId::SandboxVms => Ok(vm::running_vms()
                 .into_iter()
                 .map(|vm| Resource::Vm(Box::new(vm)))
@@ -217,6 +219,19 @@ impl Context {
                         })
                     }
                 }
+            }
+            Action::SyncAgents(dry_run) => {
+                let mut out = Vec::new();
+                agents::sync(*dry_run, &mut out)?;
+                let heading = if *dry_run {
+                    "Preview of ct agents sync; nothing was changed."
+                } else {
+                    "Synced agent files."
+                };
+                Ok(Done::body(format!(
+                    "{heading}\n\n{}",
+                    String::from_utf8_lossy(&out)
+                )))
             }
             Action::Kitty(path) => {
                 kitty::launch_session(path, stdout, stderr)?;

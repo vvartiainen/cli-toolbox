@@ -1,5 +1,4 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 struct FakeBackend;
@@ -30,7 +29,6 @@ struct Fixture {
     temp: TempDir,
     root: PathBuf,
     library: PathBuf,
-    state: PathBuf,
     catalog: Value,
 }
 impl Fixture {
@@ -40,25 +38,32 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         run_command("git", &["init", "-q"], &root).unwrap();
         let library = temp.path().join("library");
-        let state = temp.path().join("state");
         Self {
             temp,
             root,
             library,
-            state,
-            catalog: json!({"version":1,"mcp":{"nixos":{"type":"stdio","command":"/store/mcp-nixos","args":["--stdio"],"env":{"LEVEL":"1"}}},"sources":[]}),
+            catalog: json!({"version":1,"mcp":{"nixos":{"type":"stdio","command":"mcp-nixos","args":["--stdio"],"env":{"LEVEL":"1"}}},"sources":[]}),
         }
     }
     fn project(&self) -> Project {
-        Project::new(&self.root, self.catalog.clone(), &self.library, &self.state).unwrap()
+        Project::new(&self.root, self.catalog.clone(), &self.library).unwrap()
     }
-    /// Choose both the server and the skill.
-    fn choose_all(&self) -> Project {
-        self.add_skill();
+    fn choose(&self, entries: &[(&str, &str)]) {
         let mut project = self.project();
-        project.set_choice("mcp", "nixos", true).unwrap();
-        project.set_choice("skills", "review", true).unwrap();
-        project
+        for (group, name) in entries {
+            project.set_choice(group, name, true).unwrap();
+        }
+    }
+    fn drop_choice(&self, group: &str, name: &str) {
+        self.project().set_choice(group, name, false).unwrap();
+    }
+    fn sync(&self) -> Result<String, Error> {
+        let mut out = Vec::new();
+        self.project().sync(false, &mut out)?;
+        Ok(String::from_utf8(out).unwrap())
+    }
+    fn json(&self, relative: &str) -> Value {
+        load_json(&self.root.join(relative), Value::Null).unwrap()
     }
     fn add_skill(&self) {
         let skill = self.library.join(".rulesync/skills/.curated/review");
@@ -75,153 +80,257 @@ impl Fixture {
 fn snapshot(root: &Path) -> BTreeMap<String, Record> {
     tree_records(root).unwrap()
 }
+/// The checkout's files apart from Git's own.
+fn files(root: &Path) -> Vec<String> {
+    snapshot(root)
+        .into_keys()
+        .filter(|path| !path.starts_with(".git/"))
+        .collect()
+}
 fn assert_error(result: Result<impl Sized, Error>, text: &str) {
     let error = result.err().expect("expected failure").to_string();
     assert!(error.contains(text), "expected {text:?}: {error}");
 }
 
 #[test]
-fn choices_live_outside_the_checkout_and_each_worktree_has_its_own() {
+fn targets_start_off_so_choices_alone_write_nothing_else() {
     let f = Fixture::new();
-    run_command(
-        "git",
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "-qm",
-            "initial",
-            "--allow-empty",
-        ],
-        &f.root,
-    )
-    .unwrap();
-    f.project().set_choice("mcp", "nixos", true).unwrap();
-    let entries: Vec<_> = fs::read_dir(&f.root)
+    f.choose(&[("mcp", "nixos")]);
+    assert!(
+        f.project()
+            .overview()
+            .iter()
+            .all(|e| e.group != "targets" || !e.enabled)
+    );
+    assert_eq!(f.sync().unwrap(), "Up to date.\n");
+    assert_eq!(files(&f.root), [CHOICES]);
+    assert_eq!(
+        f.json(CHOICES),
+        json!({"version":1,"mcp":{"nixos":"enable"}})
+    );
+}
+
+#[test]
+fn sync_writes_every_targets_native_files_and_a_lock() {
+    let f = Fixture::new();
+    f.add_skill();
+    let mut choices: Vec<_> = TARGETS.iter().map(|t| ("targets", *t)).collect();
+    choices.extend([("mcp", "nixos"), ("skills", "review")]);
+    f.choose(&choices);
+    f.sync().unwrap();
+
+    let stdio = json!({"command":"mcp-nixos","args":["--stdio"],"env":{"LEVEL":"1"}});
+    let mut claude = stdio.clone();
+    claude["type"] = json!("stdio");
+    assert_eq!(f.json(".mcp.json"), json!({"mcpServers":{"nixos":claude}}));
+    assert_eq!(
+        f.json(".cursor/mcp.json"),
+        json!({"mcpServers":{"nixos":stdio}})
+    );
+    assert_eq!(
+        f.json(".pi/mcp.json"),
+        json!({"mcpServers":{"nixos":stdio}})
+    );
+    let mut copilot = stdio.clone();
+    copilot["type"] = json!("local");
+    copilot["tools"] = json!(["*"]);
+    assert_eq!(
+        f.json(".github/mcp.json"),
+        json!({"mcpServers":{"nixos":copilot}})
+    );
+    assert_eq!(
+        f.json("opencode.json"),
+        json!({"mcp":{"nixos":{"type":"local","command":["mcp-nixos","--stdio"],"enabled":true,"environment":{"LEVEL":"1"}}}})
+    );
+    let codex: toml_edit::DocumentMut = fs::read_to_string(f.root.join(".codex/config.toml"))
         .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    assert_eq!(entries, [".git"]);
-    assert!(f.project().enabled("mcp", "nixos"));
-
-    let linked = f.temp.path().join("linked");
-    run_command(
-        "git",
-        &["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
-        &f.root,
-    )
-    .unwrap();
-    let subdir = linked.join("subdir");
-    fs::create_dir(&subdir).unwrap();
+        .parse()
+        .unwrap();
     assert_eq!(
-        project_root(&subdir).unwrap(),
-        linked.canonicalize().unwrap()
+        codex["mcp_servers"]["nixos"]["command"].as_str(),
+        Some("mcp-nixos")
     );
-    let worktree = Project::new(&linked, f.catalog.clone(), &f.library, &f.state).unwrap();
-    assert!(!worktree.enabled("mcp", "nixos"));
-
-    f.project().set_choice("mcp", "nixos", false).unwrap();
-    assert!(!f.project().enabled("mcp", "nixos"));
-}
-
-#[test]
-fn unknown_names_are_rejected_and_choices_the_catalog_dropped_are_ignored() {
-    let mut f = Fixture::new();
-    assert_error(
-        f.project().set_choice("mcp", "typo", true),
-        "not in the catalog",
-    );
-    assert_error(
-        f.project().set_choice("targets", "pi", true),
-        "unknown group",
-    );
-    f.project().set_choice("mcp", "nixos", true).unwrap();
-    f.catalog["mcp"] = json!({});
-    let project = f.project();
-    assert!(project.overview().is_empty());
-    assert_eq!(project.launch(Agent::Claude).unwrap(), Launch::default());
-}
-
-#[test]
-fn launch_gives_each_agent_its_native_options() {
-    let f = Fixture::new();
-    let project = f.choose_all();
-    let skill = f.library.join(".rulesync/skills/.curated/review");
-
-    let claude = project.launch(Agent::Claude).unwrap();
-    assert_eq!(claude.args[0], "--plugin-dir");
-    let plugin = PathBuf::from(&claude.args[1]);
-    assert!(plugin.starts_with(&f.state));
-    assert_eq!(
-        load_json(&plugin.join(".claude-plugin/plugin.json"), Value::Null).unwrap()["name"],
-        "ct-agents"
-    );
-    assert_eq!(
-        load_json(&plugin.join(".mcp.json"), Value::Null).unwrap(),
-        json!({"mcpServers":{"nixos":{"command":"/store/mcp-nixos","args":["--stdio"],"env":{"LEVEL":"1"}}}})
-    );
-    assert_eq!(snapshot(&plugin.join("skills/review")), snapshot(&skill));
-    let mode = fs::metadata(plugin.join("skills/review/run.sh"))
+    for dir in [".claude/skills", ".agents/skills"] {
+        let script = f.root.join(dir).join("review/run.sh");
+        assert_ne!(
+            fs::metadata(script).unwrap().permissions().mode() & 0o111,
+            0
+        );
+    }
+    let lock = f.json(LOCK);
+    assert_eq!(lock["mcp"]["claude"]["nixos"], claude);
+    assert!(lock["skills"][".claude/skills/review/SKILL.md"].is_object());
+    // Committed files are plain files anyone can read.
+    let mode = fs::metadata(f.root.join(".mcp.json"))
         .unwrap()
         .permissions()
         .mode();
-    assert_ne!(mode & 0o111, 0);
-    assert!(claude.notes.is_empty());
-    // The same choices reuse the plugin.
-    assert_eq!(project.launch(Agent::Claude).unwrap(), claude);
+    assert_eq!(mode & 0o777, 0o644);
+    assert!(f.project().is_synced().unwrap());
+    assert_eq!(f.sync().unwrap(), "Up to date.\n");
+}
 
-    let codex = project.launch(Agent::Codex).unwrap();
-    assert_eq!(codex.args[0], "-c");
-    let value = codex.args[1].strip_prefix("mcp_servers.nixos=").unwrap();
-    let doc: toml_edit::DocumentMut = format!("server = {value}").parse().unwrap();
-    assert_eq!(doc["server"]["command"].as_str(), Some("/store/mcp-nixos"));
-    assert_eq!(doc["server"]["env"]["LEVEL"].as_str(), Some("1"));
+#[test]
+fn skills_go_to_the_fewest_folders_that_reach_every_target() {
+    let dirs = |targets: &[&str]| skill_dirs(&targets.iter().copied().collect());
+    assert!(dirs(&[]).is_empty());
+    assert_eq!(dirs(&["claude"]), [".claude/skills"]);
     assert_eq!(
-        codex.notes,
-        ["codex cannot load skills at launch; skipped review"]
+        dirs(&["claude", "copilot", "cursor", "opencode"]),
+        [".claude/skills"]
     );
-
-    let opencode = project.launch(Agent::Opencode).unwrap();
-    assert!(opencode.args.is_empty());
+    assert_eq!(dirs(&["codex"]), [".agents/skills"]);
+    assert_eq!(dirs(&["cursor", "opencode", "pi"]), [".agents/skills"]);
     assert_eq!(
-        opencode.notes,
-        [
-            "opencode cannot load MCP servers at launch; skipped nixos",
-            "opencode cannot load skills at launch; skipped review"
-        ]
-    );
-
-    let copilot = project.launch(Agent::Copilot).unwrap();
-    assert_eq!(copilot.args[0], "--plugin-dir");
-    // Copilot's plugin has only the skills; servers come separately.
-    assert!(!PathBuf::from(&copilot.args[1]).join(".mcp.json").exists());
-    assert_eq!(copilot.args[2], "--additional-mcp-config");
-    assert_eq!(
-        serde_json::from_str::<Value>(&copilot.args[3]).unwrap()["mcpServers"]["nixos"],
-        json!({"type":"local","command":"/store/mcp-nixos","args":["--stdio"],"env":{"LEVEL":"1"},"tools":["*"]})
-    );
-
-    let pi = project.launch(Agent::Pi).unwrap();
-    assert_eq!(pi.args, ["--skill", skill.to_str().unwrap()]);
-    assert_eq!(
-        pi.notes,
-        ["pi cannot load MCP servers at launch; skipped nixos"]
+        dirs(&["claude", "codex"]),
+        [".claude/skills", ".agents/skills"]
     );
 }
 
 #[test]
-fn nothing_chosen_adds_nothing_and_pi_commands_take_no_session_options() {
+fn turning_things_off_removes_only_what_sync_wrote() {
     let f = Fixture::new();
-    for agent in Agent::ALL {
-        assert_eq!(f.project().launch(agent).unwrap(), Launch::default());
-        assert_eq!(Agent::parse(agent.name()), Some(agent));
+    f.add_skill();
+    let original =
+        json!({"runtime":{"theme":"dark"},"mcpServers":{"team":{"command":"team-server"}}});
+    write_json(&f.root.join(".mcp.json"), &original).unwrap();
+    f.choose(&[
+        ("targets", "claude"),
+        ("targets", "codex"),
+        ("mcp", "nixos"),
+        ("skills", "review"),
+    ]);
+    f.sync().unwrap();
+    assert!(f.json(".mcp.json")["mcpServers"]["nixos"].is_object());
+    assert_eq!(
+        f.json(".mcp.json")["mcpServers"]["team"],
+        original["mcpServers"]["team"]
+    );
+
+    f.drop_choice("mcp", "nixos");
+    f.sync().unwrap();
+    assert_eq!(f.json(".mcp.json"), original);
+    assert!(!f.root.join(".codex").exists());
+
+    f.drop_choice("targets", "claude");
+    f.sync().unwrap();
+    assert!(!f.root.join(".claude").exists());
+    assert!(f.root.join(".agents/skills/review/SKILL.md").exists());
+
+    f.drop_choice("targets", "codex");
+    f.sync().unwrap();
+    assert_eq!(files(&f.root), [".cli-toolbox/agents.json", ".mcp.json"]);
+    assert_eq!(f.json(".mcp.json"), original);
+}
+
+#[test]
+fn foreign_and_edited_files_are_never_overwritten() {
+    let f = Fixture::new();
+    f.add_skill();
+    f.choose(&[
+        ("targets", "claude"),
+        ("mcp", "nixos"),
+        ("skills", "review"),
+    ]);
+    // A different server of the same name belongs to someone else.
+    write_json(
+        &f.root.join(".mcp.json"),
+        &json!({"mcpServers":{"nixos":{"command":"custom"}}}),
+    )
+    .unwrap();
+    let before = snapshot(&f.root);
+    assert_error(f.sync(), "already has another MCP server named nixos");
+    assert_eq!(snapshot(&f.root), before);
+    // An identical one is adopted.
+    write_json(
+        &f.root.join(".mcp.json"),
+        &json!({"mcpServers":{"nixos":{"type":"stdio","command":"mcp-nixos","args":["--stdio"],"env":{"LEVEL":"1"}}}}),
+    )
+    .unwrap();
+    f.sync().unwrap();
+    assert!(f.project().is_synced().unwrap());
+
+    write_json(
+        &f.root.join(".mcp.json"),
+        &json!({"mcpServers":{"nixos":{"command":"edited"}}}),
+    )
+    .unwrap();
+    assert_error(f.sync(), "was edited");
+    fs::remove_file(f.root.join(".mcp.json")).unwrap();
+    f.sync().unwrap();
+
+    let skill = f.root.join(".claude/skills/review/SKILL.md");
+    fs::write(&skill, "local edit").unwrap();
+    f.drop_choice("skills", "review");
+    assert_error(f.sync(), "was edited");
+    fs::remove_dir_all(f.root.join(".claude")).unwrap();
+    f.sync().unwrap();
+
+    write_file(&skill, b"someone else's", 0o644).unwrap();
+    f.choose(&[("skills", "review")]);
+    assert_error(f.sync(), "not written by ct agents");
+}
+
+#[test]
+fn servers_with_machine_paths_cannot_be_committed() {
+    let mut f = Fixture::new();
+    f.catalog["mcp"]["store"] = json!({"type":"stdio","command":"/nix/store/x/bin/server"});
+    f.catalog["mcp"]["home"] = json!({"type":"stdio","command":"server","args":["~/vault"]});
+    f.choose(&[("mcp", "store")]);
+    // Without targets nothing is written, so nothing is checked.
+    f.sync().unwrap();
+    f.choose(&[("targets", "pi")]);
+    assert_error(f.sync(), "store is not portable");
+    f.drop_choice("mcp", "store");
+    f.choose(&[("mcp", "home")]);
+    assert_error(f.sync(), "home is not portable: ~/vault");
+}
+
+#[test]
+fn another_checkout_with_the_committed_files_continues_where_this_one_left() {
+    let f = Fixture::new();
+    f.add_skill();
+    f.choose(&[
+        ("targets", "claude"),
+        ("mcp", "nixos"),
+        ("skills", "review"),
+    ]);
+    f.sync().unwrap();
+    let clone = f.temp.path().join("clone");
+    fs::create_dir(&clone).unwrap();
+    run_command("git", &["init", "-q"], &clone).unwrap();
+    // As Git would check them out, executable bits included.
+    for file in files(&f.root) {
+        let source = f.root.join(&file);
+        let mode = fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        write_file(&clone.join(&file), &fs::read(&source).unwrap(), mode).unwrap();
     }
-    assert!(!f.state.join("projects").exists() || snapshot(&f.state).is_empty());
-    assert!(Agent::Pi.starts_session(&["fix the bug".into()]));
-    assert!(!Agent::Pi.starts_session(&["mcp".into(), "list".into()]));
-    assert!(Agent::Claude.starts_session(&["mcp".into(), "list".into()]));
+    let mut other = Project::new(&clone, f.catalog.clone(), &f.library).unwrap();
+    assert!(other.is_synced().unwrap());
+    other.set_choice("targets", "claude", false).unwrap();
+    other.sync(false, &mut Vec::new()).unwrap();
+    assert_eq!(files(&clone), [CHOICES]);
+}
+
+#[test]
+fn preview_changes_nothing_and_unknown_names_are_rejected() {
+    let f = Fixture::new();
+    f.choose(&[("targets", "claude"), ("mcp", "nixos")]);
+    let before = snapshot(&f.root);
+    let mut out = Vec::new();
+    f.project().sync(true, &mut out).unwrap();
+    assert_eq!(snapshot(&f.root), before);
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("create .mcp.json"), "{out}");
+    assert!(out.contains(&format!("create {LOCK}")), "{out}");
+    assert_error(
+        f.project().set_choice("mcp", "typo", true),
+        "unknown mcp entry",
+    );
+    assert_error(
+        f.project().set_choice("targets", "gemini", true),
+        "unknown targets entry",
+    );
 }
 
 #[test]
@@ -235,42 +344,20 @@ fn local_skills_need_no_install_and_must_be_safe() {
     )
     .unwrap();
     f.catalog["localSkills"] = json!({"notes": skill});
-    let mut project = f.project();
-    project.set_choice("skills", "notes", true).unwrap();
-    assert_eq!(
-        project.launch(Agent::Pi).unwrap().args,
-        ["--skill", skill.to_str().unwrap()]
-    );
+    f.choose(&[("targets", "pi"), ("skills", "notes")]);
+    f.sync().unwrap();
+    assert!(f.root.join(".agents/skills/notes/SKILL.md").exists());
 
     f.add_skill();
     f.catalog["localSkills"] = json!({"review": skill});
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
+        Project::new(&f.root, f.catalog.clone(), &f.library),
         "clashes",
     );
     f.catalog["localSkills"] = json!({"notes": "relative"});
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
+        Project::new(&f.root, f.catalog.clone(), &f.library),
         "absolute path",
-    );
-}
-
-#[test]
-fn stale_library_and_invalid_choices_are_errors() {
-    let mut f = Fixture::new();
-    write_json(
-        &private_dir(&f.state, &f.root.canonicalize().unwrap()).join(CHOICES),
-        &json!({"version":2}),
-    )
-    .unwrap();
-    assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
-        "choices version",
-    );
-    f.catalog["sources"] = json!([{"source":"example/skills"}]);
-    assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
-        "library install",
     );
 }
 
@@ -325,7 +412,7 @@ fn library_edits_and_lockfile_edits_are_reported() {
     )
     .unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
+        Project::new(&f.root, f.catalog.clone(), &f.library),
         "library was edited",
     );
     f.add_skill();
@@ -333,7 +420,7 @@ fn library_edits_and_lockfile_edits_are_reported() {
     write_receipt(&f.library, &f.catalog).unwrap();
     write_json(&f.library.join("rulesync.lock"), &json!({"revision":"two"})).unwrap();
     assert_error(
-        Project::new(&f.root, f.catalog.clone(), &f.library, &f.state),
+        Project::new(&f.root, f.catalog.clone(), &f.library),
         "lockfile changed",
     );
 }

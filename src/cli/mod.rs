@@ -46,7 +46,7 @@ enum Commands {
     Azure(AzureCmd),
     /// AI agent helpers.
     Agent(AgentCmd),
-    /// Opt-in MCP servers and skills per repository, given to agents at launch.
+    /// Bootstrap and manage the MCP servers and skills of a repository's agents.
     Agents(AgentsCmd),
     /// Git helpers.
     Git(GitCmd),

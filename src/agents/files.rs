@@ -12,6 +12,8 @@ pub(super) struct Record {
     pub executable: bool,
 }
 pub(super) type Records = BTreeMap<String, Record>;
+pub(super) type Content = (Option<Vec<u8>>, u32);
+pub(super) type Changes = BTreeMap<PathBuf, Content>;
 
 pub(super) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -121,16 +123,6 @@ pub(super) fn tree_records(root: &Path) -> Result<Records, Error> {
     visit(root, root, &mut records)?;
     Ok(records)
 }
-pub(super) fn copy_tree(source: &Path, output: &Path) -> Result<(), Error> {
-    for (relative, rec) in tree_records(source)? {
-        write_file(
-            &safe_path(output, &relative)?,
-            &fs::read(source.join(relative))?,
-            if rec.executable { 0o755 } else { 0o644 },
-        )?;
-    }
-    Ok(())
-}
 pub(super) fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<(), Error> {
     let parent = path
         .parent()
@@ -144,6 +136,77 @@ pub(super) fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<(), Erro
     temp.persist(path).map_err(Error::msg)?;
     Ok(())
 }
+fn original(path: &Path) -> Result<Content, Error> {
+    reject_symlink(path)?;
+    if path.exists() {
+        file_record(path)?;
+        Ok((
+            Some(fs::read(path)?),
+            fs::metadata(path)?.permissions().mode() & 0o777,
+        ))
+    } else {
+        Ok((None, 0o600))
+    }
+}
+fn apply_one(path: &Path, content: &Content) -> Result<(), Error> {
+    if let Some(data) = &content.0 {
+        write_file(path, data, content.1)
+    } else if path.exists() {
+        fs::remove_file(path)?;
+        // Drop directories the file leaves empty; the first nonempty one,
+        // at the latest the repository root, stops this.
+        let mut parent = path.parent();
+        while let Some(dir) = parent.filter(|dir| fs::remove_dir(dir).is_ok()) {
+            parent = dir.parent();
+        }
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+pub(super) fn apply_changes(changes: &Changes) -> Result<(), Error> {
+    apply_changes_with(changes, apply_one)
+}
+pub(super) fn apply_changes_with(
+    changes: &Changes,
+    mut apply: impl FnMut(&Path, &Content) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let originals: BTreeMap<_, _> = changes
+        .keys()
+        .map(|p| Ok((p.clone(), original(p)?)))
+        .collect::<Result<_, Error>>()?;
+    let mut completed = Vec::new();
+    let mut created_dirs = BTreeSet::new();
+    for (path, content) in changes {
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir.exists() {
+                break;
+            }
+            created_dirs.insert(dir.to_path_buf());
+            parent = dir.parent();
+        }
+        // Include the failing write: an error may occur after its rename.
+        completed.push(path);
+        if let Err(error) = apply(path, content) {
+            let mut rollback_error = None;
+            for path in completed.into_iter().rev() {
+                if let Err(e) = apply_one(path, &originals[path]) {
+                    rollback_error = Some(e);
+                }
+            }
+            for dir in created_dirs.into_iter().rev() {
+                let _ = fs::remove_dir(dir);
+            }
+            return Err(match rollback_error {
+                Some(e) => Error::msg(format!("{error}; rollback failed: {e}")),
+                None => error,
+            });
+        }
+    }
+    Ok(())
+}
+
 // Lock outside the repository so previews do not create project or Git files.
 pub(super) fn lock(identity: &Path) -> Result<File, Error> {
     let name = format!(

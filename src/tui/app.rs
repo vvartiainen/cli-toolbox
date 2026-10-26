@@ -148,7 +148,7 @@ impl ToolId {
             Self::GitWorktrees => {
                 "Create, inspect, cd into or remove git worktrees in ~/.worktrees"
             }
-            Self::AgentTools => "Opt-in MCP servers and skills for this repository's agents",
+            Self::AgentTools => "MCP servers and skills of this repository's agents: choose, sync",
             Self::SandboxProjects => {
                 "Project VMs in ~/.agent-sandbox: create, start, add worktrees, sync"
             }
@@ -182,8 +182,10 @@ pub(crate) enum Resource {
     Worktree(Worktree),
     Project(Box<ProjectStatus>),
     Vm(Box<RunnerState>),
-    /// A catalog MCP server or skill of the launch directory's repository.
+    /// A target, catalog MCP server or skill of the launch directory's repository.
     Agent(Entry),
+    /// Whether that repository's agent files match its choices.
+    AgentSync(bool),
 }
 
 impl Resource {
@@ -198,6 +200,7 @@ impl Resource {
             Self::Project(status) => status.project.name.clone(),
             Self::Vm(vm) => vm.name.clone(),
             Self::Agent(entry) => format!("{} {}", entry.group, entry.name),
+            Self::AgentSync(_) => "sync".into(),
         }
     }
 
@@ -213,7 +216,7 @@ impl Resource {
             Self::Worktree(worktree) => ResourceIdentity::Path(worktree.path.clone()),
             Self::Project(status) => ResourceIdentity::Path(status.project.dir.clone()),
             Self::Vm(vm) => ResourceIdentity::Path(vm.runtime_dir.clone()),
-            Self::Agent(_) => ResourceIdentity::String(self.label()),
+            Self::Agent(_) | Self::AgentSync(_) => ResourceIdentity::String(self.label()),
         }
     }
 
@@ -228,7 +231,7 @@ impl Resource {
                 | (ToolId::GitWorktrees, Self::Worktree(_))
                 | (ToolId::SandboxProjects, Self::Project(_))
                 | (ToolId::SandboxVms, Self::Vm(_))
-                | (ToolId::AgentTools, Self::Agent(_))
+                | (ToolId::AgentTools, Self::Agent(_) | Self::AgentSync(_))
         )
     }
 }
@@ -275,6 +278,8 @@ pub(crate) enum Action {
     StopVm(PathBuf),
     /// Remove the runtime directories of stopped VMs whose start directory is gone.
     PruneVms,
+    /// `ct agents sync`, or its preview with `true`.
+    SyncAgents(bool),
 }
 
 /// How to tailor a new project's flake.
@@ -327,6 +332,7 @@ impl Action {
             | Self::EnterProjectWorktree(_)
             | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
+            Self::SyncAgents(_) => Some(ToolId::AgentTools),
             Self::Aws(_)
             | Self::AzureSubscription(_)
             | Self::AzureAccount(_)
@@ -1193,6 +1199,13 @@ impl App {
         if let Some(effect) = self.handle_vm_picker_key(key) {
             return effect;
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('d')
+            && self.picker().is_some_and(|p| p.tool == ToolId::AgentTools)
+        {
+            self.loading = None;
+            return Effect::Execute(Action::SyncAgents(true));
+        }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
         {
@@ -1261,6 +1274,9 @@ impl App {
                     }
                     (ToolId::SandboxVms, Resource::Vm(vm)) => {
                         Effect::Prepare(Prepare::StopVm(vm.runtime_dir))
+                    }
+                    (ToolId::AgentTools, Resource::AgentSync(_)) => {
+                        Effect::Execute(Action::SyncAgents(false))
                     }
                     (ToolId::AgentTools, Resource::Agent(entry)) => Effect::ChangeAgents(Entry {
                         enabled: !entry.enabled,
@@ -2562,10 +2578,24 @@ mod tests {
         app.loaded(
             ToolId::AgentTools,
             Ok(vec![
+                Resource::AgentSync(false),
                 Resource::Agent(agent_entry("mcp", "nixos", false)),
                 Resource::Agent(agent_entry("skills", "review", true)),
             ]),
         );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::SyncAgents(false))
+        );
+        assert_eq!(
+            app.handle_key(ctrl('d')),
+            Effect::Execute(Action::SyncAgents(true))
+        );
+        assert_eq!(
+            Action::SyncAgents(false).return_tool(),
+            Some(ToolId::AgentTools)
+        );
+        app.handle_key(key(KeyCode::Down));
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
             Effect::ChangeAgents(agent_entry("mcp", "nixos", true))
