@@ -52,15 +52,26 @@ review checkouts (see [agents.md](agents.md#git-worktrees)):
 
 Shows the launch directory repository's `ct agents` choices (see
 [agent-tools.md](agent-tools.md)): whether generated files are in sync,
-whether they are excluded from Git, then each MCP server, skill and target
-with its state and origin (`personal`, `shared` or `default`). Choices are
-saved right away; generated files change only when you sync.
+whether they are excluded from Git, then each MCP server, skill and target.
+A row shows the effective state, then the repository's choice
+(`.cli-toolbox/agents.json`, committed) and yours (personal, git-excluded):
+`on`, `off`, or `–` to inherit. Yours wins over the repository's, which wins
+over the catalog default; yours is highlighted when it overrides.
+
+```text
+mcp      nixos              [on]   repo on   mine –
+mcp      backlog-nix-config [off]  repo on   mine off
+```
+
+Enter and Ctrl-T cycle a layer: from `–` to the opposite of what it
+inherits, then the inherited value, then `–` again. Choices are saved right
+away; generated files change only when you sync.
 
 | Key | Action |
 | --- | --- |
-| Enter | Toggle the highlighted entry in your personal choices; on the sync row, sync; on the Git row, toggle excluding generated files |
-| Ctrl-T | Toggle the entry in the shared choices (`.cli-toolbox/agents.json`) |
-| Ctrl-R | Drop your personal choice so the shared or default one applies |
+| Enter | Cycle the repository choice; on the sync row, sync; on the Git row, toggle excluding generated files |
+| Ctrl-T | Cycle your own choice |
+| Ctrl-R | Clear your own choice so the repository's or the default applies |
 | Ctrl-S | Sync generated agent files |
 | Ctrl-D | Preview the sync without changing files |
 

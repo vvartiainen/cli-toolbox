@@ -19,7 +19,8 @@ const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
 const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
-const HELP_AGENTS: &str = "type to filter · ⏎ toggle · ^T shared · ^R inherit · ^S sync · ^D preview · F1 help · esc back";
+const HELP_AGENTS: &str =
+    "type to filter · ⏎ repo · ^T mine · ^R clear mine · ^S sync · ^D preview · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · ? help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
@@ -198,13 +199,10 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entries.extend([
                     entry(
                         "⏎",
-                        "toggle for you (personal, git-excluded), or run the row",
+                        "cycle the repository choice (.cli-toolbox/agents.json), or run the row",
                     ),
-                    entry(
-                        "^T",
-                        "toggle in the shared choices (.cli-toolbox/agents.json)",
-                    ),
-                    entry("^R", "drop your personal choice (inherit)"),
+                    entry("^T", "cycle your own choice (personal, git-excluded)"),
+                    entry("^R", "clear your own choice"),
                     entry("^S", "sync generated agent files"),
                     entry("^D", "preview the sync without changing files"),
                 ]);
@@ -642,15 +640,35 @@ fn agent_line(row: &AgentRow, name_width: usize) -> Line<'static> {
             state(*on),
             Span::raw(" exclude generated files from Git"),
         ]),
-        AgentRow::Choice(entry) => Line::from(vec![
-            Span::raw(format!(
-                " {:<8} {:<name_width$}  ",
-                entry.group,
-                clean_text(&entry.name)
-            )),
-            state(entry.enabled),
-            format!("  {}", entry.origin).dark_gray(),
-        ]),
+        AgentRow::Choice(entry) => {
+            // A layer's choice, or a dash when it inherits.
+            let layer = |label: &str, choice: Option<bool>, style: Style| match choice {
+                Some(on) => Span::styled(
+                    format!("  {label} {:<3}", if on { "on" } else { "off" }),
+                    style,
+                ),
+                None => format!("  {label} –  ").dark_gray(),
+            };
+            // Your choice stands out when it overrides the repository's.
+            let mine = if entry
+                .personal
+                .is_some_and(|on| on != entry.shared.unwrap_or(entry.default))
+            {
+                Style::new().fg(Color::Yellow)
+            } else {
+                Style::new()
+            };
+            Line::from(vec![
+                Span::raw(format!(
+                    " {:<8} {:<name_width$}  ",
+                    entry.group,
+                    clean_text(&entry.name)
+                )),
+                state(entry.enabled()),
+                layer("repo", entry.shared, Style::new()),
+                layer("mine", entry.personal, mine),
+            ])
+        }
     }
 }
 
@@ -1487,14 +1505,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_agent_tools_with_state_and_origin() {
+    fn renders_agent_tools_with_both_layers() {
         let mut app = App::new("/tmp/project".into());
-        let choice = |group: &str, name: &str, enabled, origin| {
+        let choice = |group: &str, name: &str, shared, personal| {
             Resource::Agent(super::AgentRow::Choice(crate::agents::Entry {
                 group: group.into(),
                 name: name.into(),
-                enabled,
-                origin,
+                default: false,
+                shared,
+                personal,
             }))
         };
         app.loaded(
@@ -1502,19 +1521,24 @@ mod tests {
             Ok(vec![
                 Resource::Agent(super::AgentRow::Sync(false)),
                 Resource::Agent(super::AgentRow::Exclude(true)),
-                choice("mcp", "backlog-work", true, "personal"),
-                choice("skills", "review", false, "default"),
+                choice("mcp", "backlog-work", None, Some(true)),
+                choice("mcp", "nixos", Some(true), Some(false)),
+                choice("skills", "review", None, None),
             ]),
         );
         let list = rendered(&app, 120, super::HEIGHT);
         assert!(list.contains("pending changes"), "{list}");
         assert!(list.contains("[on]  exclude generated files"), "{list}");
         assert!(
-            list.contains("mcp      backlog-work  [on]   personal"),
+            list.contains("mcp      backlog-work  [on]   repo –    mine on"),
             "{list}"
         );
         assert!(
-            list.contains("skills   review        [off]  default"),
+            list.contains("mcp      nixos         [off]  repo on   mine off"),
+            "{list}"
+        );
+        assert!(
+            list.contains("skills   review        [off]  repo –    mine –"),
             "{list}"
         );
         assert!(list.contains("^S sync"), "{list}");

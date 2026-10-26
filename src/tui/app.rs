@@ -1380,8 +1380,8 @@ impl App {
             Some(Resource::Agent(row)) => Some(row.clone()),
             _ => None,
         };
-        let toggle = |entry: &Entry, shared| {
-            let choice = if entry.enabled { "disable" } else { "enable" };
+        let cycle = |entry: &Entry, shared| {
+            let choice = entry.next_choice(shared);
             AgentChange::Choice(entry.group.clone(), entry.name.clone(), choice, shared)
         };
         let effect = match (key.code, ctrl, row) {
@@ -1393,10 +1393,10 @@ impl App {
                 Effect::ChangeAgents(AgentChange::Exclude(!on))
             }
             (KeyCode::Enter, false, Some(AgentRow::Choice(entry))) => {
-                Effect::ChangeAgents(toggle(&entry, false))
+                Effect::ChangeAgents(cycle(&entry, true))
             }
             (KeyCode::Char('t'), true, Some(AgentRow::Choice(entry))) => {
-                Effect::ChangeAgents(toggle(&entry, true))
+                Effect::ChangeAgents(cycle(&entry, false))
             }
             (KeyCode::Char('r'), true, Some(AgentRow::Choice(entry))) => Effect::ChangeAgents(
                 AgentChange::Choice(entry.group, entry.name, "inherit", false),
@@ -2604,19 +2604,20 @@ mod tests {
     }
 
     fn agent_rows() -> Vec<Resource> {
-        let entry = |group: &str, name: &str, enabled| {
+        let entry = |group: &str, name: &str, shared| {
             Resource::Agent(AgentRow::Choice(Entry {
                 group: group.into(),
                 name: name.into(),
-                enabled,
-                origin: "default",
+                default: false,
+                shared,
+                personal: None,
             }))
         };
         vec![
             Resource::Agent(AgentRow::Sync(false)),
             Resource::Agent(AgentRow::Exclude(false)),
-            entry("mcp", "nixos", false),
-            entry("skills", "review", true),
+            entry("mcp", "nixos", None),
+            entry("skills", "review", Some(true)),
         ]
     }
 
@@ -2645,17 +2646,27 @@ mod tests {
                 "mcp".into(),
                 "nixos".into(),
                 "enable",
-                false
+                true
             ))
         );
         app.handle_key(key(KeyCode::Down));
+        // The repository enables it: Enter turns it off there, ^T for you.
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::ChangeAgents(AgentChange::Choice(
+                "skills".into(),
+                "review".into(),
+                "disable",
+                true
+            ))
+        );
         assert_eq!(
             app.handle_key(ctrl('t')),
             Effect::ChangeAgents(AgentChange::Choice(
                 "skills".into(),
                 "review".into(),
                 "disable",
-                true
+                false
             ))
         );
         assert_eq!(

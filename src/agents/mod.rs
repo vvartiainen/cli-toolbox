@@ -66,14 +66,47 @@ impl Default for State {
         }
     }
 }
-/// One selectable MCP server, skill or target and where its value comes from.
+/// One selectable MCP server, skill or target with its value in each layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Entry {
     pub group: String,
     pub name: String,
-    pub enabled: bool,
-    /// `personal`, `shared` or `default`.
-    pub origin: &'static str,
+    /// The catalog default.
+    pub default: bool,
+    /// The shared (repository) choice; none when it inherits.
+    pub shared: Option<bool>,
+    /// The personal choice; none when it inherits.
+    pub personal: Option<bool>,
+}
+impl Entry {
+    pub fn enabled(&self) -> bool {
+        self.personal.or(self.shared).unwrap_or(self.default)
+    }
+    /// `personal`, `shared` or `default`: the layer the value comes from.
+    pub fn origin(&self) -> &'static str {
+        if self.personal.is_some() {
+            "personal"
+        } else if self.shared.is_some() {
+            "shared"
+        } else {
+            "default"
+        }
+    }
+    /// The next choice when cycling a layer: from inheriting to the opposite
+    /// of the inherited value, then the inherited value, then inheriting again.
+    pub fn next_choice(&self, shared: bool) -> &'static str {
+        let (current, inherited) = if shared {
+            (self.shared, self.default)
+        } else {
+            (self.personal, self.shared.unwrap_or(self.default))
+        };
+        let choice = |on| if on { "enable" } else { "disable" };
+        match current {
+            None => choice(!inherited),
+            Some(on) if on != inherited => choice(inherited),
+            Some(_) => "inherit",
+        }
+    }
 }
 /// A project's effective choices, for status output and the TUI.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -352,20 +385,17 @@ impl<'a> Project<'a> {
         let mut entries = Vec::new();
         for group in GROUPS {
             for name in &self.names[group] {
-                let explicit =
-                    |layer: &Value| layer[group].get(name).is_some_and(|v| v != "inherit");
-                let origin = if explicit(&self.personal) {
-                    "personal"
-                } else if explicit(&self.shared) {
-                    "shared"
-                } else {
-                    "default"
+                let choice = |layer: &Value| match layer[group].get(name)?.as_str()? {
+                    "enable" => Some(true),
+                    "disable" => Some(false),
+                    _ => None,
                 };
                 entries.push(Entry {
                     group: group.into(),
                     name: name.clone(),
-                    enabled: self.enabled(group, name),
-                    origin,
+                    default: choice(&self.catalog["defaults"]).unwrap_or(false),
+                    shared: choice(&self.shared),
+                    personal: choice(&self.personal),
                 });
             }
         }
@@ -383,8 +413,8 @@ impl<'a> Project<'a> {
                 "{} / {}: {} ({})",
                 entry.group,
                 entry.name,
-                if entry.enabled { "enable" } else { "disable" },
-                entry.origin
+                if entry.enabled() { "enable" } else { "disable" },
+                entry.origin()
             )?;
         }
         writeln!(

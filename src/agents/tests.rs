@@ -781,3 +781,24 @@ fn library_promotion_failure_restores_or_retains_previous_installation() {
         assert_eq!(fs::read_to_string(old).unwrap(), "previous installation");
     }
 }
+
+#[test]
+fn layers_cycle_from_inherit_to_the_opposite_and_back() {
+    let entry = |shared, personal| Entry {
+        group: "mcp".into(),
+        name: "nixos".into(),
+        default: false,
+        shared,
+        personal,
+    };
+    assert_eq!(entry(None, None).next_choice(true), "enable");
+    assert_eq!(entry(Some(true), None).next_choice(true), "disable");
+    assert_eq!(entry(Some(false), None).next_choice(true), "inherit");
+    // Yours starts from the repository's choice.
+    assert_eq!(entry(Some(true), None).next_choice(false), "disable");
+    assert_eq!(entry(Some(true), Some(false)).next_choice(false), "enable");
+    assert_eq!(entry(Some(true), Some(true)).next_choice(false), "inherit");
+    let overridden = entry(Some(true), Some(false));
+    assert!(!overridden.enabled());
+    assert_eq!(overridden.origin(), "personal");
+}
