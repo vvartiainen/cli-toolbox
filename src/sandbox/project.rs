@@ -270,6 +270,7 @@ pub(crate) fn create(
         .then(setup::backlog_root)
         .flatten()
         .map(|root| root.join(&name));
+    let tools = setup::tools_dir();
     let settings = FlakeSettings {
         source: &source,
         name: &name,
@@ -278,6 +279,7 @@ pub(crate) fn create(
         key: key.as_deref(),
         proxy: options.proxy,
         backlog_dir: backlog_dir.as_deref(),
+        tools: tools.as_deref(),
     };
     fs::write(&flake, customize_flake(&text, &settings))?;
     project.write_worktrees(&[])?;
@@ -325,13 +327,15 @@ struct FlakeSettings<'a> {
     key: Option<&'a str>,
     proxy: bool,
     backlog_dir: Option<&'a Path>,
+    /// The personal tools flake, see [`setup::tools_dir`].
+    tools: Option<&'a Path>,
 }
 
 /// Point a template at `source` and the project's state, mount the
 /// generated worktrees, and apply guest paths and init steps to every
 /// worktree. Those name no worktree, so adding or removing one does not
-/// rebuild the guest system. Adds the cli-toolbox defaults module and the
-/// backlog folder.
+/// rebuild the guest system. Adds the cli-toolbox defaults module, the
+/// backlog folder and the personal tools flake.
 fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
     let mut named = false;
     let mut out: Vec<String> = text
@@ -340,10 +344,14 @@ fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
             let indent = &line[..line.len() - line.trim_start().len()];
             let trimmed = line.trim_start();
             if trimmed.starts_with("inputs.agent-sandbox.url =") {
-                format!(
+                let input = format!(
                     "{indent}inputs.agent-sandbox.url = {};",
                     nix_string(settings.source)
-                )
+                );
+                match settings.tools {
+                    Some(dir) => format!("{input}\n{}", setup::tools_input(dir, indent)),
+                    None => input,
+                }
             } else if !named && trimmed.starts_with("name = \"") {
                 named = true;
                 format!("{indent}name = {};", nix_string(settings.name))
@@ -656,6 +664,7 @@ mod tests {
             key,
             proxy: true,
             backlog_dir: Some(Path::new("/home/me/Agents/cli-toolbox")),
+            tools: Some(Path::new("/home/me/.config/agent-sandbox-tools")),
         }
     }
 
@@ -667,7 +676,8 @@ mod tests {
             &settings(state, Some("ssh-ed25519 AAAAC3 me@mac")),
         );
         for want in [
-            "  inputs.agent-sandbox.url = \"github:me/agent-sandbox\";",
+            "  inputs.agent-sandbox.url = \"github:me/agent-sandbox\";\n  # Personal guest tools",
+            "\n  inputs.agent-sandbox.inputs.tools.url = \"path:/home/me/.config/agent-sandbox-tools\";\n",
             "      name = \"cli-toolbox\";",
             "        workspaces = import ./worktrees.nix;",
             "        stateDir = \"/home/me/.agent-sandbox/state/cli-toolbox\";",
@@ -686,6 +696,11 @@ mod tests {
         assert!(text.ends_with("}\n"));
         // The runner authorizes its own key; no project needs one.
         assert!(!customize_flake(TEMPLATE, &settings(state, None)).contains("authorizedKeys"));
+        let without_tools = FlakeSettings {
+            tools: None,
+            ..settings(state, None)
+        };
+        assert!(!customize_flake(TEMPLATE, &without_tools).contains("inputs.tools"));
     }
 
     #[test]

@@ -436,6 +436,11 @@ at the top of the flake's `environment`:
   `$CLI_TOOLBOX_BACKLOG_ROOT/<project>`, by default the Obsidian `Agents` folder in
   iCloud when it exists. An empty `CLI_TOOLBOX_BACKLOG_ROOT` or `--no-backlog` leaves
   it out.
+- Your personal tools flake, the one agent-sandbox's `just build` and `just run`
+  use: `$AGENT_SANDBOX_TOOLS`, by default `~/.config/agent-sandbox-tools`, when it
+  has a `flake.nix`. The flake sets `inputs.agent-sandbox.inputs.tools.url` to it,
+  so `nix run .#start` builds the guest with it. The lock pins a copy; run
+  `nix flake update agent-sandbox/tools` in the project after changing the tools.
 
 `agent project setup` then does the host side of what the flake uses, and
 `project create` runs it:

@@ -5,7 +5,7 @@
 //! what the flake says, so it also works for existing projects.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::project::{self, Project};
 use crate::{Error, exec};
@@ -15,6 +15,11 @@ use crate::{Error, exec};
 pub(crate) const BACKLOG_ROOT_ENV: &str = "CLI_TOOLBOX_BACKLOG_ROOT";
 /// Used when it exists and `$CLI_TOOLBOX_BACKLOG_ROOT` is unset.
 const DEFAULT_BACKLOG_ROOT: &str = "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents";
+
+/// The personal tools flake agent-sandbox's justfile also uses.
+const TOOLS_ENV: &str = "AGENT_SANDBOX_TOOLS";
+/// Used when `$AGENT_SANDBOX_TOOLS` is unset.
+const DEFAULT_TOOLS_DIR: &str = ".config/agent-sandbox-tools";
 
 /// The agent-proxy services the defaults module's credentials come from.
 const PROXY_SERVICES: &str = "claude-code,codex";
@@ -31,6 +36,24 @@ pub(crate) fn backlog_root() -> Option<PathBuf> {
             .map(|home| home.join(DEFAULT_BACKLOG_ROOT))
             .filter(|root| root.is_dir()),
     }
+}
+
+/// The personal tools flake for new projects, if it has a `flake.nix`.
+pub(crate) fn tools_dir() -> Option<PathBuf> {
+    match std::env::var_os(TOOLS_ENV) {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => dirs::home_dir().map(|home| home.join(DEFAULT_TOOLS_DIR)),
+    }
+    .filter(|dir| dir.join("flake.nix").is_file())
+}
+
+/// The input line that replaces agent-sandbox's empty tools flake with `dir`.
+pub(crate) fn tools_input(dir: &Path, indent: &str) -> String {
+    let url = format!("path:{}", dir.to_string_lossy());
+    format!(
+        "{indent}# Personal guest tools; run `nix flake update agent-sandbox/tools` after changing them.\n{indent}inputs.agent-sandbox.inputs.tools.url = {};",
+        project::nix_string(&url)
+    )
 }
 
 /// The environment module `project create` adds: proxy credentials when
