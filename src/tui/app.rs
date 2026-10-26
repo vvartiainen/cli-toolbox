@@ -1854,7 +1854,7 @@ mod tests {
     use crate::git::Worktree;
     use crate::kitty::Choice;
     use crate::sandbox::RunnerState;
-    use crate::sandbox::project::{CreateOptions, SshKey};
+    use crate::sandbox::project::CreateOptions;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::path::PathBuf;
 
@@ -2178,7 +2178,7 @@ mod tests {
             repo: PathBuf::from("/p/demo"),
             template: Some("rust".into()),
             source: None,
-            ssh_key: SshKey::Auto,
+            ssh_key: None,
             proxy: true,
             backlog: false,
         }

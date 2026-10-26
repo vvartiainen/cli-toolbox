@@ -146,7 +146,7 @@ cli-toolbox agent project prune                   # clean up the remaining accep
 | Command | What it does |
 | --- | --- |
 | `agent project list` | Projects with VM state and SSH port, and their worktrees. |
-| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes your SSH public key and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Adds a cli-toolbox defaults module (see [Shared setup](#shared-setup)). Then runs `agent project setup` (`--no-proxy` and `--no-backlog` leave those out). The project has no worktree yet: add one with `agent project add`. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
+| `agent project create` | Creates `projects/<name>/flake.nix` with `nix flake init -t <agent-sandbox>#<template>` (`--template nodejs\|rust\|go`, default from the repository's files), points it at agent-sandbox (`--from`, or `CLI_TOOLBOX_AGENT_SANDBOX_FLAKE`), keeps state in `state/<name>`, picks an SSH port no other project uses (2300–2399), authorizes an extra SSH public key only with `--ssh-key` (agent-sandbox authorizes its own key per Mac) and mounts `worktrees.nix`; template `guestPaths` such as `app/target` become `*/target` (every worktree) and template init steps get `eachWorkspace = true`, so the guest system names no worktree and adding or removing one rebuilds only the host runner. Adds a cli-toolbox defaults module (see [Shared setup](#shared-setup)). Then runs `agent project setup` (`--no-proxy` and `--no-backlog` leave those out). The project has no worktree yet: add one with `agent project add`. `--ai [KIND]` starts a coding agent with agent-sandbox's `docs/setup-agent.md` to tailor the toolchain. Prints the project directory. |
 | `agent project tailor [project]` | Tailors an existing project's flake again: a coding agent (`--ai [KIND]`, default `CLI_TOOLBOX_AGENT` or claude) with agent-sandbox's `docs/setup-agent.md`, told that the flake may already be tailored so it updates it for repository changes rather than starting over, or the editor with `--edit`. A running VM uses the change after a restart. |
 | `agent project update [project]` | Runs `nix flake update` in the project directory, updating inputs such as agent-sandbox, and lets git track `flake.lock`. A running VM uses the update after a restart. |
 | `agent project setup [project]` | Sets up the host side of the flake's proxy credentials and backlog; see [Shared setup](#shared-setup). Safe to re-run. |
@@ -281,13 +281,10 @@ for example `host-review/<source>/main`. That integration remains under the
 agent's control; sync never silently rewrites its active checkout.
 
 The underlying guest fetch refs are `refs/remotes/sandbox-review/<source>/*`;
-you do not need them for normal review. Sync connects to the VM's loopback SSH
-port (`runner.json`) and pins its host key with the runner's
-`runtimeDir/known_hosts`, like agent-sandbox's `git-fetch`. Your `~/.ssh/config`
-still applies, so its `IdentityFile`/`IdentitiesOnly` for `127.0.0.1` choose the
-authorized key; otherwise ssh offers every SSH agent key and the guest may reject
-the connection with "Too many authentication failures". SSH must work
-noninteractively. No VM rebuild or external flake update is needed.
+you do not need them for normal review. The runner's `runtimeDir/ssh_config`
+supplies the connection, the runner's key and the VM's host key, so sync needs
+nothing from `~/.ssh` or an SSH agent. No VM rebuild or external flake update
+is needed.
 
 Transport/authentication failures still fail sync; other worktrees are attempted.
 Snapshots are created before sending host history, so they remain available even
@@ -469,10 +466,12 @@ whose project or flake directory was removed while it ran, where
 
 ### First-time setup
 
-1. Put your SSH public key in `authorizedKeys` (`project create` does this) and
-   load it in your SSH agent, because herdr reconnects without prompting.
-2. For herdr to reuse each VM's host key, add this once at the top of
-   `~/.ssh/config`:
+1. No SSH key setup: on each Mac, agent-sandbox's runner makes its own key
+   (`~/.local/state/agent-sandbox/ssh/id_ed25519`) and authorizes it at every
+   VM start, so the same project flake works on several Macs. cli-toolbox
+   connects with the runner's `ssh_config`.
+2. herdr runs plain `ssh <machine>`, so for it to log in with that key and
+   each VM's host key, add this once at the top of `~/.ssh/config`:
 
    ```sshconfig
    Include ~/.local/state/agent-sandbox/vms/*/ssh_config
@@ -494,8 +493,7 @@ whose project or flake directory was removed while it ran, where
 
 - cli-toolbox never reads Nix internals. VM setup runs `nix run .#<app>` in the
   project directory and reads `runner.json`; history exchange runs ordinary Git
-  over SSH to the recorded loopback port, pinned to the runtime directory's
-  `known_hosts`. `agent vm stop`
+  over SSH using the recorded runtime directory's `ssh_config`. `agent vm stop`
   signals the recorded runner, as the `stop` app does.
 - `vm.workspaces` and `stateDir` are fixed when the flake is built, so mounting a
   new worktree needs a VM restart. cli-toolbox remembers what the running VM

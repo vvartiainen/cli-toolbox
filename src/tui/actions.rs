@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::agent::prune;
 use crate::agent::vm::{self, VmOptions};
 use crate::azure::{self, AccountAction, Az, AzCli};
-use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
+use crate::sandbox::project::{self, CreateOptions, Project};
 use crate::{Error, agent, aws, git, kitty, ssh};
 
 use super::app::{Action, NewProject, Resource, Tailor, ToolId};
@@ -456,7 +456,7 @@ fn project_defaults(cwd: &Path) -> Result<CreateOptions, Error> {
         name: Some(project::project_name(&repo)),
         template: Some(project::detect_template(&repo).into()),
         source: None,
-        ssh_key: SshKey::Auto,
+        ssh_key: None,
         proxy: true,
         backlog: crate::sandbox::setup::backlog_root().is_some(),
         repo,

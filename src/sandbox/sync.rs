@@ -47,45 +47,32 @@ impl Bridge {
             return Err(Error::msg("invalid VM or workspace name for Git exchange"));
         }
         let source = source_id(&vm.dir, worktree);
-        let port = vm
-            .ssh_port
-            .ok_or_else(|| Error::msg("the VM has no SSH port; enable ssh in its flake"))?;
-        let known_hosts = vm.runtime_dir.join("known_hosts");
-        let known_hosts = known_hosts
+        let config = vm.runtime_dir.join("ssh_config");
+        let config = config
             .to_str()
-            .ok_or_else(|| Error::msg("SSH known_hosts path must be UTF-8"))?;
-        // Connect to the loopback port like agent-sandbox's git apps, so the
-        // user's ssh config still picks the identity authorized for the VM;
-        // `-F` would skip it and offer every agent key until sshd gives up.
-        let options = [
-            "-o".to_string(),
-            format!("HostKeyAlias={}", vm.name),
-            "-o".into(),
-            format!("UserKnownHostsFile={known_hosts}"),
-            "-o".into(),
-            "StrictHostKeyChecking=yes".into(),
-            "-o".into(),
-            "BatchMode=yes".into(),
-            "-o".into(),
-            "ConnectTimeout=10".into(),
-        ];
-        let mut ssh_args = options.to_vec();
-        ssh_args.extend([
-            "-p".into(),
-            port.to_string(),
-            "--".into(),
-            "agent@127.0.0.1".into(),
-        ]);
-        let ssh_command = std::iter::once("ssh".to_string())
-            .chain(options.iter().map(|option| shell_quote(option)))
-            .collect::<Vec<_>>()
-            .join(" ");
+            .ok_or_else(|| Error::msg("SSH config path must be UTF-8"))?;
         Ok(Self {
-            remote: format!("ssh://agent@127.0.0.1:{port}/workspace/{worktree}"),
+            remote: format!("{}:/workspace/{worktree}", vm.name),
             source,
             workspace: worktree.into(),
-            ssh_args,
-            ssh_command: Some(ssh_command),
+            ssh_args: [
+                "-F",
+                config,
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "--",
+                &vm.name,
+            ]
+            .map(String::from)
+            .to_vec(),
+            ssh_command: Some(format!(
+                "ssh -F {} -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes",
+                shell_quote(config)
+            )),
         })
     }
 
@@ -937,12 +924,11 @@ mod tests {
     }
 
     #[test]
-    fn ssh_pins_the_vm_host_key_without_prompting() {
+    fn ssh_uses_the_runner_config_without_prompting() {
         let vm = super::super::RunnerState {
             name: "agent-demo".into(),
             dir: "/projects/demo".into(),
             runtime_dir: "/state/VM's runtime".into(),
-            ssh_port: Some(2300),
             ..Default::default()
         };
         let bridge = Bridge::for_vm(&vm, "demo-agent-wt").unwrap();
@@ -950,29 +936,11 @@ mod tests {
             bridge.source,
             Bridge::for_vm(&vm, "demo-agent-wt-2").unwrap().source
         );
-        assert_eq!(
-            bridge.remote,
-            "ssh://agent@127.0.0.1:2300/workspace/demo-agent-wt"
-        );
+        assert_eq!(bridge.remote, "agent-demo:/workspace/demo-agent-wt");
         let ssh = bridge.ssh_command.unwrap();
-        assert!(!ssh.contains("-F"));
         assert!(ssh.contains("BatchMode=yes"));
         assert!(ssh.contains("StrictHostKeyChecking=yes"));
-        assert!(ssh.contains("HostKeyAlias=agent-demo"));
-        assert!(ssh.contains(&crate::aws::shell_quote(
-            "UserKnownHostsFile=/state/VM's runtime/known_hosts"
-        )));
-        assert!(bridge.ssh_args.ends_with(&[
-            "-p".into(),
-            "2300".into(),
-            "--".into(),
-            "agent@127.0.0.1".into()
-        ]));
+        assert!(ssh.contains(&crate::aws::shell_quote("/state/VM's runtime/ssh_config")));
         assert!(Bridge::for_vm(&vm, "../escape").is_err());
-        let no_ssh = super::super::RunnerState {
-            ssh_port: None,
-            ..vm
-        };
-        assert!(Bridge::for_vm(&no_ssh, "demo-agent-wt").is_err());
     }
 }

@@ -1384,7 +1384,7 @@ mod tests {
             repo: PathBuf::from("/p/demo"),
             template: Some("rust".into()),
             source: None,
-            ssh_key: crate::sandbox::project::SshKey::Auto,
+            ssh_key: None,
             proxy: true,
             backlog: false,
         }));

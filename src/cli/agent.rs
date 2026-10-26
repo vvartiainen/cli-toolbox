@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use crate::agent::Launch;
 use crate::agent::prune::{self, PruneOptions};
 use crate::agent::vm::{self, VmOptions};
-use crate::sandbox::project::{self, CreateOptions, Project, SshKey};
+use crate::sandbox::project::{self, CreateOptions, Project};
 use crate::{Error, agent, git};
 
 /// The default agent kind for `--agent`.
@@ -63,12 +63,9 @@ enum ProjectCommands {
         /// agent-sandbox flake reference to use.
         #[arg(long, value_name = "FLAKE")]
         from: Option<String>,
-        /// SSH public key to authorize (default: the ssh config's IdentityFile for the VM, ~/.ssh/*.pub, then the SSH agent).
-        #[arg(long, value_name = "PATH", conflicts_with = "no_ssh_key")]
+        /// An extra SSH public key to authorize. Not needed: agent-sandbox authorizes a key of its own on every Mac.
+        #[arg(long, value_name = "PATH")]
         ssh_key: Option<PathBuf>,
-        /// Keep the template's placeholder key.
-        #[arg(long)]
-        no_ssh_key: bool,
         /// Let a coding agent tailor the flake: optionally the agent kind (default: $CLI_TOOLBOX_AGENT or claude).
         #[arg(long, value_name = "KIND", num_args = 0..=1, default_missing_value = "")]
         ai: Option<String>,
@@ -289,7 +286,6 @@ fn run_project(
             template,
             from,
             ssh_key,
-            no_ssh_key,
             ai,
             no_proxy,
             no_backlog,
@@ -299,11 +295,7 @@ fn run_project(
                 repo: git::main_checkout(&working_dir()?)?,
                 template,
                 source: from,
-                ssh_key: match (ssh_key, no_ssh_key) {
-                    (Some(path), _) => SshKey::File(path),
-                    (None, true) => SshKey::None,
-                    (None, false) => SshKey::Auto,
-                },
+                ssh_key,
                 proxy: !no_proxy,
                 backlog: !no_backlog,
             };

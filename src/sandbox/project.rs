@@ -22,7 +22,8 @@ const DEFAULT_SOURCE: &str = "git+ssh://git@github.com/vvartiainen/agent-sandbox
 
 pub(crate) const TEMPLATES: [&str; 3] = ["nodejs", "rust", "go"];
 
-/// The placeholder key in the agent-sandbox templates.
+/// The placeholder key in agent-sandbox templates from before the runner
+/// authorized its own key.
 const KEY_PLACEHOLDER: &str = "ssh-ed25519 AAAA... your-key-comment";
 
 /// Instructions for an agent that tailors the flake, in the agent-sandbox repo.
@@ -201,15 +202,6 @@ pub(crate) fn resolve(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SshKey {
-    /// The ssh config's IdentityFile for the VM's port, `~/.ssh/*.pub`,
-    /// then the first key of the SSH agent.
-    Auto,
-    File(PathBuf),
-    None,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CreateOptions {
     /// Defaults to the repository's directory name.
     pub(crate) name: Option<String>,
@@ -219,7 +211,9 @@ pub(crate) struct CreateOptions {
     pub(crate) template: Option<String>,
     /// The agent-sandbox flake reference.
     pub(crate) source: Option<String>,
-    pub(crate) ssh_key: SshKey,
+    /// An extra public key to authorize. The runner authorizes its own key
+    /// for every Mac, so a project needs none.
+    pub(crate) ssh_key: Option<PathBuf>,
     /// Take agent credentials from agent-proxy on the host.
     pub(crate) proxy: bool,
     /// Give the project a backlog under [`setup::backlog_root`], if there is one.
@@ -265,17 +259,11 @@ pub(crate) fn create(
         &[],
     )?;
 
-    let key = match &options.ssh_key {
-        SshKey::Auto => find_public_key(port),
-        SshKey::File(path) => Some(read_public_key(path)?),
-        SshKey::None => None,
-    };
-    if key.is_none() && options.ssh_key == SshKey::Auto {
-        writeln!(
-            stderr,
-            "No SSH public key found; replace the placeholder in authorizedKeys before starting the VM."
-        )?;
-    }
+    let key = options
+        .ssh_key
+        .as_deref()
+        .map(read_public_key)
+        .transpose()?;
     let text = fs::read_to_string(&flake)?;
     let backlog_dir = options
         .backlog
@@ -389,6 +377,11 @@ fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
                 format!("{indent}{paths}")
             } else if trimmed.starts_with("init.steps.") && trimmed.ends_with("= {") {
                 format!("{line}\n{indent}  eachWorkspace = true;")
+            } else if let (Some(key), "ssh.enable = true;") = (settings.key, trimmed) {
+                format!(
+                    "{line}\n{indent}ssh.authorizedKeys = [ {} ];",
+                    nix_string(key)
+                )
             } else {
                 line.to_string()
             }
@@ -532,66 +525,6 @@ pub(crate) fn project_name(repo: &Path) -> String {
     }
 }
 
-/// The identity files ssh config sets for the VM's loopback port come first,
-/// since with `IdentitiesOnly` ssh offers nothing else.
-fn find_public_key(port: u16) -> Option<String> {
-    let home = dirs::home_dir()?;
-    let configured = exec::combined_output(
-        "ssh",
-        &["-G", "-p", &port.to_string(), "agent@127.0.0.1"],
-        None,
-    )
-    .map(|config| configured_identity_files(&config, &home))
-    .unwrap_or_default();
-    let ssh = home.join(".ssh");
-    configured
-        .iter()
-        .find_map(|identity| {
-            let mut public = identity.clone().into_os_string();
-            public.push(".pub");
-            read_public_key(Path::new(&public)).ok()
-        })
-        .or_else(|| {
-            ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"]
-                .iter()
-                .find_map(|file| read_public_key(&ssh.join(file)).ok())
-        })
-        .or_else(|| {
-            exec::combined_output("ssh-add", &["-L"], None)
-                .ok()?
-                .lines()
-                .find(|line| line.starts_with("ssh-"))
-                .map(str::to_string)
-        })
-}
-
-/// The `identityfile` entries of `ssh -G` output, with `~` expanded, or none
-/// when they are just ssh's defaults.
-fn configured_identity_files(config: &str, home: &Path) -> Vec<PathBuf> {
-    const DEFAULTS: [&str; 5] = [
-        "~/.ssh/id_rsa",
-        "~/.ssh/id_ecdsa",
-        "~/.ssh/id_ecdsa_sk",
-        "~/.ssh/id_ed25519",
-        "~/.ssh/id_ed25519_sk",
-    ];
-    let files: Vec<&str> = config
-        .lines()
-        .filter_map(|line| line.strip_prefix("identityfile "))
-        .map(str::trim)
-        .collect();
-    if files == DEFAULTS {
-        return Vec::new();
-    }
-    files
-        .into_iter()
-        .map(|file| match file.strip_prefix("~/") {
-            Some(rest) => home.join(rest),
-            None => PathBuf::from(file),
-        })
-        .collect()
-}
-
 fn read_public_key(path: &Path) -> Result<String, Error> {
     let text = fs::read_to_string(path)
         .map_err(|err| Error::msg(format!("read {}: {err}", path.display())))?;
@@ -701,7 +634,7 @@ mod tests {
           init.steps.cargo-fetch = {
             script = "cargo fetch";
           };
-          ssh.authorizedKeys = [ "ssh-ed25519 AAAA... your-key-comment" ];
+          ssh.enable = true;
           name = "other";
         })
       ];
@@ -741,7 +674,7 @@ mod tests {
             "        ssh.hostPort = 2305;",
             "          guestPaths = [ \"*/target\" \"*/.venv\" ];",
             "          init.steps.cargo-fetch = {\n            eachWorkspace = true;\n",
-            "\"ssh-ed25519 AAAAC3 me@mac\"",
+            "          ssh.enable = true;\n          ssh.authorizedKeys = [ \"ssh-ed25519 AAAAC3 me@mac\" ];",
             "name = \"other\"",
             "      environment = [\n        # cli-toolbox defaults",
             "          proxy = {\n            enable = true;\n            client = \"cli-toolbox\";",
@@ -751,7 +684,20 @@ mod tests {
             assert!(text.contains(want), "missing {want}:\n{text}");
         }
         assert!(text.ends_with("}\n"));
-        assert!(customize_flake(TEMPLATE, &settings(state, None)).contains(KEY_PLACEHOLDER));
+        // The runner authorizes its own key; no project needs one.
+        assert!(!customize_flake(TEMPLATE, &settings(state, None)).contains("authorizedKeys"));
+    }
+
+    #[test]
+    fn an_extra_key_replaces_an_older_template_placeholder() {
+        let state = Path::new("/home/me/.agent-sandbox/state/cli-toolbox");
+        let older = TEMPLATE.replace(
+            "ssh.enable = true;",
+            &format!("ssh.authorizedKeys = [ \"{KEY_PLACEHOLDER}\" ];"),
+        );
+        let text = customize_flake(&older, &settings(state, Some("ssh-ed25519 AAAAC3 me@mac")));
+        assert!(text.contains("ssh.authorizedKeys = [ \"ssh-ed25519 AAAAC3 me@mac\" ];"));
+        assert!(!text.contains(KEY_PLACEHOLDER));
     }
 
     #[test]
@@ -878,20 +824,5 @@ mod tests {
         assert_eq!(read_public_key(&key).unwrap(), "ssh-ed25519 AAAAC3 me@mac");
         fs::write(&key, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
         assert!(read_public_key(&key).is_err());
-    }
-
-    #[test]
-    fn configured_identity_files_come_from_ssh_config() {
-        let home = Path::new("/home/me");
-        let configured = "user agent\nidentitiesonly yes\nidentityfile ~/.ssh/agent-sandbox-key\nidentityfile /keys/other\n";
-        assert_eq!(
-            configured_identity_files(configured, home),
-            [
-                PathBuf::from("/home/me/.ssh/agent-sandbox-key"),
-                PathBuf::from("/keys/other"),
-            ]
-        );
-        let defaults = "identityfile ~/.ssh/id_rsa\nidentityfile ~/.ssh/id_ecdsa\nidentityfile ~/.ssh/id_ecdsa_sk\nidentityfile ~/.ssh/id_ed25519\nidentityfile ~/.ssh/id_ed25519_sk\n";
-        assert!(configured_identity_files(defaults, home).is_empty());
     }
 }

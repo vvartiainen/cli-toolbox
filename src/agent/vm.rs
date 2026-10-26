@@ -346,8 +346,12 @@ fn stopped_step(vm: &RunnerState, stopped: sandbox::Stopped) -> Step {
     }
 }
 
-fn remove_herdr_machine(machine: &str) -> Option<Step> {
-    herdr::available().then(|| match herdr::remove_machine(machine) {
+fn remove_herdr_machine(vm: &RunnerState) -> Option<Step> {
+    let machine = &vm.name;
+    let config = vm.runtime_dir.join("ssh_config");
+    let config = config.is_file().then_some(config);
+    let config = config.as_deref().and_then(Path::to_str);
+    herdr::available().then(|| match herdr::remove_machine(machine, config) {
         Ok(true) => Step::Done(format!("herdr: removed machine {machine}")),
         Ok(false) => Step::Skipped(format!("herdr: machine {machine} not saved")),
         Err(err) => Step::Failed(format!("herdr: remove machine {machine}: {err}")),
@@ -423,7 +427,7 @@ fn pick_vms(
 pub(crate) fn vm_stop(vm: &RunnerState) -> Vec<Step> {
     vm_stop_with(
         vm,
-        || remove_herdr_machine(&vm.name),
+        || remove_herdr_machine(vm),
         || sandbox::stop_vm(vm, sandbox::stop_timeout()),
     )
 }

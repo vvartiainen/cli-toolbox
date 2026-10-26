@@ -168,12 +168,17 @@ fn kinds_in(help: &str) -> Vec<String> {
 /// Reset the saved machine's remote session, then remove its profile. Call
 /// before shutting down the VM: removing a profile alone leaves the guest's
 /// persistent session available for restoration. Returns whether one was saved.
-pub(crate) fn remove_machine(label: &str) -> Result<bool, Error> {
-    remove_machine_with(label, exec::captured_stdout)
+///
+/// `ssh_config` is the running VM's runtime `ssh_config`, whose `Host <label>`
+/// entry logs in with the runner's key; without it, the profile's target
+/// relies on the user's ssh config.
+pub(crate) fn remove_machine(label: &str, ssh_config: Option<&str>) -> Result<bool, Error> {
+    remove_machine_with(label, ssh_config, exec::captured_stdout)
 }
 
 fn remove_machine_with(
     label: &str,
+    ssh_config: Option<&str>,
     mut run: impl FnMut(&str, &[&str]) -> Result<String, Error>,
 ) -> Result<bool, Error> {
     let json = run("herdr", &["machine", "list", "--json"])?;
@@ -181,19 +186,31 @@ fn remove_machine_with(
         return Ok(false);
     };
     // Session management is not forwarded by `herdr --machine`. Use the
-    // profile's SSH target and session, not the caller's local Herdr context.
+    // profile's session, not the caller's local Herdr context.
     let sessions = run(
         "ssh",
-        &over_ssh(&machine.target, "herdr session list --json"),
+        &over_ssh(&machine, ssh_config, "herdr session list --json"),
     )?;
     let reset = reset_command(&sessions, &machine.session)?;
-    run("ssh", &over_ssh(&machine.target, &reset))?;
+    run("ssh", &over_ssh(&machine, ssh_config, &reset))?;
     run("herdr", &["machine", "remove", &machine.id])?;
     Ok(true)
 }
 
-fn over_ssh<'a>(target: &'a str, command: &'a str) -> [&'a str; 7] {
-    [
+fn over_ssh<'a>(
+    machine: &'a SavedMachine,
+    ssh_config: Option<&'a str>,
+    command: &'a str,
+) -> Vec<&'a str> {
+    let mut args = Vec::new();
+    let target = match ssh_config {
+        Some(config) => {
+            args.extend(["-F", config]);
+            machine.label.as_str()
+        }
+        None => machine.target.as_str(),
+    };
+    args.extend([
         "-o",
         "BatchMode=yes",
         "-o",
@@ -201,7 +218,8 @@ fn over_ssh<'a>(target: &'a str, command: &'a str) -> [&'a str; 7] {
         "--",
         target,
         command,
-    ]
+    ]);
+    args
 }
 
 /// A shell command that stops `name` and discards its saved layout. The
@@ -413,7 +431,7 @@ mod tests {
     #[test]
     fn resets_the_remote_session_before_removing_its_machine() {
         let mut calls = Vec::new();
-        let removed = remove_machine_with("agent-demo", |program, args| {
+        let removed = remove_machine_with("agent-demo", None, |program, args| {
             calls.push((program.to_string(), args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()));
             Ok(if args == ["machine", "list", "--json"] {
                 r#"[{"id":"vm-id","label":"agent-demo","target":"ssh://agent@localhost:2300","session":"default"}]"#.into()
@@ -460,7 +478,7 @@ mod tests {
     #[test]
     fn reset_uses_only_the_selected_profile_and_quotes_its_session() {
         let mut reset = String::new();
-        remove_machine_with("agent-demo", |program, args| {
+        remove_machine_with("agent-demo", None, |program, args| {
             if program == "herdr" && args == ["machine", "list", "--json"] {
                 return Ok(r#"[
                     {"id":"other","label":"other","target":"other-host","session":"other"},
@@ -488,10 +506,34 @@ mod tests {
     }
 
     #[test]
+    fn reset_logs_in_through_the_runner_config_when_given() {
+        let mut targets = Vec::new();
+        remove_machine_with(
+            "agent-demo",
+            Some("/state/VM's runtime/ssh_config"),
+            |program, args| {
+                if program == "herdr" && args == ["machine", "list", "--json"] {
+                    return Ok(r#"[{"id":"vm-id","label":"agent-demo","target":"ssh://agent@127.0.0.1:2300","session":"default"}]"#.into());
+                }
+                if program == "ssh" {
+                    assert_eq!(&args[..2], ["-F", "/state/VM's runtime/ssh_config"]);
+                    targets.push(args[7].to_string());
+                    if args[8] == "herdr session list --json" {
+                        return Ok(GUEST_SESSIONS.into());
+                    }
+                }
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+        assert_eq!(targets, ["agent-demo", "agent-demo"]);
+    }
+
+    #[test]
     fn missing_machine_needs_no_cleanup() {
         let mut calls = 0;
         assert!(
-            !remove_machine_with("missing", |_, _| {
+            !remove_machine_with("missing", None, |_, _| {
                 calls += 1;
                 Ok("[]".into())
             })
@@ -503,7 +545,7 @@ mod tests {
     #[test]
     fn failed_reset_keeps_the_machine_and_reports_the_error() {
         let mut calls = 0;
-        let result = remove_machine_with("agent-demo", |_, _| {
+        let result = remove_machine_with("agent-demo", None, |_, _| {
             calls += 1;
             if calls == 1 {
                 Ok(
