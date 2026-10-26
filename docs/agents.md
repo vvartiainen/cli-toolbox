@@ -281,9 +281,13 @@ for example `host-review/<source>/main`. That integration remains under the
 agent's control; sync never silently rewrites its active checkout.
 
 The underlying guest fetch refs are `refs/remotes/sandbox-review/<source>/*`;
-you do not need them for normal review. The runner's `runtimeDir/ssh_config`
-supplies the connection and host key. Load the authorized key in your SSH agent:
-SSH must work noninteractively. No VM rebuild or external flake update is needed.
+you do not need them for normal review. Sync connects to the VM's loopback SSH
+port (`runner.json`) and pins its host key with the runner's
+`runtimeDir/known_hosts`, like agent-sandbox's `git-fetch`. Your `~/.ssh/config`
+still applies, so its `IdentityFile`/`IdentitiesOnly` for `127.0.0.1` choose the
+authorized key; otherwise ssh offers every SSH agent key and the guest may reject
+the connection with "Too many authentication failures". SSH must work
+noninteractively. No VM rebuild or external flake update is needed.
 
 Transport/authentication failures still fail sync; other worktrees are attempted.
 Snapshots are created before sending host history, so they remain available even
@@ -490,7 +494,8 @@ whose project or flake directory was removed while it ran, where
 
 - cli-toolbox never reads Nix internals. VM setup runs `nix run .#<app>` in the
   project directory and reads `runner.json`; history exchange runs ordinary Git
-  over SSH using the recorded runtime directory's `ssh_config`. `agent vm stop`
+  over SSH to the recorded loopback port, pinned to the runtime directory's
+  `known_hosts`. `agent vm stop`
   signals the recorded runner, as the `stop` app does.
 - `vm.workspaces` and `stateDir` are fixed when the flake is built, so mounting a
   new worktree needs a VM restart. cli-toolbox remembers what the running VM
