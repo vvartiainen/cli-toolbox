@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::agent::Launch;
 use crate::agent::prune::{PruneOptions, Report};
 use crate::agent::vm::ProjectStatus;
+use crate::agents::Entry;
 use crate::aws::Profile;
 use crate::azure::{AccountAction, Subscription};
 use crate::git::Worktree;
@@ -91,6 +92,7 @@ pub(crate) enum ToolId {
     AzureSubscription,
     AzureAccount,
     GitWorktrees,
+    AgentTools,
     SandboxProjects,
     SandboxVms,
     KittySession,
@@ -98,11 +100,12 @@ pub(crate) enum ToolId {
 }
 
 impl ToolId {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::AwsProfile,
         Self::AzureSubscription,
         Self::AzureAccount,
         Self::GitWorktrees,
+        Self::AgentTools,
         Self::SandboxProjects,
         Self::SandboxVms,
         Self::KittySession,
@@ -113,7 +116,7 @@ impl ToolId {
         match self {
             Self::AwsProfile => Category::Aws,
             Self::AzureSubscription | Self::AzureAccount => Category::Azure,
-            Self::GitWorktrees => Category::Git,
+            Self::GitWorktrees | Self::AgentTools => Category::Git,
             Self::SandboxProjects | Self::SandboxVms => Category::Sandbox,
             Self::KittySession | Self::SshConnect => Category::Terminal,
         }
@@ -127,6 +130,7 @@ impl ToolId {
             Self::KittySession => "Switch Kitty session",
             Self::SshConnect => "SSH connect",
             Self::GitWorktrees => "Worktrees",
+            Self::AgentTools => "Agent tools",
             Self::SandboxProjects => "Projects",
             Self::SandboxVms => "VMs",
         }
@@ -144,6 +148,7 @@ impl ToolId {
             Self::GitWorktrees => {
                 "Create, inspect, cd into or remove git worktrees in ~/.worktrees"
             }
+            Self::AgentTools => "MCP servers and skills of this repository: enable, disable, sync",
             Self::SandboxProjects => {
                 "Project VMs in ~/.agent-sandbox: create, start, add worktrees, sync"
             }
@@ -159,6 +164,7 @@ impl ToolId {
             Self::KittySession => "Kitty sessions",
             Self::SshConnect => "SSH hosts",
             Self::GitWorktrees => "Git worktrees",
+            Self::AgentTools => "Agent tools",
             Self::SandboxProjects => "Sandbox projects",
             Self::SandboxVms => "Running VMs",
         }
@@ -176,6 +182,27 @@ pub(crate) enum Resource {
     Worktree(Worktree),
     Project(Box<ProjectStatus>),
     Vm(Box<RunnerState>),
+    Agent(AgentRow),
+}
+
+/// A row of the agent tools list: `ct agents` state of the launch directory's
+/// repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AgentRow {
+    /// Whether generated files match the choices.
+    Sync(bool),
+    /// Whether generated files are kept out of Git.
+    Exclude(bool),
+    Choice(Entry),
+}
+
+/// A `ct agents` choice the TUI saves in place, without syncing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AgentChange {
+    /// Group, name, `enable`/`disable`/`inherit`, and whether to save it in
+    /// the shared choices.
+    Choice(String, String, &'static str, bool),
+    Exclude(bool),
 }
 
 impl Resource {
@@ -189,6 +216,9 @@ impl Resource {
             Self::Worktree(worktree) => worktree_label(worktree),
             Self::Project(status) => status.project.name.clone(),
             Self::Vm(vm) => vm.name.clone(),
+            Self::Agent(AgentRow::Sync(_)) => "sync".into(),
+            Self::Agent(AgentRow::Exclude(_)) => "exclude generated files".into(),
+            Self::Agent(AgentRow::Choice(entry)) => format!("{} {}", entry.group, entry.name),
         }
     }
 
@@ -204,6 +234,7 @@ impl Resource {
             Self::Worktree(worktree) => ResourceIdentity::Path(worktree.path.clone()),
             Self::Project(status) => ResourceIdentity::Path(status.project.dir.clone()),
             Self::Vm(vm) => ResourceIdentity::Path(vm.runtime_dir.clone()),
+            Self::Agent(_) => ResourceIdentity::String(self.label()),
         }
     }
 
@@ -218,6 +249,7 @@ impl Resource {
                 | (ToolId::GitWorktrees, Self::Worktree(_))
                 | (ToolId::SandboxProjects, Self::Project(_))
                 | (ToolId::SandboxVms, Self::Vm(_))
+                | (ToolId::AgentTools, Self::Agent(_))
         )
     }
 }
@@ -264,6 +296,8 @@ pub(crate) enum Action {
     StopVm(PathBuf),
     /// Remove the runtime directories of stopped VMs whose start directory is gone.
     PruneVms,
+    /// `ct agents sync`, or its preview with `true`.
+    SyncAgents(bool),
 }
 
 /// How to tailor a new project's flake.
@@ -316,6 +350,7 @@ impl Action {
             | Self::EnterProjectWorktree(_)
             | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
+            Self::SyncAgents(_) => Some(ToolId::AgentTools),
             Self::Aws(_)
             | Self::AzureSubscription(_)
             | Self::AzureAccount(_)
@@ -351,6 +386,8 @@ pub(crate) enum Effect {
     /// Look up what a form needs before it opens; see [`Prepare`].
     Prepare(Prepare),
     Execute(Action),
+    /// Save an agent tools choice, then reload the list.
+    ChangeAgents(AgentChange),
     Quit,
 }
 
@@ -1179,6 +1216,9 @@ impl App {
         if let Some(effect) = self.handle_vm_picker_key(key) {
             return effect;
         }
+        if let Some(effect) = self.handle_agents_picker_key(key) {
+            return effect;
+        }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
         {
@@ -1324,6 +1364,44 @@ impl App {
             (KeyCode::Char('r'), Some(status)) => self.confirm_vm(&status, VmChange::Restart),
             (KeyCode::Char('x'), Some(status)) => self.confirm_vm(&status, VmChange::Stop),
             (KeyCode::Char('s' | 'r' | 'x'), None) => Effect::None,
+            _ => return None,
+        };
+        self.loading = None;
+        Some(effect)
+    }
+
+    /// Enter and Ctrl shortcuts of the agent tools list. Plain keys filter it.
+    fn handle_agents_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        let picker = self
+            .picker()
+            .filter(|picker| picker.tool == ToolId::AgentTools)?;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let row = match picker.selected_resource() {
+            Some(Resource::Agent(row)) => Some(row.clone()),
+            _ => None,
+        };
+        let toggle = |entry: &Entry, shared| {
+            let choice = if entry.enabled { "disable" } else { "enable" };
+            AgentChange::Choice(entry.group.clone(), entry.name.clone(), choice, shared)
+        };
+        let effect = match (key.code, ctrl, row) {
+            (KeyCode::Char('s'), true, _) | (KeyCode::Enter, false, Some(AgentRow::Sync(_))) => {
+                Effect::Execute(Action::SyncAgents(false))
+            }
+            (KeyCode::Char('d'), true, _) => Effect::Execute(Action::SyncAgents(true)),
+            (KeyCode::Enter, false, Some(AgentRow::Exclude(on))) => {
+                Effect::ChangeAgents(AgentChange::Exclude(!on))
+            }
+            (KeyCode::Enter, false, Some(AgentRow::Choice(entry))) => {
+                Effect::ChangeAgents(toggle(&entry, false))
+            }
+            (KeyCode::Char('t'), true, Some(AgentRow::Choice(entry))) => {
+                Effect::ChangeAgents(toggle(&entry, true))
+            }
+            (KeyCode::Char('r'), true, Some(AgentRow::Choice(entry))) => Effect::ChangeAgents(
+                AgentChange::Choice(entry.group, entry.name, "inherit", false),
+            ),
+            (KeyCode::Enter, false, None) | (KeyCode::Char('t' | 'r'), true, _) => Effect::None,
             _ => return None,
         };
         self.loading = None;
@@ -1925,13 +2003,14 @@ pub(crate) fn branch_label(worktree: &Worktree) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, App, Category, Effect, NewProject, NewWorktree, Prepare, Resource, Screen, Tailor,
-        ToolId,
+        Action, AgentChange, AgentRow, App, Category, Effect, NewProject, NewWorktree, Prepare,
+        Resource, Screen, Tailor, ToolId,
     };
     use crate::agent::Launch;
     use crate::agent::Step;
     use crate::agent::prune::{PruneOptions, Report};
     use crate::agent::vm::ProjectStatus;
+    use crate::agents::Entry;
     use crate::aws::Profile;
     use crate::git::Worktree;
     use crate::kitty::Choice;
@@ -2088,7 +2167,7 @@ mod tests {
         app.handle_key(key(KeyCode::Char('g')));
         assert_eq!(app.category, Category::Git);
         // Numbers beyond the category's actions do nothing.
-        assert_eq!(app.handle_key(key(KeyCode::Char('2'))), Effect::None);
+        assert_eq!(app.handle_key(key(KeyCode::Char('3'))), Effect::None);
         assert_eq!(
             app.handle_key(key(KeyCode::Char('1'))),
             Effect::Load(ToolId::GitWorktrees)
@@ -2522,6 +2601,86 @@ mod tests {
         assert_eq!(action.project_to_open(), Some("demo"));
         app.confirm_prune("demo".into(), Err("no main branch".into()));
         assert!(matches!(&app.screen, Screen::Result(result) if result.failed));
+    }
+
+    fn agent_rows() -> Vec<Resource> {
+        let entry = |group: &str, name: &str, enabled| {
+            Resource::Agent(AgentRow::Choice(Entry {
+                group: group.into(),
+                name: name.into(),
+                enabled,
+                origin: "default",
+            }))
+        };
+        vec![
+            Resource::Agent(AgentRow::Sync(false)),
+            Resource::Agent(AgentRow::Exclude(false)),
+            entry("mcp", "nixos", false),
+            entry("skills", "review", true),
+        ]
+    }
+
+    #[test]
+    fn agent_tools_toggle_choices_and_sync() {
+        let mut app = App::new("/repo".into());
+        app.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('2'))),
+            Effect::Load(ToolId::AgentTools)
+        );
+        app.loaded(ToolId::AgentTools, Ok(agent_rows()));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Execute(Action::SyncAgents(false))
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::ChangeAgents(AgentChange::Exclude(true))
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::ChangeAgents(AgentChange::Choice(
+                "mcp".into(),
+                "nixos".into(),
+                "enable",
+                false
+            ))
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.handle_key(ctrl('t')),
+            Effect::ChangeAgents(AgentChange::Choice(
+                "skills".into(),
+                "review".into(),
+                "disable",
+                true
+            ))
+        );
+        assert_eq!(
+            app.handle_key(ctrl('r')),
+            Effect::ChangeAgents(AgentChange::Choice(
+                "skills".into(),
+                "review".into(),
+                "inherit",
+                false
+            ))
+        );
+        assert_eq!(
+            app.handle_key(ctrl('d')),
+            Effect::Execute(Action::SyncAgents(true))
+        );
+        // Plain keys still filter the list.
+        app.handle_key(key(KeyCode::Char('n')));
+        let Screen::Picker(picker) = &app.screen else {
+            panic!("expected the agent tools list");
+        };
+        assert_eq!(picker.query, "n");
+        assert_eq!(
+            Action::SyncAgents(false).return_tool(),
+            Some(ToolId::AgentTools)
+        );
     }
 
     #[test]

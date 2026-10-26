@@ -5,9 +5,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
 use super::app::{
-    App, Category, ConfirmState, DetailsState, FormField, LaunchForm, MenuState, NewWorktree,
-    PickerState, ProjectCommand, ProjectField, ProjectForm, ProjectState, Resource, ResultState,
-    Screen, TailorState, ToolId, branch_label,
+    AgentRow, App, Category, ConfirmState, DetailsState, FormField, LaunchForm, MenuState,
+    NewWorktree, PickerState, ProjectCommand, ProjectField, ProjectForm, ProjectState, Resource,
+    ResultState, Screen, TailorState, ToolId, branch_label,
 };
 
 /// Rows used by the launcher below the shell prompt.
@@ -19,6 +19,7 @@ const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help
 const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
 const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
+const HELP_AGENTS: &str = "type to filter · ⏎ toggle · ^T shared · ^R inherit · ^S sync · ^D preview · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · ? help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
@@ -192,6 +193,20 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                     entry("^S", "sync the highlighted project"),
                     entry("^R", "restart the highlighted project's VM (asks first)"),
                     entry("^X", "stop the highlighted project's VM (asks first)"),
+                ]);
+            } else if picker.tool == ToolId::AgentTools {
+                entries.extend([
+                    entry(
+                        "⏎",
+                        "toggle for you (personal, git-excluded), or run the row",
+                    ),
+                    entry(
+                        "^T",
+                        "toggle in the shared choices (.cli-toolbox/agents.json)",
+                    ),
+                    entry("^R", "drop your personal choice (inherit)"),
+                    entry("^S", "sync generated agent files"),
+                    entry("^D", "preview the sync without changing files"),
                 ]);
             } else if picker.tool == ToolId::SandboxVms {
                 entries.extend([
@@ -461,6 +476,7 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
         ToolId::GitWorktrees => HELP_WORKTREES,
         ToolId::SandboxProjects => HELP_PROJECTS,
         ToolId::SandboxVms => HELP_VMS,
+        ToolId::AgentTools => HELP_AGENTS,
         _ => HELP_PICKER,
     };
     let block = panel(
@@ -512,6 +528,9 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
             Resource::Worktree(worktree) => Some(clean_text(&worktree.name).chars().count()),
             Resource::Project(status) => Some(clean_text(&status.project.name).chars().count()),
             Resource::Vm(vm) => Some(clean_text(&vm.name).chars().count()),
+            Resource::Agent(AgentRow::Choice(entry)) => {
+                Some(clean_text(&entry.name).chars().count())
+            }
             _ => None,
         })
         .max()
@@ -589,7 +608,49 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
             }
             Line::from(spans)
         }
+        Resource::Agent(row) => agent_line(row, name_width),
         _ => Line::from(format!(" {}", clean_text(&resource.label()))),
+    }
+}
+
+/// An agent tools row: group, name, on/off and where the choice comes from.
+fn agent_line(row: &AgentRow, name_width: usize) -> Line<'static> {
+    let state = |on: bool| {
+        if on {
+            Span::styled("[on] ", Style::new().fg(Color::Green))
+        } else {
+            "[off]".dark_gray()
+        }
+    };
+    match row {
+        AgentRow::Sync(true) => Line::from(vec![
+            Span::raw(" sync     "),
+            Span::styled(
+                "generated files are up to date",
+                Style::new().fg(Color::Green),
+            ),
+        ]),
+        AgentRow::Sync(false) => Line::from(vec![
+            Span::raw(" sync     "),
+            Span::styled(
+                "pending changes · ⏎ or ^S to sync, ^D to preview",
+                Style::new().fg(Color::Yellow),
+            ),
+        ]),
+        AgentRow::Exclude(on) => Line::from(vec![
+            Span::raw(" git      "),
+            state(*on),
+            Span::raw(" exclude generated files from Git"),
+        ]),
+        AgentRow::Choice(entry) => Line::from(vec![
+            Span::raw(format!(
+                " {:<8} {:<name_width$}  ",
+                entry.group,
+                clean_text(&entry.name)
+            )),
+            state(entry.enabled),
+            format!("  {}", entry.origin).dark_gray(),
+        ]),
     }
 }
 
@@ -1423,6 +1484,40 @@ mod tests {
         let mut empty = App::new("/tmp/project".into());
         empty.loaded(ToolId::SandboxVms, Ok(Vec::new()));
         assert!(rendered(&empty, 100, super::HEIGHT).contains("No VMs running"));
+    }
+
+    #[test]
+    fn renders_agent_tools_with_state_and_origin() {
+        let mut app = App::new("/tmp/project".into());
+        let choice = |group: &str, name: &str, enabled, origin| {
+            Resource::Agent(super::AgentRow::Choice(crate::agents::Entry {
+                group: group.into(),
+                name: name.into(),
+                enabled,
+                origin,
+            }))
+        };
+        app.loaded(
+            ToolId::AgentTools,
+            Ok(vec![
+                Resource::Agent(super::AgentRow::Sync(false)),
+                Resource::Agent(super::AgentRow::Exclude(true)),
+                choice("mcp", "backlog-work", true, "personal"),
+                choice("skills", "review", false, "default"),
+            ]),
+        );
+        let list = rendered(&app, 120, super::HEIGHT);
+        assert!(list.contains("pending changes"), "{list}");
+        assert!(list.contains("[on]  exclude generated files"), "{list}");
+        assert!(
+            list.contains("mcp      backlog-work  [on]   personal"),
+            "{list}"
+        );
+        assert!(
+            list.contains("skills   review        [off]  default"),
+            "{list}"
+        );
+        assert!(list.contains("^S sync"), "{list}");
     }
 
     #[test]

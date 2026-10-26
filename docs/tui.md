@@ -16,7 +16,7 @@ login temporarily take over the terminal; the launcher resumes when they finish.
 
 ## Keys
 
-Actions are grouped into tabs: **AWS** (`a`), **Azure** (`z`, subscriptions and account login/logout), **Git** (`g`, git worktrees),
+Actions are grouped into tabs: **AWS** (`a`), **Azure** (`z`, subscriptions and account login/logout), **Git** (`g`, git worktrees and agent tools),
 **Sandbox** (`s`, sandbox projects and running VMs) and **Terminal** (`t`, Kitty sessions and SSH).
 
 | Key | Action |
@@ -47,6 +47,22 @@ review checkouts (see [agents.md](agents.md#git-worktrees)):
   it runs.
 - Ctrl-D removes the selected worktree and its branch, and closes its Herdr
   workspace, after a [confirmation](#confirmations).
+
+## Git › Agent tools
+
+Shows the launch directory repository's `ct agents` choices (see
+[agent-tools.md](agent-tools.md)): whether generated files are in sync,
+whether they are excluded from Git, then each MCP server, skill and target
+with its state and origin (`personal`, `shared` or `default`). Choices are
+saved right away; generated files change only when you sync.
+
+| Key | Action |
+| --- | --- |
+| Enter | Toggle the highlighted entry in your personal choices; on the sync row, sync; on the Git row, toggle excluding generated files |
+| Ctrl-T | Toggle the entry in the shared choices (`.cli-toolbox/agents.json`) |
+| Ctrl-R | Drop your personal choice so the shared or default one applies |
+| Ctrl-S | Sync generated agent files |
+| Ctrl-D | Preview the sync without changing files |
 
 ## Sandbox › Projects
 

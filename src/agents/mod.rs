@@ -21,6 +21,23 @@ use native::*;
 mod tests;
 
 pub(crate) use config::Environment;
+
+/// The choices of the working directory's repository, for the TUI.
+pub(crate) fn overview() -> Result<Overview, Error> {
+    Environment::discover()?.with_project(|project| project.overview())
+}
+/// Save one choice of the working directory's repository without syncing.
+pub(crate) fn set_choice(group: &str, name: &str, choice: &str, shared: bool) -> Result<(), Error> {
+    Environment::discover()?.with_project(|project| project.set_choice(group, name, choice, shared))
+}
+/// Keep the working directory's generated files out of Git, or stop doing so.
+pub(crate) fn set_exclude(exclude: bool) -> Result<(), Error> {
+    Environment::discover()?.with_project(|project| project.set_exclude(exclude))
+}
+/// Sync, or preview with `dry_run`, the working directory's repository.
+pub(crate) fn sync(dry_run: bool, out: &mut dyn Write) -> Result<bool, Error> {
+    Environment::discover()?.with_project(|project| project.sync(dry_run, &[], out))
+}
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,6 +65,22 @@ impl Default for State {
             files: Records::new(),
         }
     }
+}
+/// One selectable MCP server, skill or target and where its value comes from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Entry {
+    pub group: String,
+    pub name: String,
+    pub enabled: bool,
+    /// `personal`, `shared` or `default`.
+    pub origin: &'static str,
+}
+/// A project's effective choices, for status output and the TUI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Overview {
+    pub entries: Vec<Entry>,
+    pub exclude: bool,
+    pub synced: bool,
 }
 pub(crate) struct Project<'a> {
     root: PathBuf,
@@ -315,7 +348,8 @@ impl<'a> Project<'a> {
         self.resolve_choices();
         Ok(())
     }
-    pub fn status(&self, out: &mut dyn Write) -> Result<(), Error> {
+    pub fn overview(&self) -> Result<Overview, Error> {
+        let mut entries = Vec::new();
         for group in GROUPS {
             for name in &self.names[group] {
                 let explicit =
@@ -327,26 +361,45 @@ impl<'a> Project<'a> {
                 } else {
                     "default"
                 };
-                writeln!(
-                    out,
-                    "{group} / {name}: {} ({origin})",
-                    if self.enabled(group, name) {
-                        "enable"
-                    } else {
-                        "disable"
-                    }
-                )?;
+                entries.push(Entry {
+                    group: group.into(),
+                    name: name.clone(),
+                    enabled: self.enabled(group, name),
+                    origin,
+                });
             }
+        }
+        Ok(Overview {
+            entries,
+            exclude: self.excluded(),
+            synced: self.is_synced()?,
+        })
+    }
+    pub fn status(&self, out: &mut dyn Write) -> Result<(), Error> {
+        let overview = self.overview()?;
+        for entry in &overview.entries {
+            writeln!(
+                out,
+                "{} / {}: {} ({})",
+                entry.group,
+                entry.name,
+                if entry.enabled { "enable" } else { "disable" },
+                entry.origin
+            )?;
         }
         writeln!(
             out,
             "exclude generated files: {}",
-            if self.excluded() { "enable" } else { "disable" }
+            if overview.exclude {
+                "enable"
+            } else {
+                "disable"
+            }
         )?;
         writeln!(
             out,
             "{}",
-            if self.is_synced()? {
+            if overview.synced {
                 "Synchronized."
             } else {
                 "Pending changes or file drift; preview with ct agents sync --dry-run."

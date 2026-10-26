@@ -101,6 +101,12 @@ fn event_loop(
                     Err(err) => app.loaded(ToolId::SandboxVms, Err(err.to_string())),
                 }
             }
+            Effect::ChangeAgents(change) => {
+                let result = context
+                    .change_agents(&change)
+                    .and_then(|()| context.load(ToolId::AgentTools));
+                app.loaded(ToolId::AgentTools, result.map_err(|err| err.to_string()));
+            }
             Effect::Execute(action) => {
                 let outcome = handoff(
                     session,

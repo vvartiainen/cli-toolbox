@@ -9,6 +9,7 @@ resolve to their own checkout root.
 
 ```sh
 ct agents                        # Pick choices with fzf or the built-in picker
+ct tui                           # Git › Agent tools: toggle, sync, preview
 ct agents --shared               # Edit portable choices
 ct agents status                 # Effective selections, origins and file drift
 ct agents set mcp nixos enable
