@@ -30,6 +30,11 @@ enum AgentsCommand {
         #[arg(value_enum)]
         choice: Choice,
     },
+    /// Keep generated files out of Git in this checkout (personal choice).
+    Exclude {
+        #[arg(value_enum)]
+        choice: Toggle,
+    },
     /// Install locked skill sources or explicitly update their revisions.
     Library {
         #[command(subcommand)]
@@ -48,6 +53,11 @@ enum Kind {
     Skills,
 }
 #[derive(Clone, Debug, ValueEnum)]
+enum Toggle {
+    Enable,
+    Disable,
+}
+#[derive(Clone, Debug, ValueEnum)]
 enum Choice {
     Inherit,
     Enable,
@@ -55,6 +65,9 @@ enum Choice {
 }
 impl AgentsCmd {
     pub fn run(self, stdout: &mut dyn Write, _stderr: &mut dyn Write) -> Result<(), Error> {
+        if self.shared && matches!(self.command, Some(AgentsCommand::Exclude { .. })) {
+            return Err(Error::msg("exclude is a personal choice; drop --shared"));
+        }
         let env = Environment::discover()?;
         match self.command {
             Some(AgentsCommand::Library { command }) => {
@@ -77,6 +90,9 @@ impl AgentsCmd {
                     choice.to_possible_value().unwrap().get_name(),
                     self.shared,
                 ),
+                Some(AgentsCommand::Exclude { choice }) => {
+                    project.set_exclude(matches!(choice, Toggle::Enable))
+                }
                 None => project.interactive(self.shared, stdout),
                 Some(AgentsCommand::Library { .. }) => unreachable!(),
             }),
@@ -110,6 +126,7 @@ mod tests {
                 "--adopt-mcp",
                 "pi",
             ],
+            vec!["agents", "exclude", "enable"],
             vec!["agents", "library", "install"],
             vec!["agents", "library", "update"],
         ] {

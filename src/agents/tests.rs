@@ -230,6 +230,76 @@ fn personal_choices_are_locally_excluded() {
 }
 
 #[test]
+fn local_skills_need_no_install_and_disable_removes_owned_files() {
+    let mut f = Fixture::new();
+    let skill = f.temp.path().join("local/notes");
+    write_file(
+        &skill.join("SKILL.md"),
+        b"---\nname: notes\ndescription: Notes\n---\nNotes.\n",
+        0o644,
+    )
+    .unwrap();
+    f.catalog["localSkills"] = json!({"notes": skill});
+    f.choices(false, json!({"skills":{"notes":"enable"}}));
+    f.sync().unwrap();
+    let generated = f.root.join(".claude/skills/notes/SKILL.md");
+    assert!(generated.exists());
+    write_file(
+        &skill.join("SKILL.md"),
+        b"---\nname: notes\ndescription: Notes\n---\nChanged.\n",
+        0o644,
+    )
+    .unwrap();
+    assert!(!f.project().is_synced().unwrap());
+    f.choices(false, json!({"skills":{"notes":"disable"}}));
+    f.sync().unwrap();
+    assert!(!generated.exists());
+
+    f.add_skill();
+    f.catalog["localSkills"] = json!({"review": skill});
+    assert_error(
+        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        "clashes",
+    );
+    f.catalog["localSkills"] = json!({"notes": "relative"});
+    assert_error(
+        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        "absolute path",
+    );
+}
+
+#[test]
+fn exclude_hides_untracked_generated_files_and_is_personal() {
+    let f = Fixture::new();
+    f.add_skill();
+    write_json(&f.root.join(".mcp.json"), &json!({})).unwrap();
+    run_command("git", &["add", ".mcp.json"], &f.root).unwrap();
+    f.choices(
+        false,
+        json!({"exclude":true,"mcp":{"nixos":"enable"},"skills":{"review":"enable"}}),
+    );
+    f.project()
+        .sync(false, &["claudecode".into()], &mut Vec::new())
+        .unwrap();
+    let skill = ".claude/skills/review/SKILL.md";
+    run_command("git", &["check-ignore", skill], &f.root).unwrap();
+    // Excluding a tracked file has no effect, so it is never listed.
+    let exclude = fs::read_to_string(f.root.join(".git/info/exclude")).unwrap();
+    assert!(!exclude.contains("/.mcp.json"));
+
+    f.project().set_exclude(false).unwrap();
+    f.sync().unwrap();
+    assert!(run_command("git", &["check-ignore", skill], &f.root).is_err());
+    run_command("git", &["check-ignore", PERSONAL], &f.root).unwrap();
+
+    f.choices(true, json!({"exclude":true}));
+    assert_error(
+        Project::new(&f.root, f.catalog.clone(), &f.library, &FakeBackend),
+        "personal choice",
+    );
+}
+
+#[test]
 fn subdirectories_and_linked_worktrees_have_independent_state() {
     let f = Fixture::new();
     run_command(

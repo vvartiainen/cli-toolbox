@@ -78,6 +78,17 @@ pub(super) fn validate_catalog(catalog: &Value) -> Result<(), Error> {
             )));
         }
     }
+    if let Some(local) = catalog.get("localSkills") {
+        let local =
+            object(local).map_err(|_| Error::msg("catalog localSkills must be an object"))?;
+        for (name, path) in local {
+            if !valid_name(name) || !path.as_str().is_some_and(|p| Path::new(p).is_absolute()) {
+                return Err(Error::msg(format!(
+                    "local skill {name} needs a safe name and an absolute path"
+                )));
+            }
+        }
+    }
     let sources = catalog["sources"]
         .as_array()
         .ok_or_else(|| Error::msg("catalog requires sources"))?;
@@ -111,7 +122,13 @@ pub(crate) fn project_root(cwd: &Path) -> Result<PathBuf, Error> {
     fs::canonicalize(run_command("git", &["rev-parse", "--show-toplevel"], cwd)?)
         .map_err(Into::into)
 }
-pub(super) fn exclusion_change(root: &Path) -> Result<(PathBuf, Vec<u8>), Error> {
+const EXCLUDE_BEGIN: &str = "# cli-toolbox agents: generated files";
+const EXCLUDE_END: &str = "# end cli-toolbox agents";
+/// `generated` replaces the block of excluded generated files; `None` keeps it.
+pub(super) fn exclusion_change(
+    root: &Path,
+    generated: Option<&[String]>,
+) -> Result<(PathBuf, Vec<u8>), Error> {
     let path = PathBuf::from(run_command(
         "git",
         &[
@@ -134,6 +151,32 @@ pub(super) fn exclusion_change(root: &Path) -> Result<(PathBuf, Vec<u8>), Error>
     } else {
         Vec::new()
     };
+    if let Some(generated) = generated {
+        let text = String::from_utf8(old).map_err(Error::msg)?;
+        let mut kept = String::new();
+        let mut inside = false;
+        for line in text.lines() {
+            match line {
+                EXCLUDE_BEGIN => inside = true,
+                EXCLUDE_END => inside = false,
+                _ if !inside => {
+                    kept.push_str(line);
+                    kept.push('\n');
+                }
+                _ => {}
+            }
+        }
+        if !generated.is_empty() {
+            kept.push_str(EXCLUDE_BEGIN);
+            kept.push('\n');
+            for path in generated {
+                kept.push_str(&format!("/{path}\n"));
+            }
+            kept.push_str(EXCLUDE_END);
+            kept.push('\n');
+        }
+        old = kept.into_bytes();
+    }
     let text = std::str::from_utf8(&old).map_err(Error::msg)?;
     let additions: Vec<_> = [PERSONAL, STATE]
         .iter()

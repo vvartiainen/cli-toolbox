@@ -16,6 +16,7 @@ ct agents set targets pi disable --shared
 ct agents set mcp nixos inherit   # Remove the override
 ct agents sync --dry-run         # Preview generated file changes
 ct agents sync                   # Apply; never downloads skills
+ct agents exclude enable         # Keep generated files out of Git here
 ct agents library install        # Explicit download, retaining locked revisions
 ct agents library update         # Explicit download, refreshing revisions
 ```
@@ -67,15 +68,34 @@ A minimal catalog:
 ```
 
 Choices files use `{"version":1,"mcp":{"nixos":"enable"}}` and optionally
-`targets` and `skills` maps. Unknown names, groups, choices and versions are errors.
+`targets` and `skills` maps. Personal choices may also set `"exclude": true`. Unknown names, groups, choices and versions are errors.
 MCP and installed skill names use lowercase letters and digits separated by single
 hyphens or underscores. Ambiguous MCP aliases such as `some-server` and
 `some_server` cannot coexist. Use choices to enable servers; do not put
 `enabled`, `disabled`, or `targets` on catalog MCP entries.
 
+## Excluding generated output
+
+Generated MCP files can contain machine-specific paths, such as Nix store
+commands. `ct agents exclude enable` records `"exclude": true` in personal
+choices; each sync then lists the untracked files it owns in a marked block of
+Git's local `info/exclude`. Tracked files are never listed, since excluding
+them has no effect. `ct agents exclude disable` and the next sync remove the
+block. Shared choices cannot set `exclude`.
+
 ## Skill library
 
-Add [Rulesync skill sources](https://rulesync.dyoshikawa.com/guide/declarative-sources.html)
+Local skills need no download. Map names to absolute directories containing
+`SKILL.md`, typically Nix store paths:
+
+```json
+"localSkills": { "commit-style": "/nix/store/...-commit-style" }
+```
+
+They are selected like installed skills and must not share a name with one.
+Their content is part of the sync signature, so `status` reports edits.
+
+For remote skills, add [Rulesync skill sources](https://rulesync.dyoshikawa.com/guide/declarative-sources.html)
 to the catalog, then install them explicitly:
 
 ```json
@@ -153,15 +173,9 @@ target's shared skill directory through its own discovery rules.
 
 ## Nix integration boundary
 
-Keep Nix-specific catalog declarations, MCP/Rulesync package installation, and
-legacy global registration migration in nix-config. cli-toolbox has no Python
-helper or Nix package patch dependency at runtime.
-
-**Before removing nix-config's `agents.py`, make its migration self-contained.**
-The prototype `migrate.py` currently imports `Conflict`, `apply_changes`,
-`native_bytes`, `read_native`, and `safe_path` from that helper. Moving project
-behavior into Rust does not remove that activation-time dependency. Updating
-nix-config's migration and package wiring is a separate change in that repository.
+nix-config generates the catalog (MCP servers with store paths, skill sources
+and `localSkills`) and installs Rulesync. cli-toolbox has no runtime
+dependency on nix-config.
 
 ## Verification
 

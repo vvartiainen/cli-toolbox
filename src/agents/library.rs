@@ -34,6 +34,28 @@ pub(super) fn library_skills(
     library: &Path,
     catalog: &Value,
 ) -> Result<BTreeMap<String, PathBuf>, Error> {
+    let mut skills = installed_skills(library, catalog)?;
+    // Local skills come from immutable paths (e.g. the Nix store), so they
+    // need no install step or receipt.
+    if let Some(local) = catalog.get("localSkills") {
+        for (name, path) in object(local)? {
+            let path = PathBuf::from(path.as_str().unwrap());
+            if !path.join("SKILL.md").is_file() {
+                return Err(Error::msg(format!(
+                    "local skill {name} has no SKILL.md: {}",
+                    path.display()
+                )));
+            }
+            if skills.insert(name.clone(), path).is_some() {
+                return Err(Error::msg(format!(
+                    "local skill {name} clashes with an installed skill"
+                )));
+            }
+        }
+    }
+    Ok(skills)
+}
+fn installed_skills(library: &Path, catalog: &Value) -> Result<BTreeMap<String, PathBuf>, Error> {
     let receipt = load_json(&safe_path(library, "receipt.json")?, Value::Null)?;
     if receipt.is_null() && catalog["sources"].as_array().is_some_and(Vec::is_empty) {
         return Ok(BTreeMap::new());

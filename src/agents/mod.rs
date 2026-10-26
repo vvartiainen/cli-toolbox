@@ -170,15 +170,23 @@ impl<'a> Project<'a> {
         ] {
             project.validate_choices(layer)?;
         }
+        if project.shared.get("exclude").is_some()
+            || project.catalog["defaults"].get("exclude").is_some()
+        {
+            return Err(Error::msg("exclude is a personal choice"));
+        }
         project.resolve_choices();
         Ok(project)
     }
     fn validate_choices(&self, choices: &Value) -> Result<(), Error> {
         let choices = object(choices)?;
         for group in choices.keys() {
-            if !GROUPS.contains(&group.as_str()) && group != "version" {
+            if !GROUPS.contains(&group.as_str()) && group != "version" && group != "exclude" {
                 return Err(Error::msg(format!("unknown selection group: {group}")));
             }
+        }
+        if choices.get("exclude").is_some_and(|v| !v.is_boolean()) {
+            return Err(Error::msg("exclude must be true or false"));
         }
         for group in GROUPS {
             if let Some(values) = choices.get(group) {
@@ -220,9 +228,28 @@ impl<'a> Project<'a> {
     fn enabled(&self, group: &str, name: &str) -> bool {
         self.effective[group][name] == true
     }
+    fn excluded(&self) -> bool {
+        self.personal["exclude"] == true
+    }
+    /// Keep generated files out of Git through its local exclude file.
+    pub fn set_exclude(&mut self, exclude: bool) -> Result<(), Error> {
+        let mut layer = self.personal.clone();
+        if exclude {
+            layer["exclude"] = json!(true);
+        } else if let Some(layer) = layer.as_object_mut() {
+            layer.remove("exclude");
+        }
+        self.save_choices(layer, false)
+    }
     fn signature(&self) -> Result<String, Error> {
+        let mut local = BTreeMap::new();
+        if let Some(skills) = self.catalog.get("localSkills") {
+            for (name, path) in object(skills)? {
+                local.insert(name, tree_records(Path::new(path.as_str().unwrap()))?);
+            }
+        }
         Ok(digest(&json_bytes(
-            &json!({"catalog":self.catalog,"effective":self.effective,"library":tree_records(&safe_path(&self.library, ".rulesync/skills/.curated")?)?}),
+            &json!({"catalog":self.catalog,"effective":self.effective,"library":tree_records(&safe_path(&self.library, ".rulesync/skills/.curated")?)?,"local":local}),
         )?))
     }
     fn is_synced(&self) -> Result<bool, Error> {
@@ -265,10 +292,10 @@ impl<'a> Project<'a> {
     fn save_choices(&mut self, layer: Value, shared: bool) -> Result<(), Error> {
         self.validate_choices(&layer)?;
         let path = safe_path(&self.root, if shared { SHARED } else { PERSONAL })?;
-        let (exclude, _) = exclusion_change(&self.root)?;
+        let (exclude, _) = exclusion_change(&self.root, None)?;
         let _guard = lock(&exclude)?;
         self.verify_inputs()?;
-        let (exclude, content) = exclusion_change(&self.root)?;
+        let (exclude, content) = exclusion_change(&self.root, None)?;
         apply_changes(&BTreeMap::from([
             (exclude, (Some(content), 0o644)),
             (
@@ -311,6 +338,11 @@ impl<'a> Project<'a> {
                 )?;
             }
         }
+        writeln!(
+            out,
+            "exclude generated files: {}",
+            if self.excluded() { "enable" } else { "disable" }
+        )?;
         writeln!(
             out,
             "{}",
@@ -635,7 +667,7 @@ impl<'a> Project<'a> {
             writeln!(out, "Generated files are up to date.")?;
         }
         if !dry_run {
-            let (exclude, _) = exclusion_change(&self.root)?;
+            let (exclude, _) = exclusion_change(&self.root, None)?;
             let _guard = lock(&exclude)?;
             verify_observed(&observed)?;
             // Recheck paths, library and selection inputs after reporting the preview.
@@ -652,7 +684,12 @@ impl<'a> Project<'a> {
             if signature != self.signature()? {
                 return Err(Error::msg("library changed while preparing sync"));
             }
-            let (exclude, content) = exclusion_change(&self.root)?;
+            let generated = if self.excluded() {
+                untracked(&self.root, next_state.files.keys())?
+            } else {
+                Vec::new()
+            };
+            let (exclude, content) = exclusion_change(&self.root, Some(&generated))?;
             if !exclude.exists() || fs::read(&exclude)? != content {
                 changes.insert(exclude, (Some(content), 0o644));
             }
@@ -672,6 +709,25 @@ impl<'a> Project<'a> {
     }
 }
 use std::os::unix::fs::PermissionsExt;
+/// Paths Git does not track; excluding a tracked file would have no effect.
+fn untracked<'p>(
+    root: &Path,
+    paths: impl Iterator<Item = &'p String>,
+) -> Result<Vec<String>, Error> {
+    let paths: Vec<&str> = paths.map(String::as_str).collect();
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["ls-files", "--"];
+    args.extend(&paths);
+    let tracked = run_command("git", &args, root)?;
+    let tracked: BTreeSet<_> = tracked.lines().collect();
+    Ok(paths
+        .into_iter()
+        .filter(|p| !tracked.contains(p))
+        .map(str::to_owned)
+        .collect())
+}
 fn verify_observed(observed: &BTreeMap<PathBuf, Option<Record>>) -> Result<(), Error> {
     for (path, expected) in observed {
         if &optional_record(path)? != expected {
