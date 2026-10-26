@@ -487,6 +487,43 @@ impl ProjectState {
     }
 }
 
+/// A project whose details open once the project list has loaded.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OpenProject {
+    name: String,
+    /// The worktree to select again, by path.
+    worktree: Option<PathBuf>,
+    /// The position to select when that worktree is gone.
+    selected: usize,
+}
+
+impl OpenProject {
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Reopen `state` with the same worktree selected.
+    fn again(state: &ProjectState) -> Self {
+        Self {
+            name: state.status.project.name.clone(),
+            worktree: state
+                .selected_worktree()
+                .map(|worktree| worktree.path.clone()),
+            selected: state.selected,
+        }
+    }
+
+    fn selected_in(&self, worktrees: &[Worktree]) -> usize {
+        self.worktree
+            .as_ref()
+            .and_then(|path| worktrees.iter().position(|worktree| &worktree.path == path))
+            .unwrap_or_else(|| self.selected.min(worktrees.len().saturating_sub(1)))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TailorState {
     pub(crate) project: NewProject,
@@ -737,6 +774,8 @@ pub(crate) struct ResultState {
     pub(crate) body: String,
     pub(crate) failed: bool,
     pub(crate) scroll: u16,
+    /// The screen the action ran from, to return to.
+    pub(crate) back: Box<Screen>,
 }
 
 #[derive(Clone, Debug)]
@@ -776,7 +815,7 @@ pub(crate) struct App {
     /// The agent new worktrees start with unless changed: `CLI_TOOLBOX_AGENT`.
     pub(crate) default_agent: Option<String>,
     /// Open this project's details once the project list has loaded.
-    pub(crate) open_project: Option<String>,
+    pub(crate) open_project: Option<OpenProject>,
     /// The coding agent that tailors flakes.
     pub(crate) setup_agent: String,
     /// The editor that opens flakes, for hints.
@@ -907,18 +946,24 @@ impl App {
             .open_project
             .take()
             .filter(|_| tool == ToolId::SandboxProjects);
-        let status = open.and_then(|name| {
-            picker.resources.iter().find_map(|resource| match resource {
-                Resource::Project(status) if status.project.name == name => Some(status.clone()),
-                _ => None,
+        let state = open.and_then(|open| {
+            let status = picker
+                .resources
+                .iter()
+                .find_map(|resource| match resource {
+                    Resource::Project(status) if status.project.name == open.name => {
+                        Some(status.as_ref().clone())
+                    }
+                    _ => None,
+                })?;
+            Some(ProjectState {
+                selected: open.selected_in(&status.worktrees),
+                status,
+                return_picker: picker.clone(),
             })
         });
-        self.screen = match status {
-            Some(status) => Screen::ProjectDetails(Box::new(ProjectState {
-                status: *status,
-                selected: 0,
-                return_picker: picker,
-            })),
+        self.screen = match state {
+            Some(state) => Screen::ProjectDetails(Box::new(state)),
             None => Screen::Picker(picker),
         };
     }
@@ -963,16 +1008,19 @@ impl App {
         });
     }
 
-    /// Move to an action result. The result screen owns the action so that its
-    /// return behavior remains deterministic even after the selected value is gone.
+    /// Move to an action result. The result screen owns the action and the
+    /// screen it ran from so that it returns there, reloaded, even after the
+    /// selected value is gone.
     pub(crate) fn finished(&mut self, action: &Action, title: String, body: String, failed: bool) {
         self.loading = None;
+        let back = Box::new(self.screen.clone());
         self.screen = Screen::Result(ResultState {
             action: action.clone(),
             title,
             body,
             failed,
             scroll: 0,
+            back,
         });
     }
 
@@ -1427,7 +1475,9 @@ impl App {
                 self.screen = state.back.as_deref().cloned().unwrap_or(Screen::Home);
                 Effect::None
             }
-            KeyCode::Char('s') | KeyCode::Esc if state.back.is_none() => self.load_project(name),
+            KeyCode::Char('s') | KeyCode::Esc if state.back.is_none() => {
+                self.load_project(OpenProject::new(name), None)
+            }
             _ => Effect::None,
         }
     }
@@ -1494,12 +1544,19 @@ impl App {
         Effect::None
     }
 
-    /// Load the project list and open the project's details.
-    fn load_project(&mut self, name: String) -> Effect {
-        self.open_project = Some(name);
-        self.screen = Screen::Picker(PickerState::new(ToolId::SandboxProjects));
-        self.loading = Some(ToolId::SandboxProjects);
-        Effect::Load(ToolId::SandboxProjects)
+    /// Load the project list, `picker` if it was open before, and open the
+    /// project's details.
+    fn load_project(&mut self, open: OpenProject, picker: Option<PickerState>) -> Effect {
+        self.open_project = Some(open);
+        self.load_picker(picker.unwrap_or_else(|| PickerState::new(ToolId::SandboxProjects)))
+    }
+
+    /// Show `picker` and reload its list, keeping its filter and selection.
+    fn load_picker(&mut self, picker: PickerState) -> Effect {
+        let tool = picker.tool;
+        self.screen = Screen::Picker(picker);
+        self.loading = Some(tool);
+        Effect::Load(tool)
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Effect {
@@ -1701,14 +1758,25 @@ impl App {
             KeyCode::PageUp => result.scroll = result.scroll.saturating_sub(10),
             KeyCode::PageDown => result.scroll = result.scroll.saturating_add(10),
             KeyCode::Enter | KeyCode::Esc => {
-                if let Some(name) = result.action.project_to_open() {
-                    let name = name.to_string();
-                    return self.load_project(name);
+                let back = origin(&result.back).clone();
+                let action = result.action.clone();
+                // An action started from a project returns to it.
+                if let Screen::ProjectDetails(state) = back {
+                    let picker = state.return_picker.clone();
+                    return self.load_project(OpenProject::again(&state), Some(picker));
                 }
-                if let Some(tool) = result.action.return_tool() {
-                    self.screen = Screen::Picker(PickerState::new(tool));
-                    self.loading = Some(tool);
-                    return Effect::Load(tool);
+                if let Some(name) = action.project_to_open() {
+                    return self.load_project(OpenProject::new(name), None);
+                }
+                if let Some(tool) = action.return_tool() {
+                    let picker = match back {
+                        Screen::Picker(picker) if picker.tool == tool => picker,
+                        Screen::WorktreeDetails(details) if details.return_picker.tool == tool => {
+                            details.return_picker
+                        }
+                        _ => PickerState::new(tool),
+                    };
+                    return self.load_picker(picker);
                 }
                 self.screen = Screen::Home;
                 self.loading = None;
@@ -1723,6 +1791,20 @@ impl App {
             Screen::Picker(picker) => Some(picker),
             _ => None,
         }
+    }
+}
+
+/// The screen behind confirmations and forms, which an action started from
+/// them returns to.
+fn origin(screen: &Screen) -> &Screen {
+    match screen {
+        Screen::Confirm(ConfirmState { back, .. })
+        | Screen::NewWorktree(LaunchForm { back, .. })
+        | Screen::ProjectForm(ProjectForm { back, .. })
+        | Screen::TailorFlake(TailorState {
+            back: Some(back), ..
+        }) => origin(back),
+        _ => screen,
     }
 }
 
@@ -2668,6 +2750,81 @@ mod tests {
         );
         assert_eq!(app.handle_key(key(KeyCode::Esc)), Effect::None);
         assert!(matches!(app.screen, Screen::Home));
+    }
+
+    #[test]
+    fn results_return_to_the_screen_the_action_ran_from() {
+        let first = worktree("demo-agent-wt");
+        let second = worktree("demo-agent-wt-2");
+        let projects = |worktrees: &[Worktree]| {
+            Ok(vec![
+                Resource::Project(Box::new(project("other", &[]))),
+                Resource::Project(Box::new(project("demo", worktrees))),
+            ])
+        };
+        let mut app = App::new("/repo".into());
+        app.loaded(
+            ToolId::SandboxProjects,
+            projects(&[first.clone(), second.clone()]),
+        );
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Down));
+
+        // Entering a worktree returns to the project with it still selected.
+        let enter = Action::EnterProjectWorktree(second.clone());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('c'))),
+            Effect::Execute(enter.clone())
+        );
+        app.finished(&enter, "Done".into(), String::new(), false);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::Load(ToolId::SandboxProjects)
+        );
+        app.loaded(
+            ToolId::SandboxProjects,
+            projects(&[first.clone(), second.clone()]),
+        );
+        let Screen::ProjectDetails(state) = &app.screen else {
+            panic!("expected the project");
+        };
+        assert_eq!(state.status.project.name, "demo");
+        assert_eq!(state.selected_worktree(), Some(&second));
+
+        // Removing it from a confirmation returns to the project too, with
+        // the worktree in its place selected.
+        app.handle_key(key(KeyCode::Char('d')));
+        let remove = Action::RemoveProjectWorktree("demo".into(), second.clone(), true);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('k'))),
+            Effect::Execute(remove.clone())
+        );
+        app.finished(&remove, "Done".into(), String::new(), false);
+        app.handle_key(key(KeyCode::Esc));
+        app.loaded(
+            ToolId::SandboxProjects,
+            projects(std::slice::from_ref(&first)),
+        );
+        let Screen::ProjectDetails(state) = &app.screen else {
+            panic!("expected the project");
+        };
+        assert_eq!(state.selected_worktree(), Some(&first));
+
+        // An action from the list returns to the list as it was.
+        app.handle_key(key(KeyCode::Esc));
+        let sync = Action::SyncProject("demo".into());
+        assert_eq!(app.handle_key(ctrl('s')), Effect::Execute(sync.clone()));
+        app.finished(&sync, "Done".into(), String::new(), false);
+        app.handle_key(key(KeyCode::Esc));
+        app.loaded(ToolId::SandboxProjects, projects(&[first]));
+        let Screen::Picker(picker) = &app.screen else {
+            panic!("expected the project list");
+        };
+        assert!(matches!(
+            picker.selected_resource(),
+            Some(Resource::Project(status)) if status.project.name == "demo"
+        ));
     }
 
     #[test]

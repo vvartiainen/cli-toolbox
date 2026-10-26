@@ -77,6 +77,10 @@ the highlighted project:
 | `d` | Remove the selected worktree without saving its work; asks whether to keep its branch |
 | `m` | Open the command menu below |
 
+Leaving the result of a command run here returns to the project, reloaded and with
+the same worktree selected, or the next one when it was removed. Commands run from
+a list return to that list with its filter and selection.
+
 The less frequent commands are in the command menu (`m`). Press a command's key,
 or move to it and press Enter; Esc goes back to the project. A command, its
 confirmation or form returns to the project, not the menu.
