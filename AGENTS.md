@@ -52,7 +52,7 @@ The purpose is to extend and help with the functionality of some CLIs I use, for
 ## Backlog
 
 Ideas and open work are tracked in a Backlog.md backlog through the
-`backlog-cli-toolbox` MCP server (`backlog` inside the sandbox), not in the repo.
+`backlog-cli-toolbox` MCP server, on the host and inside the sandbox, not in the repo.
 
 - Read `backlog://workflow/overview` or call `get_backlog_instructions` first
 - Search for an existing task before creating one
