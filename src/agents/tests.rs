@@ -199,11 +199,38 @@ fn disabling_target_cleans_previous_selections() {
     f.sync().unwrap();
     f.choices(false, json!({"targets":{"claudecode":"disable"}}));
     f.sync().unwrap();
-    assert_eq!(
-        load_json(&f.root.join(".mcp.json"), Value::Null).unwrap()["mcpServers"],
-        json!({})
+    // Nothing is left for the target: no empty file or directories.
+    assert!(!f.root.join(".mcp.json").exists());
+    assert!(!f.root.join(".claude").exists());
+}
+
+#[test]
+fn disabling_the_last_server_keeps_other_settings_without_an_empty_section() {
+    let mut f = Fixture::new();
+    f.catalog["targets"] = json!(["claudecode", "codexcli"]);
+    f.catalog["defaults"]["targets"] = json!({"claudecode":"enable","codexcli":"enable"});
+    let json_path = f.root.join(".mcp.json");
+    write_json(&json_path, &json!({"runtime":{"theme":"dark"}})).unwrap();
+    let toml_path = f.root.join(".codex/config.toml");
+    write_file(&toml_path, b"# mine\nmodel = 'test-model'\n", 0o644).unwrap();
+    f.choices(false, json!({"mcp":{"nixos":"enable"}}));
+    f.sync().unwrap();
+    assert!(
+        fs::read_to_string(&toml_path)
+            .unwrap()
+            .contains("mcp-nixos")
     );
-    assert!(!f.root.join(".claude/skills/review/SKILL.md").exists());
+    f.choices(false, json!({"mcp":{"nixos":"disable"}}));
+    f.sync().unwrap();
+    assert_eq!(
+        load_json(&json_path, Value::Null).unwrap(),
+        json!({"runtime":{"theme":"dark"}})
+    );
+    assert_eq!(
+        fs::read_to_string(&toml_path).unwrap(),
+        "# mine\nmodel = 'test-model'\n"
+    );
+    assert!(!f.sync().unwrap());
 }
 
 #[test]

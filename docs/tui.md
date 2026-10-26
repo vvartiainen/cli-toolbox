@@ -63,15 +63,17 @@ mcp      nixos              [on]   repo on   mine –
 mcp      backlog-nix-config [off]  repo on   mine off
 ```
 
-Enter and Ctrl-T cycle a layer: from `–` to the opposite of what it
+Ctrl-R and Ctrl-T cycle a layer: from `–` to the opposite of what it
 inherits, then the inherited value, then `–` again. Choices are saved right
-away; generated files change only when you sync.
+away; generated files change only when you sync. A target with nothing left
+to generate gets no file: sync removes MCP sections it emptied, files left
+empty and their empty directories.
 
 | Key | Action |
 | --- | --- |
-| Enter | Cycle the repository choice; on the sync row, sync; on the Git row, toggle excluding generated files |
+| Ctrl-R | Cycle the repository choice |
 | Ctrl-T | Cycle your own choice |
-| Ctrl-R | Clear your own choice so the repository's or the default applies |
+| Enter | On the sync row, sync; on the Git row, toggle excluding generated files |
 | Ctrl-S | Sync generated agent files |
 | Ctrl-D | Preview the sync without changing files |
 

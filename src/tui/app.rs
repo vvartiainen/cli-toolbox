@@ -1392,16 +1392,14 @@ impl App {
             (KeyCode::Enter, false, Some(AgentRow::Exclude(on))) => {
                 Effect::ChangeAgents(AgentChange::Exclude(!on))
             }
-            (KeyCode::Enter, false, Some(AgentRow::Choice(entry))) => {
+            (KeyCode::Char('r'), true, Some(AgentRow::Choice(entry))) => {
                 Effect::ChangeAgents(cycle(&entry, true))
             }
             (KeyCode::Char('t'), true, Some(AgentRow::Choice(entry))) => {
                 Effect::ChangeAgents(cycle(&entry, false))
             }
-            (KeyCode::Char('r'), true, Some(AgentRow::Choice(entry))) => Effect::ChangeAgents(
-                AgentChange::Choice(entry.group, entry.name, "inherit", false),
-            ),
-            (KeyCode::Enter, false, None) | (KeyCode::Char('t' | 'r'), true, _) => Effect::None,
+            (KeyCode::Enter, false, None | Some(AgentRow::Choice(_)))
+            | (KeyCode::Char('t' | 'r'), true, _) => Effect::None,
             _ => return None,
         };
         self.loading = None;
@@ -2640,8 +2638,10 @@ mod tests {
             Effect::ChangeAgents(AgentChange::Exclude(true))
         );
         app.handle_key(key(KeyCode::Down));
+        // Enter only runs the sync and Git rows.
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None);
         assert_eq!(
-            app.handle_key(key(KeyCode::Enter)),
+            app.handle_key(ctrl('r')),
             Effect::ChangeAgents(AgentChange::Choice(
                 "mcp".into(),
                 "nixos".into(),
@@ -2650,9 +2650,9 @@ mod tests {
             ))
         );
         app.handle_key(key(KeyCode::Down));
-        // The repository enables it: Enter turns it off there, ^T for you.
+        // The repository enables it: ^R turns it off there, ^T for you.
         assert_eq!(
-            app.handle_key(key(KeyCode::Enter)),
+            app.handle_key(ctrl('r')),
             Effect::ChangeAgents(AgentChange::Choice(
                 "skills".into(),
                 "review".into(),
@@ -2666,15 +2666,6 @@ mod tests {
                 "skills".into(),
                 "review".into(),
                 "disable",
-                false
-            ))
-        );
-        assert_eq!(
-            app.handle_key(ctrl('r')),
-            Effect::ChangeAgents(AgentChange::Choice(
-                "skills".into(),
-                "review".into(),
-                "inherit",
                 false
             ))
         );

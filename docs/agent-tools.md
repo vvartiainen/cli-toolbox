@@ -159,8 +159,9 @@ customizations elsewhere, then restore or remove the conflicting managed entry
 before retrying. Newly added unrelated servers are preserved.
 
 Every generated skill file has an ownership hash and executable-bit record.
-Disabling a skill or target removes only unchanged owned files. Extra files and
-independent skills remain. Edited managed files and unowned collisions abort the
+Disabling a skill or target removes only unchanged owned files. An MCP section
+left empty is removed, and so is a file left empty, along with its empty
+directories. Extra files and independent skills remain. Edited managed files and unowned collisions abort the
 entire sync during preflight. Existing checked-in files in a fresh checkout are
 unowned and need manual reconciliation. Preserve the ownership manifest; deleting
 it loses the evidence needed for safe removal. Symlinks, path escapes, malformed

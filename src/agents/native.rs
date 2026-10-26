@@ -175,7 +175,22 @@ impl Native {
         }
         Ok(servers)
     }
+    /// Replace the MCP section; an empty one is removed.
     pub fn set_servers(&mut self, key: &str, servers: Value) -> Result<(), Error> {
+        if servers
+            .as_object()
+            .is_some_and(|servers| servers.is_empty())
+        {
+            match self {
+                Self::Json(doc) => {
+                    doc.as_object_mut().unwrap().remove(key);
+                }
+                Self::Toml(doc) => {
+                    doc.remove(key);
+                }
+            }
+            return Ok(());
+        }
         match self {
             Self::Json(doc) => doc[key] = servers,
             Self::Toml(doc) => {
@@ -185,6 +200,13 @@ impl Native {
             }
         }
         Ok(())
+    }
+    /// Nothing left to keep, not even comments.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Json(doc) => doc.as_object().is_some_and(|doc| doc.is_empty()),
+            Self::Toml(doc) => doc.to_string().trim().is_empty(),
+        }
     }
     pub fn bytes(&self) -> Result<Vec<u8>, Error> {
         match self {

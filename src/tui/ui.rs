@@ -20,7 +20,7 @@ const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove 
 const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
 const HELP_AGENTS: &str =
-    "type to filter · ⏎ repo · ^T mine · ^R clear mine · ^S sync · ^D preview · F1 help · esc back";
+    "type to filter · ^R repo · ^T mine · ⏎ run row · ^S sync · ^D preview · F1 help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
 const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · ? help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
@@ -198,11 +198,11 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             } else if picker.tool == ToolId::AgentTools {
                 entries.extend([
                     entry(
-                        "⏎",
-                        "cycle the repository choice (.cli-toolbox/agents.json), or run the row",
+                        "^R",
+                        "cycle the repository choice (.cli-toolbox/agents.json)",
                     ),
                     entry("^T", "cycle your own choice (personal, git-excluded)"),
-                    entry("^R", "clear your own choice"),
+                    entry("⏎", "sync, or toggle excluding generated files from Git"),
                     entry("^S", "sync generated agent files"),
                     entry("^D", "preview the sync without changing files"),
                 ]);

@@ -646,16 +646,20 @@ impl<'a> Project<'a> {
             } else {
                 0o600
             };
-            if &combined != current {
+            let content = if &combined != current {
                 document.set_servers(spec.key, Value::Object(combined))?;
-                changes.insert(path.clone(), (Some(document.bytes()?), mode));
-            }
-            if path.exists() || changes.contains_key(&path) {
-                let bytes = if let Some((Some(data), _)) = changes.get(&path) {
-                    data.clone()
-                } else {
-                    fs::read(&path)?
-                };
+                // A file left with nothing in it is removed.
+                let data = (!document.is_empty())
+                    .then(|| document.bytes())
+                    .transpose()?;
+                changes.insert(path.clone(), (data.clone(), mode));
+                data
+            } else if path.exists() {
+                Some(fs::read(&path)?)
+            } else {
+                None
+            };
+            if let Some(bytes) = content {
                 file_states.insert(relative.into(), record(&bytes, mode));
             }
             if !wanted.is_empty() || previous.is_some() || adopt.contains(target) {

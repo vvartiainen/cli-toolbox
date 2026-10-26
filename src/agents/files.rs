@@ -162,7 +162,14 @@ fn apply_one(path: &Path, content: &Content) -> Result<(), Error> {
     if let Some(data) = &content.0 {
         write_file(path, data, content.1)
     } else if path.exists() {
-        fs::remove_file(path).map_err(Into::into)
+        fs::remove_file(path)?;
+        // Drop directories the file leaves empty; the first nonempty one,
+        // at the latest the repository root, stops this.
+        let mut parent = path.parent();
+        while let Some(dir) = parent.filter(|dir| fs::remove_dir(dir).is_ok()) {
+            parent = dir.parent();
+        }
+        Ok(())
     } else {
         Ok(())
     }
