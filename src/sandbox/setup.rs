@@ -26,9 +26,10 @@ const DEFAULT_PROJECT_AGENTS: [&str; 2] = ["claude", "codex"];
 
 /// The agent-proxy services the flake takes credentials from, by the
 /// placeholder or option that asks for them.
-const PROXY_CREDENTIALS: [(&str, &str); 5] = [
+const PROXY_CREDENTIALS: [(&str, &str); 6] = [
     ("CLAUDE_CODE_OAUTH_TOKEN", "claude-code"),
     ("chatgptLoginFromProxy", "codex"),
+    ("COPILOT_GITHUB_TOKEN", "copilot"),
     ("GH_TOKEN", "github"),
     ("GITHUB_PACKAGES_TOKEN", "npm-github"),
     ("NODE_AUTH_TOKEN", "npm-github"),
@@ -146,7 +147,8 @@ pub(crate) fn defaults_module(
 
 /// The agent-proxy services whose credentials the flake takes from the proxy:
 /// `CLAUDE_CODE_OAUTH_TOKEN` → claude-code, `chatgptLoginFromProxy = true` →
-/// codex, `GH_TOKEN` → github, `GITHUB_PACKAGES_TOKEN` or `NODE_AUTH_TOKEN` →
+/// codex, `COPILOT_GITHUB_TOKEN` → copilot (the setup script adds github),
+/// `GH_TOKEN` → github, `GITHUB_PACKAGES_TOKEN` or `NODE_AUTH_TOKEN` →
 /// npm-github. Comments are ignored.
 pub(crate) fn proxy_services(flake: &str) -> Vec<String> {
     let mut services: Vec<String> = Vec::new();
@@ -393,6 +395,8 @@ mod tests {
         let flake =
             r#"proxy.env = [ "GH_TOKEN" "GITHUB_PACKAGES_TOKEN" ]; chatgptLoginFromProxy = true;"#;
         assert_eq!(proxy_services(flake), ["github", "npm-github", "codex"]);
+        let flake = r#"proxy.env = [ "COPILOT_GITHUB_TOKEN" "GH_TOKEN" ];"#;
+        assert_eq!(proxy_services(flake), ["copilot", "github"]);
     }
 
     #[test]

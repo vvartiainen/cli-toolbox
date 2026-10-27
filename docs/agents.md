@@ -450,7 +450,8 @@ at the top of the flake's `environment`:
 - With `caCert = ./agent-proxy-ca.pem` in the flake, it runs agent-sandbox's
   `scripts/agent-proxy-setup.sh` for the services whose credentials the flake takes
   from the proxy: `CLAUDE_CODE_OAUTH_TOKEN` → `claude-code`,
-  `chatgptLoginFromProxy = true` → `codex`, `GH_TOKEN` → `github`, and
+  `chatgptLoginFromProxy = true` → `codex`, `COPILOT_GITHUB_TOKEN` → `copilot`
+  (plus `github`), `GH_TOKEN` → `github`, and
   `GITHUB_PACKAGES_TOKEN` or `NODE_AUTH_TOKEN` → `npm-github` (or the services
   `--services` lists). It stores missing secrets
   (prompting for them), creates the client and its keychain token, and writes the CA
