@@ -109,7 +109,7 @@ pub(crate) fn create(
     // Worktrees left in the repository's group, from an earlier project, count.
     let worktrees = write_worktrees(&project)?;
     let mut steps = vec![Step::Done(format!("project: {}", project.dir.display()))];
-    steps.extend(self::setup(&project));
+    steps.extend(self::setup(&project, options.services.as_deref()));
     if let Some(agent) = ai {
         steps.push(
             match project::run_setup_agent(&project, options.source.as_deref(), agent, stderr) {
@@ -128,19 +128,21 @@ pub(crate) fn create(
 }
 
 /// Set up the host side of what the project's flake uses: the agent-proxy
-/// client, token and CA, and the backlog folder. Safe to re-run.
-pub(crate) fn setup(project: &Project) -> Vec<Step> {
+/// client, token and CA, and the backlog folder. `services` replaces the
+/// proxy services the flake asks for. Safe to re-run.
+pub(crate) fn setup(project: &Project, services: Option<&[String]>) -> Vec<Step> {
     let flake = match std::fs::read_to_string(project.dir.join("flake.nix")) {
         Ok(flake) => flake,
         Err(err) => return vec![Step::Failed(format!("setup: read flake.nix: {err}"))],
     };
     let rerun = "fix it and run `cli-toolbox agent project setup`";
-    let proxy = match setup::proxy(project, &flake) {
-        Ok(true) => Step::Done(format!(
-            "proxy: client {} with its token and CA",
-            project.name
+    let proxy = match setup::proxy(project, &flake, services) {
+        Ok(Some(services)) => Step::Done(format!(
+            "proxy: client {} with {} and its token and CA",
+            project.name,
+            services.join(", ")
         )),
-        Ok(false) => Step::Skipped("proxy: not used by flake.nix".into()),
+        Ok(None) => Step::Skipped("proxy: not used by flake.nix".into()),
         Err(err) => Step::Failed(format!("proxy: {err}; {rerun}")),
     };
     let backlog = match setup::backlog(project, &flake) {

@@ -21,8 +21,18 @@ const TOOLS_ENV: &str = "AGENT_SANDBOX_TOOLS";
 /// Used when `$AGENT_SANDBOX_TOOLS` is unset.
 const DEFAULT_TOOLS_DIR: &str = ".config/agent-sandbox-tools";
 
-/// The agent-proxy services the defaults module's credentials come from.
-const PROXY_SERVICES: &str = "claude-code,codex";
+/// The coding agents the defaults module enables unless `--agents` says otherwise.
+const DEFAULT_PROJECT_AGENTS: [&str; 2] = ["claude", "codex"];
+
+/// The agent-proxy services the flake takes credentials from, by the
+/// placeholder or option that asks for them.
+const PROXY_CREDENTIALS: [(&str, &str); 5] = [
+    ("CLAUDE_CODE_OAUTH_TOKEN", "claude-code"),
+    ("chatgptLoginFromProxy", "codex"),
+    ("GH_TOKEN", "github"),
+    ("GITHUB_PACKAGES_TOKEN", "npm-github"),
+    ("NODE_AUTH_TOKEN", "npm-github"),
+];
 /// In the agent-sandbox repository.
 const PROXY_SETUP_SCRIPT: &str = "scripts/agent-proxy-setup.sh";
 pub(crate) const PROXY_CA_FILE: &str = "agent-proxy-ca.pem";
@@ -56,9 +66,36 @@ pub(crate) fn tools_input(dir: &Path, indent: &str) -> String {
     )
 }
 
+/// The coding agents `project create` enables by default.
+pub(crate) fn default_project_agents() -> Vec<String> {
+    DEFAULT_PROJECT_AGENTS.map(String::from).to_vec()
+}
+
+/// Check `--agents` against the agents agent-sandbox can enable.
+pub(crate) fn valid_agents(agents: &[String]) -> Result<(), Error> {
+    match agents
+        .iter()
+        .find(|agent| !AGENTS.contains(&agent.as_str()))
+    {
+        Some(agent) => Err(Error::msg(format!(
+            "unknown agent \"{agent}\"; use some of {}",
+            AGENTS.join(", ")
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The environment module `project create` adds: proxy credentials when
-/// `proxy`, the shared agent tools, and the backlog when it has a folder.
-pub(crate) fn defaults_module(name: &str, proxy: bool, backlog: bool, indent: &str) -> String {
+/// `proxy` for the `agents` that take them from it (Claude Code and Codex),
+/// those agents, and the backlog when it has a folder.
+pub(crate) fn defaults_module(
+    name: &str,
+    proxy: bool,
+    backlog: bool,
+    agents: &[String],
+    indent: &str,
+) -> String {
+    let has = |agent: &str| agents.iter().any(|known| known == agent);
     let mut lines = vec![
         "# cli-toolbox defaults: agent credentials from agent-proxy on the host and".into(),
         "# the shared agent tools (`cli-toolbox agent project setup` sets up the host).".into(),
@@ -71,20 +108,31 @@ pub(crate) fn defaults_module(name: &str, proxy: bool, backlog: bool, indent: &s
                 "    enable = true;",
                 &format!("    client = {};", project::nix_string(name)),
                 &format!("    caCert = ./{PROXY_CA_FILE};"),
-                "    env = {",
-                "      CLAUDE_CODE_OAUTH_TOKEN = \"sk-ant-oat01-proxy-managed\";",
-                "      ANTHROPIC_OAUTH_TOKEN = \"sk-ant-oat01-proxy-managed\";",
-                "    };",
-                "  };",
             ]
             .map(String::from),
         );
+        if has("claude") {
+            lines.extend(
+                [
+                    "    env = {",
+                    "      CLAUDE_CODE_OAUTH_TOKEN = \"sk-ant-oat01-proxy-managed\";",
+                    "      ANTHROPIC_OAUTH_TOKEN = \"sk-ant-oat01-proxy-managed\";",
+                    "    };",
+                ]
+                .map(String::from),
+            );
+        }
+        lines.push("  };".into());
     }
     lines.push("  ai = {".into());
-    if proxy {
+    if proxy && has("codex") {
         lines.push("    chatgptLoginFromProxy = true;".into());
     }
-    lines.extend(["    claude.enable = true;", "    codex.enable = true;"].map(String::from));
+    lines.extend(
+        agents
+            .iter()
+            .map(|agent| format!("    {agent}.enable = true;")),
+    );
     if backlog {
         lines.push("    backlog.enable = true;".into());
     }
@@ -94,6 +142,28 @@ pub(crate) fn defaults_module(name: &str, proxy: bool, backlog: bool, indent: &s
         .map(|line| format!("{indent}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The agent-proxy services whose credentials the flake takes from the proxy:
+/// `CLAUDE_CODE_OAUTH_TOKEN` → claude-code, `chatgptLoginFromProxy = true` →
+/// codex, `GH_TOKEN` → github, `GITHUB_PACKAGES_TOKEN` or `NODE_AUTH_TOKEN` →
+/// npm-github. Comments are ignored.
+pub(crate) fn proxy_services(flake: &str) -> Vec<String> {
+    let mut services: Vec<String> = Vec::new();
+    for line in flake.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        if line.contains("chatgptLoginFromProxy") && !line.contains("true") {
+            continue;
+        }
+        for word in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            for (name, service) in PROXY_CREDENTIALS {
+                if word == name && !services.iter().any(|known| known == service) {
+                    services.push(service.into());
+                }
+            }
+        }
+    }
+    services
 }
 
 /// Whether the flake takes its credentials from agent-proxy.
@@ -183,12 +253,27 @@ fn string_setting(flake: &str, key: &str) -> Option<String> {
 
 /// Run agent-sandbox's proxy setup for the project: store missing service
 /// secrets (prompting for them), create the client and its keychain token,
-/// and export the CA next to the flake. Safe to re-run. `false` when the
-/// flake does not use the proxy.
-pub(crate) fn proxy(project: &Project, flake: &str) -> Result<bool, Error> {
+/// grant it `services` (default: [`proxy_services`] of the flake), and export
+/// the CA next to the flake. Safe to re-run. `None` when the flake does not
+/// use the proxy, else the services granted.
+pub(crate) fn proxy(
+    project: &Project,
+    flake: &str,
+    services: Option<&[String]>,
+) -> Result<Option<Vec<String>>, Error> {
     if !uses_proxy(flake) {
-        return Ok(false);
+        return Ok(None);
     }
+    let services = match services {
+        Some(services) => services.to_vec(),
+        None => proxy_services(flake),
+    };
+    if services.is_empty() {
+        return Err(Error::msg(
+            "flake.nix takes no credentials from the proxy; pass --services, such as --services github",
+        ));
+    }
+    let list = services.join(",");
     let source = project::source(agent_sandbox_input(flake).as_deref());
     let script = project::source_dir(&source)?.join(PROXY_SETUP_SCRIPT);
     let script = script.to_string_lossy();
@@ -203,12 +288,12 @@ pub(crate) fn proxy(project: &Project, flake: &str) -> Result<bool, Error> {
             "--client",
             &project.name,
             "--services",
-            PROXY_SERVICES,
+            &list,
         ],
         Some(&project.dir),
         &[],
     )?;
-    Ok(true)
+    Ok(Some(services))
 }
 
 /// What [`backlog`] did.
@@ -254,7 +339,8 @@ mod tests {
 
     #[test]
     fn defaults_module_takes_credentials_from_the_proxy() {
-        let module = defaults_module("demo", true, true, "  ");
+        let agents = default_project_agents();
+        let module = defaults_module("demo", true, true, &agents, "  ");
         for want in [
             "  {\n",
             "    proxy = {\n      enable = true;\n      client = \"demo\";\n      caCert = ./agent-proxy-ca.pem;\n",
@@ -265,16 +351,53 @@ mod tests {
         }
         assert!(uses_proxy(&module));
 
-        let plain = defaults_module("demo", false, false, "");
+        let plain = defaults_module("demo", false, false, &agents, "");
         assert!(!plain.contains("proxy = {"), "{plain}");
         assert!(!plain.contains("chatgptLoginFromProxy"), "{plain}");
         assert!(!plain.contains("backlog.enable"), "{plain}");
         assert!(plain.contains("claude.enable = true;"), "{plain}");
+        assert_eq!(proxy_services(&module), ["claude-code", "codex"]);
+    }
+
+    #[test]
+    fn defaults_module_asks_only_for_the_chosen_agents_credentials() {
+        let module = defaults_module("demo", true, false, &["codex".into()], "");
+        assert!(!module.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{module}");
+        assert!(!module.contains("claude.enable"), "{module}");
+        assert!(
+            module.contains("caCert = ./agent-proxy-ca.pem;\n  };"),
+            "{module}"
+        );
+        assert_eq!(proxy_services(&module), ["codex"]);
+
+        let module = defaults_module("demo", true, false, &["copilot".into()], "");
+        assert!(!module.contains("chatgptLoginFromProxy"), "{module}");
+        assert!(proxy_services(&module).is_empty());
+        assert!(valid_agents(&["claude".into(), "pi".into()]).is_ok());
+        assert!(valid_agents(&["claud".into()]).is_err());
+    }
+
+    #[test]
+    fn proxy_services_follow_the_credentials_in_the_flake() {
+        let flake = r#"
+          proxy = {
+            env = {
+              NODE_AUTH_TOKEN = "proxy-managed";
+            };
+            # env = [ "GH_TOKEN" "GITHUB_PACKAGES_TOKEN" ];
+          };
+          secrets.agent = [ "AGENT_GITHUB_TOKEN" ];
+          ai.chatgptLoginFromProxy = false;
+"#;
+        assert_eq!(proxy_services(flake), ["npm-github"]);
+        let flake =
+            r#"proxy.env = [ "GH_TOKEN" "GITHUB_PACKAGES_TOKEN" ]; chatgptLoginFromProxy = true;"#;
+        assert_eq!(proxy_services(flake), ["github", "npm-github", "codex"]);
     }
 
     #[test]
     fn enabled_agents_come_from_the_ai_options() {
-        let module = defaults_module("demo", true, true, "        ");
+        let module = defaults_module("demo", true, true, &default_project_agents(), "        ");
         let flake = format!(
             "{{\n  outputs = {{ self, agent-sandbox }}: {{\n    modules = [\n{module}\n    ];\n  }};\n}}\n"
         );

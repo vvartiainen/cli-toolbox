@@ -483,6 +483,8 @@ fn project_defaults(cwd: &Path) -> Result<CreateOptions, Error> {
         ssh_key: None,
         proxy: true,
         backlog: crate::sandbox::setup::backlog_root().is_some(),
+        agents: crate::sandbox::setup::default_project_agents(),
+        services: None,
         repo,
     })
 }

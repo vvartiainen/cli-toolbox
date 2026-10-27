@@ -218,6 +218,10 @@ pub(crate) struct CreateOptions {
     pub(crate) proxy: bool,
     /// Give the project a backlog under [`setup::backlog_root`], if there is one.
     pub(crate) backlog: bool,
+    /// The coding agents the defaults module enables.
+    pub(crate) agents: Vec<String>,
+    /// The agent-proxy services to grant instead of the ones the flake asks for.
+    pub(crate) services: Option<Vec<String>>,
 }
 
 /// Create `<root>/projects/<name>/flake.nix` from an agent-sandbox template.
@@ -227,6 +231,7 @@ pub(crate) fn create(
     options: &CreateOptions,
     stderr: &mut dyn Write,
 ) -> Result<Project, Error> {
+    setup::valid_agents(&options.agents)?;
     let name = match &options.name {
         Some(name) => valid_name(name)?,
         None => project_name(&options.repo),
@@ -280,6 +285,7 @@ pub(crate) fn create(
         proxy: options.proxy,
         backlog_dir: backlog_dir.as_deref(),
         tools: tools.as_deref(),
+        agents: &options.agents,
     };
     fs::write(&flake, customize_flake(&text, &settings))?;
     project.write_worktrees(&[])?;
@@ -329,6 +335,7 @@ struct FlakeSettings<'a> {
     backlog_dir: Option<&'a Path>,
     /// The personal tools flake, see [`setup::tools_dir`].
     tools: Option<&'a Path>,
+    agents: &'a [String],
 }
 
 /// Point a template at `source` and the project's state, mount the
@@ -378,6 +385,7 @@ fn customize_flake(text: &str, settings: &FlakeSettings) -> String {
                     settings.name,
                     settings.proxy,
                     settings.backlog_dir.is_some(),
+                    settings.agents,
                     &format!("{indent}  "),
                 );
                 format!("{line}\n{module}")
@@ -655,6 +663,9 @@ mod tests {
 }
 "#;
 
+    static AGENTS: std::sync::LazyLock<Vec<String>> =
+        std::sync::LazyLock::new(setup::default_project_agents);
+
     fn settings<'a>(state_dir: &'a Path, key: Option<&'a str>) -> FlakeSettings<'a> {
         FlakeSettings {
             source: "github:me/agent-sandbox",
@@ -665,6 +676,7 @@ mod tests {
             proxy: true,
             backlog_dir: Some(Path::new("/home/me/Agents/cli-toolbox")),
             tools: Some(Path::new("/home/me/.config/agent-sandbox-tools")),
+            agents: &AGENTS,
         }
     }
 

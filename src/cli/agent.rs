@@ -7,6 +7,7 @@ use crate::agent::Launch;
 use crate::agent::prune::{self, PruneOptions};
 use crate::agent::vm::{self, VmOptions};
 use crate::sandbox::project::{self, CreateOptions, Project};
+use crate::sandbox::setup;
 use crate::{Error, agent, git};
 
 /// The default agent kind for `--agent`.
@@ -75,12 +76,28 @@ enum ProjectCommands {
         /// Do not give the project a backlog.
         #[arg(long)]
         no_backlog: bool,
+        /// Coding agents to enable, comma-separated (default: claude,codex; Pi is on unless turned off). Only claude and codex take credentials from agent-proxy.
+        #[arg(long, value_name = "LIST", value_delimiter = ',')]
+        agents: Option<Vec<String>>,
+        /// agent-proxy services to grant, comma-separated, instead of the ones the flake asks for.
+        #[arg(
+            long,
+            value_name = "LIST",
+            value_delimiter = ',',
+            conflicts_with = "no_proxy"
+        )]
+        services: Option<Vec<String>>,
     },
     /// Set up the host side of the project's proxy credentials and backlog.
     #[command(
-        after_help = "When flake.nix takes its credentials from agent-proxy (caCert = ./agent-proxy-ca.pem), runs agent-sandbox's scripts/agent-proxy-setup.sh for the services claude-code and codex: it stores missing secrets (prompting for them), creates the client named after the project with its token in the login keychain, and writes agent-proxy-ca.pem next to the flake. agent-proxy must be running, and on PATH or in $AGENT_PROXY_FLAKE.\n\nWhen flake.nix sets vm.backlogDir, creates that folder and runs `backlog init` in it unless it already has a backlog.\n\nSafe to re-run; `agent project create` runs it."
+        after_help = "When flake.nix takes its credentials from agent-proxy (caCert = ./agent-proxy-ca.pem), runs agent-sandbox's scripts/agent-proxy-setup.sh for the services whose credentials the flake takes from the proxy (CLAUDE_CODE_OAUTH_TOKEN: claude-code, chatgptLoginFromProxy = true: codex, GH_TOKEN: github, GITHUB_PACKAGES_TOKEN or NODE_AUTH_TOKEN: npm-github), or for --services: it stores missing secrets (prompting for them), creates the client named after the project with its token in the login keychain, and writes agent-proxy-ca.pem next to the flake. agent-proxy must be running, and on PATH or in $AGENT_PROXY_FLAKE.\n\nWhen flake.nix sets vm.backlogDir, creates that folder and runs `backlog init` in it unless it already has a backlog.\n\nSafe to re-run; `agent project create` runs it."
     )]
-    Setup { project: Option<String> },
+    Setup {
+        project: Option<String>,
+        /// agent-proxy services to grant, comma-separated, instead of the ones the flake asks for.
+        #[arg(long, value_name = "LIST", value_delimiter = ',')]
+        services: Option<Vec<String>>,
+    },
     /// Tailor the project's flake to its repository again.
     #[command(
         after_help = "Starts a coding agent in the repository with agent-sandbox's docs/setup-agent.md, told that the flake may already be tailored, so it updates the flake for repository changes rather than starting over. --edit opens flake.nix in $VISUAL or $EDITOR instead. A running VM uses the changed flake after a restart."
@@ -289,6 +306,8 @@ fn run_project(
             ai,
             no_proxy,
             no_backlog,
+            agents,
+            services,
         } => {
             let options = CreateOptions {
                 name,
@@ -298,6 +317,8 @@ fn run_project(
                 ssh_key,
                 proxy: !no_proxy,
                 backlog: !no_backlog,
+                agents: agents.unwrap_or_else(setup::default_project_agents),
+                services,
             };
             let ai = ai.map(|kind| {
                 if kind.is_empty() {
@@ -332,7 +353,10 @@ fn run_project(
         ProjectCommands::Update { project } => {
             finish(&vm::update_flake(&resolve(&root, project)?)?, stderr)
         }
-        ProjectCommands::Setup { project } => finish(&vm::setup(&resolve(&root, project)?), stderr),
+        ProjectCommands::Setup { project, services } => finish(
+            &vm::setup(&resolve(&root, project)?, services.as_deref()),
+            stderr,
+        ),
         ProjectCommands::Start { project, boot } => {
             let steps = vm::start(&resolve(&root, project)?, &boot_options(boot), stderr)?;
             finish(&steps, stderr)

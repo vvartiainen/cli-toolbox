@@ -2298,6 +2298,8 @@ mod tests {
             ssh_key: None,
             proxy: true,
             backlog: false,
+            agents: crate::sandbox::setup::default_project_agents(),
+            services: None,
         }
     }
 
