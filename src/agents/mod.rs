@@ -13,6 +13,7 @@ mod config;
 mod files;
 mod library;
 mod native;
+mod skills;
 use backend::*;
 use config::*;
 use files::*;
@@ -23,11 +24,18 @@ use native::*;
 mod tests;
 
 pub(crate) use config::Environment;
+pub(crate) use skills::SkillStatus;
 
 /// The choices of the working directory's repository and whether its files
 /// match them, for the TUI.
-pub(crate) fn overview() -> Result<(Vec<Entry>, bool), Error> {
-    Environment::discover()?.with_project(|project| Ok((project.overview(), project.is_synced()?)))
+pub(crate) fn overview() -> Result<(Vec<Entry>, Vec<SkillStatus>, bool), Error> {
+    Environment::discover()?.with_project(|project| {
+        Ok((
+            project.overview(),
+            project.skill_statuses()?,
+            project.is_synced()?,
+        ))
+    })
 }
 /// Turn one target, MCP server or skill on or off for the working directory's
 /// repository, without syncing.
@@ -37,6 +45,9 @@ pub(crate) fn set_choice(group: &str, name: &str, enabled: bool) -> Result<(), E
 /// Sync, or preview with `dry_run`, the working directory's repository.
 pub(crate) fn sync(dry_run: bool, out: &mut dyn Write) -> Result<(), Error> {
     Environment::discover()?.with_project(|project| project.sync(dry_run, false, out))
+}
+pub(crate) fn sync_skill(name: &str, dry_run: bool, out: &mut dyn Write) -> Result<(), Error> {
+    Environment::discover()?.with_project(|project| project.sync_skill(name, dry_run, true, out))
 }
 
 /// One target, catalog MCP server or skill and whether the repository uses it.
@@ -53,6 +64,10 @@ pub(crate) struct Entry {
 #[serde(deny_unknown_fields)]
 struct Lock {
     version: u32,
+    /// A single-skill sync has adopted only its skill folders. Other entries
+    /// still need the checks used for a checkout without a lock.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    partial: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     mcp: BTreeMap<String, serde_json::Map<String, Value>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -68,6 +83,7 @@ impl Lock {
 struct Plan {
     changes: Changes,
     lock: Lock,
+    conflicts: Vec<String>,
 }
 
 /// A repository's agent tools: its choices from the catalog, kept outside the
@@ -222,7 +238,11 @@ impl Project {
                 "No saved choices; these were worked out from the agent files."
             )?;
         }
-        for entry in self.overview() {
+        for entry in self
+            .overview()
+            .into_iter()
+            .filter(|entry| entry.group != "skills")
+        {
             writeln!(
                 out,
                 "{} / {}: {}",
@@ -231,10 +251,15 @@ impl Project {
                 if entry.enabled { "on" } else { "off" }
             )?;
         }
+        self.list_skills(out)?;
+        let plan = self.plan()?;
+        for conflict in &plan.conflicts {
+            writeln!(out, "Mismatch: {conflict}")?;
+        }
         writeln!(
             out,
             "{}",
-            if self.is_synced()? {
+            if plan.changes.is_empty() && plan.conflicts.is_empty() {
                 "Files are up to date."
             } else {
                 "Pending changes; preview with ct agents sync --dry-run."
@@ -270,14 +295,40 @@ impl Project {
         }
     }
     pub fn is_synced(&self) -> Result<bool, Error> {
-        Ok(self.plan(false)?.changes.is_empty())
+        let plan = self.plan()?;
+        Ok(plan.changes.is_empty() && plan.conflicts.is_empty())
     }
     /// Write the agent files. `replace` takes over catalog-named entries that
     /// differ from what sync would write, instead of stopping.
     pub fn sync(&mut self, dry_run: bool, replace: bool, out: &mut dyn Write) -> Result<(), Error> {
-        let plan = self.plan(replace)?;
+        let plan = self.plan()?;
+        self.apply_plan(plan, dry_run, replace, out)
+    }
+    fn apply_plan(
+        &mut self,
+        plan: Plan,
+        dry_run: bool,
+        replace: bool,
+        out: &mut dyn Write,
+    ) -> Result<(), Error> {
+        if !dry_run && !replace && !plan.conflicts.is_empty() {
+            return Err(Error::msg(plan.conflicts.join("\n")));
+        }
+        if dry_run {
+            for conflict in &plan.conflicts {
+                writeln!(out, "Mismatch: {conflict}")?;
+            }
+        }
         if plan.changes.is_empty() {
-            writeln!(out, "Up to date.")?;
+            writeln!(
+                out,
+                "{}",
+                if plan.conflicts.is_empty() {
+                    "Up to date."
+                } else {
+                    "No file changes; differing entries need --replace to be adopted."
+                }
+            )?;
         }
         for (path, (content, _)) in &plan.changes {
             let relative = path.strip_prefix(&self.root).map_err(Error::msg)?;
@@ -329,7 +380,7 @@ impl Project {
     /// Compare the files with the choices. What sync did not write, or what
     /// changed since, is not overwritten unless `replace`: that is an error to
     /// resolve.
-    fn plan(&self, replace: bool) -> Result<Plan, Error> {
+    fn plan(&self) -> Result<Plan, Error> {
         let targets: BTreeSet<&str> = TARGETS
             .into_iter()
             .filter(|t| self.enabled("targets", t))
@@ -344,6 +395,7 @@ impl Project {
             }
         }
         let mut changes = Changes::new();
+        let mut conflicts = Vec::new();
         let mut lock = Lock {
             version: 1,
             ..Lock::default()
@@ -357,26 +409,31 @@ impl Project {
             } else {
                 serde_json::Map::new()
             };
-            self.plan_mcp(target, &wanted, replace, &mut changes)?;
+            self.plan_mcp(target, &wanted, &mut changes, &mut conflicts)?;
             if !wanted.is_empty() {
                 lock.mcp.insert(target.into(), wanted);
             }
         }
-        lock.skills = self.plan_skills(&targets, replace, &mut changes)?;
-        Ok(Plan { changes, lock })
+        lock.skills = self.plan_skills(&targets, None, &mut changes, &mut conflicts)?;
+        Ok(Plan {
+            changes,
+            lock,
+            conflicts,
+        })
     }
     fn plan_mcp(
         &self,
         target: &str,
         wanted: &serde_json::Map<String, Value>,
-        replace: bool,
         changes: &mut Changes,
+        conflicts: &mut Vec<String>,
     ) -> Result<(), Error> {
         let (relative, key) = self.mcp_file(target)?;
         let path = safe_path(&self.root, relative)?;
         let recorded = self
             .lock
             .as_ref()
+            .filter(|lock| !lock.partial)
             .map(|lock| lock.mcp.get(target).cloned().unwrap_or_default());
         if wanted.is_empty() && (recorded.as_ref().is_some_and(|r| r.is_empty()) || !path.exists())
         {
@@ -401,25 +458,22 @@ impl Project {
         });
         for (name, entry) in &owned {
             // Without a lock, ours is what sync would write from the catalog.
-            let expected = if self.lock.is_some() {
+            let expected = if self.lock.as_ref().is_some_and(|lock| !lock.partial) {
                 entry.clone()
             } else {
                 native_server(target, &self.catalog["mcp"][name])
             };
-            if current.get(name).is_some_and(|actual| *actual != expected) && !replace {
-                return Err(Error::msg(differs(name)));
+            if current.get(name).is_some_and(|actual| *actual != expected) {
+                conflicts.push(differs(name));
             }
         }
         for (name, entry) in wanted {
             // An identical server is adopted; anything else is someone else's.
-            if !owned.contains_key(name)
-                && current.get(name).is_some_and(|v| v != entry)
-                && !replace
-            {
-                return Err(Error::msg(format!(
+            if !owned.contains_key(name) && current.get(name).is_some_and(|v| v != entry) {
+                conflicts.push(format!(
                     "{relative} already has another MCP server named {name}; \
                      remove or rename it, or sync with --replace"
-                )));
+                ));
             }
         }
         let mut combined = current.clone();
@@ -446,13 +500,14 @@ impl Project {
     fn plan_skills(
         &self,
         targets: &BTreeSet<&str>,
-        replace: bool,
+        only: Option<&str>,
         changes: &mut Changes,
+        conflicts: &mut Vec<String>,
     ) -> Result<Records, Error> {
         let mut desired = BTreeMap::new();
         for dir in skill_dirs(targets) {
             for (name, source) in &self.skills {
-                if !self.enabled("skills", name) {
+                if only.is_some_and(|only| only != name) || !self.enabled("skills", name) {
                     continue;
                 }
                 for (file, rec) in tree_records(source)? {
@@ -461,32 +516,56 @@ impl Project {
                 }
             }
         }
-        let owned = match &self.lock {
-            Some(lock) => lock.skills.clone(),
-            None => self.found_skills(&desired, replace)?,
+        let mut owned = match &self.lock {
+            Some(lock) if !lock.partial => Records::new(),
+            _ => self.found_skills(&desired, only, conflicts)?,
         };
+        if let Some(lock) = &self.lock {
+            owned.extend(
+                lock.skills
+                    .iter()
+                    .filter(|(path, _)| only.is_none_or(|name| skills::belongs_to(path, name)))
+                    .map(|(path, rec)| (path.clone(), rec.clone())),
+            );
+        }
+        // Extra files inside catalog-named folders are mismatches too. Keep
+        // them protected until replacement is explicitly requested.
+        for name in self
+            .skills
+            .keys()
+            .filter(|name| only.is_none_or(|only| only == name.as_str()))
+        {
+            for dir in [".claude/skills", ".agents/skills"] {
+                let folder = format!("{dir}/{name}");
+                for (file, record) in tree_records(&safe_path(&self.root, &folder)?)? {
+                    let relative = format!("{folder}/{file}");
+                    if !owned.contains_key(&relative) && !desired.contains_key(&relative) {
+                        conflicts.push(format!("skill file {relative} is not in the catalog; sync with --replace to remove it"));
+                        owned.insert(relative, record);
+                    }
+                }
+            }
+        }
         let paths: BTreeSet<_> = owned.keys().chain(desired.keys()).cloned().collect();
         let mut records = Records::new();
         for relative in paths {
             let path = safe_path(&self.root, &relative)?;
             let actual = optional_record(&path)?;
             let wanted = desired.get(&relative);
-            if !replace {
-                match (owned.get(&relative), &actual) {
-                    (Some(old), Some(actual)) if old != actual => {
-                        return Err(Error::msg(format!(
-                            "skill file {relative} differs from what ct agents wrote; \
+            match (owned.get(&relative), &actual) {
+                (Some(old), Some(actual)) if old != actual => {
+                    conflicts.push(format!(
+                        "skill file {relative} differs from what ct agents wrote; \
                              restore or remove it, or sync with --replace"
-                        )));
-                    }
-                    (None, Some(actual)) if wanted.is_some_and(|(_, rec)| rec != actual) => {
-                        return Err(Error::msg(format!(
-                            "skill file {relative} exists and was not written by ct agents; \
-                             remove it, or sync with --replace"
-                        )));
-                    }
-                    _ => {}
+                    ));
                 }
+                (None, Some(actual)) if wanted.is_some_and(|(_, rec)| rec != actual) => {
+                    conflicts.push(format!(
+                        "skill file {relative} exists and was not written by ct agents; \
+                             remove it, or sync with --replace"
+                    ));
+                }
+                _ => {}
             }
             if let Some((source, rec)) = wanted {
                 if actual.as_ref() != Some(rec) {
@@ -506,12 +585,23 @@ impl Project {
     fn found_skills(
         &self,
         desired: &BTreeMap<String, (PathBuf, Record)>,
-        replace: bool,
+        only: Option<&str>,
+        conflicts: &mut Vec<String>,
     ) -> Result<Records, Error> {
         let mut found = Records::new();
         for dir in [".claude/skills", ".agents/skills"] {
             for name in self.skills.keys() {
+                if only.is_some_and(|only| only != name) {
+                    continue;
+                }
                 let folder = format!("{dir}/{name}");
+                if self.lock.as_ref().is_some_and(|lock| {
+                    lock.skills
+                        .keys()
+                        .any(|path| path.starts_with(&format!("{folder}/")))
+                }) {
+                    continue;
+                }
                 let path = safe_path(&self.root, &folder)?;
                 if !path.is_dir() {
                     continue;
@@ -525,11 +615,12 @@ impl Project {
                     .filter(|(relative, _)| relative.starts_with(&format!("{folder}/")))
                     .map(|(relative, (_, rec))| (relative.clone(), rec.clone()))
                     .collect();
-                if !expected.is_empty() && files != expected && !replace {
-                    return Err(Error::msg(format!(
+                if !expected.is_empty() && files != expected {
+                    conflicts.push(format!(
                         "skill folder {folder} differs from the catalog's; \
-                         sync with --replace to replace it"
-                    )));
+                         inspect with ct agents skills list; \
+                         re-sync with ct agents skills sync {name} --replace"
+                    ));
                 }
                 found.extend(files);
             }

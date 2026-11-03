@@ -99,9 +99,15 @@ impl Context {
                 .map(Resource::AzureAccount)
                 .collect()),
             ToolId::AgentTools => {
-                let (entries, synced) = agents::overview()?;
+                let (entries, skills, synced) = agents::overview()?;
                 Ok(std::iter::once(Resource::AgentSync(synced))
-                    .chain(entries.into_iter().map(Resource::Agent))
+                    .chain(
+                        entries
+                            .into_iter()
+                            .filter(|entry| entry.group != "skills")
+                            .map(Resource::Agent),
+                    )
+                    .chain(skills.into_iter().map(Resource::AgentSkill))
                     .collect())
             }
             ToolId::SandboxVms => Ok(vm::running_vms()
@@ -230,6 +236,25 @@ impl Context {
                 };
                 Ok(Done::body(format!(
                     "{heading}\n\n{}",
+                    String::from_utf8_lossy(&out)
+                )))
+            }
+            Action::InspectSkill(skill) => Ok(Done::body(format!(
+                "Skill {}: {}\n\n{}\n\nReturn to the list, then Ctrl+D previews this skill's sync and Ctrl+R re-syncs it from the installed catalog.",
+                skill.name,
+                if skill.enabled { "on" } else { "off" },
+                skill.details.join("\n")
+            ))),
+            Action::SyncSkill(name, dry_run) => {
+                let mut out = Vec::new();
+                agents::sync_skill(name, *dry_run, &mut out)?;
+                Ok(Done::body(format!(
+                    "{}\n\n{}",
+                    if *dry_run {
+                        "Skill re-sync preview; nothing was changed."
+                    } else {
+                        "Re-synced skill."
+                    },
                     String::from_utf8_lossy(&out)
                 )))
             }

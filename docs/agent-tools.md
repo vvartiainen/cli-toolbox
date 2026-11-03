@@ -11,6 +11,9 @@ required; subdirectories and linked worktrees resolve to their own checkout.
 ct agents                          # Toggle choices with fzf or the built-in picker, then sync
 ct tui                             # Agents › Agent tools: toggle, sync, preview
 ct agents status                   # Choices and whether the files match them
+ct agents skills list              # Skills and every changed, missing or extra file
+ct agents skills sync review --dry-run  # Preview re-syncing one skill
+ct agents skills sync review --replace  # Replace just this skill's project copies
 ct agents set targets claude enable
 ct agents set mcp nixos enable
 ct agents set skills review enable
@@ -22,6 +25,14 @@ ct agents library update           # Download remote skills, refreshing revision
 
 Nothing is on by default, targets included: choose each agent the project
 uses. Choices are saved right away; files change only when you sync.
+
+Status and skill lists report mismatches without stopping at the first conflict.
+Sync previews also show conflicts and the proposed file changes without writing.
+`skills sync NAME` uses the current target and skill choices: it updates enabled
+copies and removes disabled copies. `--replace` also overwrites edited files and
+removes extra files inside that skill's catalog-named folders. Other skills and
+MCP settings stay untouched. It uses the installed catalog sources; to fetch newer
+remote revisions, run `ct agents library update` first, then sync the skill.
 
 ## Targets and their files
 
@@ -62,6 +73,8 @@ what the lock records and never overwrites anything else:
   same name and content is adopted;
 - a server or skill file it wrote and someone edited, or a different server or
   file in the way, stops the sync; `--replace` overwrites it instead;
+- extra files in catalog-named skill folders are reported and require
+  `--replace` to remove;
 - a section, file or folder left empty is removed.
 
 Without saved state, in a fresh clone, on another machine or after moving the

@@ -21,7 +21,7 @@ const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove 
 const HELP_PROJECTS: &str =
     "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1/? help · esc back";
 const HELP_AGENTS: &str =
-    "type to filter · ⏎ toggle · ^S sync · ^D preview · F5 refresh · F1/? help · esc back";
+    "⏎ toggle · ^S sync · ^D preview · ^V details · ^R re-sync · F1/? help · esc back";
 const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1/? help · esc back";
 const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · F1/? help · esc back";
 const HELP_TAILOR: &str = "a agent · e edit · s skip · F1/? help";
@@ -200,7 +200,15 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
                 entries.extend([
                     entry("⏎", "toggle for this repository; on the sync row, sync"),
                     entry("^S", "sync agent files"),
-                    entry("^D", "preview the sync without changing files"),
+                    entry(
+                        "^D",
+                        "preview the highlighted skill; on other rows, preview all files",
+                    ),
+                    entry("^V", "show the highlighted skill's files and mismatches"),
+                    entry(
+                        "^R",
+                        "re-sync the highlighted skill from the catalog (asks first)",
+                    ),
                 ]);
             } else if picker.tool == ToolId::SandboxVms {
                 entries.extend([
@@ -523,6 +531,7 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, picker: &PickerState) {
             Resource::Project(status) => Some(clean_text(&status.project.name).chars().count()),
             Resource::Vm(vm) => Some(clean_text(&vm.name).chars().count()),
             Resource::Agent(entry) => Some(clean_text(&entry.name).chars().count()),
+            Resource::AgentSkill(skill) => Some(clean_text(&skill.name).chars().count()),
             _ => None,
         })
         .max()
@@ -601,6 +610,37 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
             Line::from(spans)
         }
         Resource::Agent(entry) => agent_line(entry, name_width),
+        Resource::AgentSkill(skill) => {
+            let mut line = agent_line(
+                &Entry {
+                    group: "skills".into(),
+                    name: skill.name.clone(),
+                    enabled: skill.enabled,
+                },
+                name_width,
+            );
+            line.spans.push(Span::styled(
+                if skill.differs {
+                    "  mismatch · ^V details"
+                } else if !skill.enabled {
+                    ""
+                } else if skill
+                    .details
+                    .iter()
+                    .any(|detail| detail.starts_with("up to date "))
+                {
+                    "  matches catalog"
+                } else {
+                    "  no targets enabled"
+                },
+                Style::new().fg(if skill.differs {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ));
+            line
+        }
         Resource::AgentSync(synced) => Line::from(vec![
             Span::raw(" sync     "),
             if *synced {
@@ -1490,6 +1530,24 @@ mod tests {
         assert!(list.contains("pending changes"), "{list}");
         assert!(list.contains("^S sync"), "{list}");
         assert!(list.contains("Agents › Agent tools"), "{list}");
+    }
+
+    #[test]
+    fn renders_skill_mismatches_and_repair_shortcuts() {
+        let mut app = App::new("/tmp/project".into());
+        app.loaded(
+            ToolId::AgentTools,
+            Ok(vec![Resource::AgentSkill(crate::agents::SkillStatus {
+                name: "review".into(),
+                enabled: true,
+                differs: true,
+                details: vec!["changed .claude/skills/review/SKILL.md".into()],
+            })]),
+        );
+        let list = rendered(&app, 150, super::HEIGHT);
+        for expected in ["review", "mismatch", "^V details", "^R re-sync"] {
+            assert!(list.contains(expected), "{list}");
+        }
     }
 
     #[test]

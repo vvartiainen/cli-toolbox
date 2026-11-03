@@ -104,6 +104,215 @@ fn assert_error(result: Result<impl Sized, Error>, text: &str) {
 }
 
 #[test]
+fn skill_list_reports_all_mismatches_without_writing() {
+    let f = Fixture::new();
+    f.add_skill();
+    f.choose(&[
+        ("targets", "claude"),
+        ("targets", "codex"),
+        ("skills", "review"),
+    ]);
+    f.sync().unwrap();
+    write_file(
+        &f.root.join(".claude/skills/review/SKILL.md"),
+        b"edited",
+        0o644,
+    )
+    .unwrap();
+    fs::remove_file(f.root.join(".agents/skills/review/run.sh")).unwrap();
+    write_file(
+        &f.root.join(".agents/skills/review/extra.md"),
+        b"extra",
+        0o644,
+    )
+    .unwrap();
+    let before = snapshot(f.temp.path());
+    let mut out = Vec::new();
+    f.project().list_skills(&mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    for expected in [
+        "review: on",
+        "changed .claude/skills/review/SKILL.md",
+        "missing .agents/skills/review/run.sh",
+        "extra .agents/skills/review/extra.md",
+    ] {
+        assert!(out.contains(expected), "{out}");
+    }
+    assert!(!f.project().is_synced().unwrap());
+    f.project().status(&mut Vec::new()).unwrap();
+    assert_eq!(snapshot(f.temp.path()), before);
+}
+
+#[test]
+fn selected_skill_sync_previews_and_repairs_only_that_skill() {
+    let mut f = Fixture::new();
+    f.add_skill();
+    let other = f.temp.path().join("other");
+    write_file(&other.join("SKILL.md"), b"Other skill", 0o644).unwrap();
+    f.catalog["localSkills"] = json!({"other":other});
+    f.choose(&[
+        ("targets", "claude"),
+        ("targets", "codex"),
+        ("skills", "review"),
+        ("skills", "other"),
+        ("mcp", "nixos"),
+    ]);
+    f.sync().unwrap();
+    write_file(
+        &f.root.join(".claude/skills/review/SKILL.md"),
+        b"edited",
+        0o644,
+    )
+    .unwrap();
+    write_file(
+        &f.root.join(".claude/skills/other/SKILL.md"),
+        b"keep",
+        0o644,
+    )
+    .unwrap();
+    write_file(
+        &f.root.join(".claude/skills/review/extra.md"),
+        b"extra",
+        0o644,
+    )
+    .unwrap();
+    write_json(
+        &f.root.join(".mcp.json"),
+        &json!({"mcpServers":{"nixos":{"command":"keep"}}}),
+    )
+    .unwrap();
+    let before = snapshot(f.temp.path());
+    let mut out = Vec::new();
+    f.project()
+        .sync_skill("review", true, true, &mut out)
+        .unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("update .claude/skills/review/SKILL.md")
+    );
+    assert_eq!(snapshot(f.temp.path()), before);
+    assert_error(
+        f.project()
+            .sync_skill("review", false, false, &mut Vec::new()),
+        "differs",
+    );
+    f.project()
+        .sync_skill("review", false, true, &mut Vec::new())
+        .unwrap();
+    assert_eq!(
+        fs::read(f.root.join(".claude/skills/review/SKILL.md")).unwrap(),
+        fs::read(f.library.join(".rulesync/skills/.curated/review/SKILL.md")).unwrap()
+    );
+    assert_eq!(
+        fs::read(f.root.join(".claude/skills/other/SKILL.md")).unwrap(),
+        b"keep"
+    );
+    assert!(!f.root.join(".claude/skills/review/extra.md").exists());
+    assert_eq!(
+        f.json(".mcp.json")["mcpServers"]["nixos"]["command"],
+        "keep"
+    );
+    assert_error(f.sync(), "differs");
+    assert_error(
+        f.project()
+            .sync_skill("unknown", false, true, &mut Vec::new()),
+        "unknown skill",
+    );
+}
+
+#[test]
+fn selected_skill_sync_without_a_lock_keeps_other_conflicts_protected() {
+    let mut f = Fixture::new();
+    f.add_skill();
+    let other = f.temp.path().join("other");
+    write_file(&other.join("SKILL.md"), b"Other skill", 0o644).unwrap();
+    f.catalog["localSkills"] = json!({"other":other});
+    write_file(
+        &f.root.join(".claude/skills/other/SKILL.md"),
+        b"keep",
+        0o644,
+    )
+    .unwrap();
+    write_file(
+        &f.root.join(".claude/skills/review/SKILL.md"),
+        b"old",
+        0o644,
+    )
+    .unwrap();
+    write_json(
+        &f.root.join(".mcp.json"),
+        &json!({"mcpServers":{"nixos":{"command":"older"}}}),
+    )
+    .unwrap();
+    f.project()
+        .sync_skill("review", false, true, &mut Vec::new())
+        .unwrap();
+    assert_eq!(
+        f.json(".mcp.json")["mcpServers"]["nixos"]["command"],
+        "older"
+    );
+    let mut preview = Vec::new();
+    f.project().sync(true, false, &mut preview).unwrap();
+    let preview = String::from_utf8(preview).unwrap();
+    assert!(preview.contains("MCP server nixos"), "{preview}");
+    assert!(
+        preview.contains("skill folder .claude/skills/other"),
+        "{preview}"
+    );
+    assert_error(f.sync(), "differs");
+    f.project().sync(false, true, &mut Vec::new()).unwrap();
+    assert!(f.project().is_synced().unwrap());
+}
+
+#[test]
+fn selected_skill_sync_updates_from_a_new_catalog_copy() {
+    let f = Fixture::new();
+    f.add_skill();
+    f.choose(&[("targets", "claude"), ("skills", "review")]);
+    f.sync().unwrap();
+    let source = f.library.join(".rulesync/skills/.curated/review/SKILL.md");
+    write_file(&source, b"Updated catalog skill", 0o755).unwrap();
+    write_receipt(&f.library, &f.catalog).unwrap();
+    assert!(f.project().skill_statuses().unwrap()[0].differs);
+    f.project()
+        .sync_skill("review", false, false, &mut Vec::new())
+        .unwrap();
+    assert_eq!(
+        file_record(&f.root.join(".claude/skills/review/SKILL.md")).unwrap(),
+        file_record(&source).unwrap()
+    );
+    assert!(!f.project().skill_statuses().unwrap()[0].differs);
+    assert!(f.project().is_synced().unwrap());
+}
+
+#[test]
+fn extra_skill_files_require_replacement_and_appear_in_previews() {
+    let f = Fixture::new();
+    f.add_skill();
+    f.choose(&[("targets", "claude"), ("skills", "review")]);
+    f.sync().unwrap();
+    let extra = f.root.join(".claude/skills/review/extra.md");
+    write_file(&extra, b"extra", 0o644).unwrap();
+    assert!(!f.project().is_synced().unwrap());
+    let before = snapshot(f.temp.path());
+    let mut out = Vec::new();
+    f.project().sync(true, false, &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("delete .claude/skills/review/extra.md")
+    );
+    assert_eq!(snapshot(f.temp.path()), before);
+    assert_error(f.sync(), "not in the catalog");
+    f.project()
+        .sync_skill("review", false, true, &mut Vec::new())
+        .unwrap();
+    assert!(!extra.exists());
+    assert!(f.project().is_synced().unwrap());
+}
+
+#[test]
 fn targets_start_off_so_choices_alone_write_nothing_else() {
     let f = Fixture::new();
     f.choose(&[("mcp", "nixos")]);

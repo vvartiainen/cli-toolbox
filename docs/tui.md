@@ -60,14 +60,21 @@ sync     pending changes · ^S to sync, ^D to preview
 targets  claude              [on]
 targets  codex               [off]
 mcp      nixos               [on]
-skills   review              [off]
+skills   review              [on]   mismatch · ^V details
 ```
 
 | Key | Action |
 | --- | --- |
 | Enter | Toggle the entry; on the sync row, sync |
 | Ctrl-S | Sync from any row, including while filtering |
-| Ctrl-D | Preview the sync without changing files |
+| Ctrl-D | Preview the highlighted skill's re-sync; on other rows, preview all agent files |
+| Ctrl-V | Show the highlighted skill's changed, missing and extra files |
+| Ctrl-R | Re-sync only the highlighted skill from the installed catalog, after confirmation |
+
+Mismatches leave the list accessible. Re-sync overwrites differing skill copies
+and removes extra files in that skill's folders; current choices determine which
+copies are installed or removed. Other skills and MCP settings stay untouched.
+For newer remote revisions, run `ct agents library update` before re-syncing.
 
 ## Sandbox › Projects
 

@@ -189,6 +189,7 @@ pub(crate) enum Resource {
     Vm(Box<RunnerState>),
     /// A target, catalog MCP server or skill of the launch directory's repository.
     Agent(Entry),
+    AgentSkill(crate::agents::SkillStatus),
     /// Whether that repository's agent files match its choices.
     AgentSync(bool),
 }
@@ -205,6 +206,7 @@ impl Resource {
             Self::Project(status) => status.project.name.clone(),
             Self::Vm(vm) => vm.name.clone(),
             Self::Agent(entry) => format!("{} {}", entry.group, entry.name),
+            Self::AgentSkill(skill) => format!("skills {}", skill.name),
             Self::AgentSync(_) => "sync".into(),
         }
     }
@@ -221,7 +223,9 @@ impl Resource {
             Self::Worktree(worktree) => ResourceIdentity::Path(worktree.path.clone()),
             Self::Project(status) => ResourceIdentity::Path(status.project.dir.clone()),
             Self::Vm(vm) => ResourceIdentity::Path(vm.runtime_dir.clone()),
-            Self::Agent(_) | Self::AgentSync(_) => ResourceIdentity::String(self.label()),
+            Self::Agent(_) | Self::AgentSkill(_) | Self::AgentSync(_) => {
+                ResourceIdentity::String(self.label())
+            }
         }
     }
 
@@ -236,7 +240,10 @@ impl Resource {
                 | (ToolId::GitWorktrees, Self::Worktree(_))
                 | (ToolId::SandboxProjects, Self::Project(_))
                 | (ToolId::SandboxVms, Self::Vm(_))
-                | (ToolId::AgentTools, Self::Agent(_) | Self::AgentSync(_))
+                | (
+                    ToolId::AgentTools,
+                    Self::Agent(_) | Self::AgentSkill(_) | Self::AgentSync(_)
+                )
         )
     }
 }
@@ -285,6 +292,9 @@ pub(crate) enum Action {
     PruneVms,
     /// `ct agents sync`, or its preview with `true`.
     SyncAgents(bool),
+    InspectSkill(crate::agents::SkillStatus),
+    /// Re-sync one skill with replacement, or preview it with `true`.
+    SyncSkill(String, bool),
 }
 
 /// How to tailor a new project's flake.
@@ -337,7 +347,9 @@ impl Action {
             | Self::EnterProjectWorktree(_)
             | Self::TailorProject(..) => Some(ToolId::SandboxProjects),
             Self::StopVm(_) | Self::PruneVms => Some(ToolId::SandboxVms),
-            Self::SyncAgents(_) => Some(ToolId::AgentTools),
+            Self::SyncAgents(_) | Self::InspectSkill(_) | Self::SyncSkill(..) => {
+                Some(ToolId::AgentTools)
+            }
             Self::Aws(_)
             | Self::AzureSubscription(_)
             | Self::AzureAccount(_)
@@ -1187,12 +1199,8 @@ impl App {
         if let Some(effect) = self.handle_vm_picker_key(key) {
             return effect;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('s' | 'd'))
-            && self.picker().is_some_and(|p| p.tool == ToolId::AgentTools)
-        {
-            self.loading = None;
-            return Effect::Execute(Action::SyncAgents(key.code == KeyCode::Char('d')));
+        if let Some(effect) = self.handle_agent_picker_key(key) {
+            return effect;
         }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
@@ -1270,11 +1278,57 @@ impl App {
                         enabled: !entry.enabled,
                         ..entry
                     }),
+                    (ToolId::AgentTools, Resource::AgentSkill(skill)) => {
+                        Effect::ChangeAgents(Entry {
+                            group: "skills".into(),
+                            name: skill.name,
+                            enabled: !skill.enabled,
+                        })
+                    }
                     _ => Effect::None,
                 }
             }
             _ => Effect::None,
         }
+    }
+
+    fn handle_agent_picker_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        let picker = self
+            .picker()
+            .filter(|picker| picker.tool == ToolId::AgentTools)?;
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        let skill = match picker.selected_resource() {
+            Some(Resource::AgentSkill(skill)) => Some(skill.clone()),
+            _ => None,
+        };
+        let effect = match (key.code, skill) {
+            (KeyCode::Char('s'), _) => Effect::Execute(Action::SyncAgents(false)),
+            (KeyCode::Char('d'), Some(skill)) => {
+                Effect::Execute(Action::SyncSkill(skill.name, true))
+            }
+            (KeyCode::Char('d'), None) => Effect::Execute(Action::SyncAgents(true)),
+            (KeyCode::Char('v'), Some(skill)) => Effect::Execute(Action::InspectSkill(skill)),
+            (KeyCode::Char('r'), Some(skill)) => {
+                let mut lines = skill.details;
+                lines.push("Re-sync this skill using the current target and skill choices. Differing copies will be overwritten; disabled copies will be removed.".into());
+                self.confirm(ConfirmState::new(
+                    format!("Re-sync skill {}?", skill.name),
+                    lines,
+                    vec![Choice::new(
+                        'y',
+                        "Re-sync",
+                        Action::SyncSkill(skill.name, false),
+                    )],
+                ));
+                Effect::None
+            }
+            (KeyCode::Char('v' | 'r'), None) => Effect::None,
+            _ => return None,
+        };
+        self.loading = None;
+        Some(effect)
     }
 
     /// Ctrl shortcuts of the worktree manager. Plain keys filter the list.
@@ -2603,6 +2657,55 @@ mod tests {
             panic!("expected the agent tools list");
         };
         assert_eq!(picker.query, "n");
+    }
+
+    #[test]
+    fn agent_skill_mismatches_can_be_inspected_previewed_and_resynced() {
+        let mut app = App::new("/repo".into());
+        let skill = crate::agents::SkillStatus {
+            name: "review".into(),
+            enabled: true,
+            differs: true,
+            details: vec!["changed .claude/skills/review/SKILL.md".into()],
+        };
+        app.loaded(
+            ToolId::AgentTools,
+            Ok(vec![Resource::AgentSkill(skill.clone())]),
+        );
+        assert_eq!(
+            app.handle_key(ctrl('v')),
+            Effect::Execute(Action::InspectSkill(skill.clone()))
+        );
+        assert_eq!(
+            app.handle_key(ctrl('d')),
+            Effect::Execute(Action::SyncSkill("review".into(), true))
+        );
+        assert_eq!(app.handle_key(ctrl('r')), Effect::None);
+        let Screen::Confirm(confirm) = &app.screen else {
+            panic!("expected skill confirmation")
+        };
+        assert!(
+            confirm
+                .lines
+                .iter()
+                .any(|line| line.contains("changed .claude"))
+        );
+        // Cancel is the default; an explicit choice re-syncs only this skill.
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None);
+        app.handle_key(ctrl('r'));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Effect::Execute(Action::SyncSkill("review".into(), false))
+        );
+        assert_eq!(
+            Action::SyncSkill("review".into(), false).return_tool(),
+            Some(ToolId::AgentTools)
+        );
+        app.loaded(ToolId::AgentTools, Ok(vec![Resource::AgentSkill(skill)]));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Effect::ChangeAgents(agent_entry("skills", "review", false))
+        );
     }
 
     #[test]

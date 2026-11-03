@@ -29,6 +29,11 @@ enum AgentsCommand {
         #[arg(long)]
         replace: bool,
     },
+    /// List skill copies and mismatches, or sync one skill.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
     /// Install locked skill sources or explicitly update their revisions.
     Library {
         #[command(subcommand)]
@@ -39,6 +44,20 @@ enum AgentsCommand {
 enum LibraryCommand {
     Install,
     Update,
+}
+#[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// Show every catalog skill and its project files' differences.
+    List,
+    /// Sync one skill using the repository's current target and skill choices.
+    Sync {
+        name: String,
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite files that differ from the catalog or previous sync.
+        #[arg(long)]
+        replace: bool,
+    },
 }
 #[derive(Clone, Debug, ValueEnum)]
 enum Kind {
@@ -74,6 +93,14 @@ impl AgentsCmd {
                 Some(AgentsCommand::Sync { dry_run, replace }) => {
                     project.sync(dry_run, replace, stdout)
                 }
+                Some(AgentsCommand::Skills { command }) => match command {
+                    SkillsCommand::List => project.list_skills(stdout),
+                    SkillsCommand::Sync {
+                        name,
+                        dry_run,
+                        replace,
+                    } => project.sync_skill(&name, dry_run, replace, stdout),
+                },
                 None => project.interactive(stdout),
                 Some(AgentsCommand::Library { .. }) => unreachable!(),
             }),
@@ -90,7 +117,7 @@ mod tests {
         let mut err = Vec::new();
         run(&["agents".into(), "--help".into()], &mut out, &mut err).unwrap();
         let help = String::from_utf8(out).unwrap();
-        for name in ["status", "set", "sync", "library"] {
+        for name in ["status", "set", "sync", "skills", "library"] {
             assert!(help.contains(name), "{help}");
         }
         assert!(err.is_empty());
@@ -103,6 +130,9 @@ mod tests {
             vec!["agents", "sync"],
             vec!["agents", "sync", "--dry-run"],
             vec!["agents", "sync", "--replace"],
+            vec!["agents", "skills", "list"],
+            vec!["agents", "skills", "sync", "review", "--dry-run"],
+            vec!["agents", "skills", "sync", "review", "--replace"],
             vec!["agents", "library", "install"],
             vec!["agents", "library", "update"],
         ] {
