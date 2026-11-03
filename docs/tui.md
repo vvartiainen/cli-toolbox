@@ -16,18 +16,18 @@ login temporarily take over the terminal; the launcher resumes when they finish.
 
 ## Keys
 
-Actions are grouped into tabs: **AWS** (`a`), **Azure** (`z`, subscriptions and account login/logout), **Git** (`g`, git worktrees and agent tools),
+Actions are grouped into tabs: **AWS** (`a`), **Azure** (`z`, subscriptions and account login/logout), **Git** (`g`, git worktrees), **Agents** (`n`, MCP servers and skills),
 **Sandbox** (`s`, sandbox projects and running VMs) and **Terminal** (`t`, Kitty sessions and SSH).
 
 | Key | Action |
 | --- | --- |
-| `a` / `z` / `g` / `s` / `t` | Switch to a tab |
+| `a` / `z` / `g` / `n` / `s` / `t` | Switch to a tab |
 | `[` / `]`, Left/Right, Tab, `h`/`l` | Previous / next tab |
 | `1`–`9` | Run that action directly, e.g. `g` `1` |
 | Up/Down, `j`/`k`, Ctrl-P/Ctrl-N | Move |
 | PageUp/PageDown, Home/End | Page, first, last |
 | `/` | Search actions across all tabs |
-| `?` (F1 in lists and forms) | Show every key of the current screen |
+| F1 / `?` | Show every key of the current screen, including in lists and forms |
 | `q`, Esc | Exit (Ctrl-C exits at any point) |
 
 In resource lists (profiles, hosts, sessions, worktrees), type to filter. Backspace
@@ -48,7 +48,7 @@ review checkouts (see [agents.md](agents.md#git-worktrees)):
 - Ctrl-D removes the selected worktree and its branch, and closes its Herdr
   workspace, after a [confirmation](#confirmations).
 
-## Git › Agent tools
+## Agents › Agent tools
 
 The launch directory repository's `ct agents` choices (see
 [agent-tools.md](agent-tools.md)): first whether its files are in sync, then
@@ -56,7 +56,7 @@ each target, MCP server and skill. Enter toggles the highlighted entry right
 away; files change only when you sync.
 
 ```text
-sync     pending changes · ⏎ to sync, ^D to preview
+sync     pending changes · ^S to sync, ^D to preview
 targets  claude              [on]
 targets  codex               [off]
 mcp      nixos               [on]
@@ -66,6 +66,7 @@ skills   review              [off]
 | Key | Action |
 | --- | --- |
 | Enter | Toggle the entry; on the sync row, sync |
+| Ctrl-S | Sync from any row, including while filtering |
 | Ctrl-D | Preview the sync without changing files |
 
 ## Sandbox › Projects

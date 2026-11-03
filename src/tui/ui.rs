@@ -15,20 +15,20 @@ use super::app::{
 pub(super) const HEIGHT: u16 = 12;
 
 const ACCENT: Color = Color::Cyan;
-const HELP_SEARCH: &str = "↑↓ move · ⏎ run · F1 help · esc back";
-const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1 help · esc back";
-const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1 help · esc back";
+const HELP_SEARCH: &str = "↑↓ move · ⏎ run · F1/? help · esc back";
+const HELP_PICKER: &str = "type to filter · ⏎ select · F5 refresh · F1/? help · esc back";
+const HELP_WORKTREES: &str = "type to filter · ⏎ open · ^A new · ^D remove · F1/? help · esc back";
 const HELP_PROJECTS: &str =
-    "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1 help · esc back";
+    "type to filter · ⏎ open · ^A new · ^S/^R/^X sync/restart/stop · F1/? help · esc back";
 const HELP_AGENTS: &str =
-    "type to filter · ⏎ toggle or sync · ^D preview · F5 refresh · F1 help · esc back";
-const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1 help · esc back";
-const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · ? help · esc back";
-const HELP_TAILOR: &str = "a agent · e edit · s skip · ? help";
-const HELP_RETAILOR: &str = "a agent · e edit · ? help · esc back";
-const HELP_NEW_WORKTREE: &str = "tab name/prompt · ←→ agent · ⏎ create · F1 help · esc back";
-const HELP_PROJECT_FORM: &str = "tab ↑↓ field · ←→ space change · ⏎ create · F1 help · esc back";
-const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · ? help";
+    "type to filter · ⏎ toggle · ^S sync · ^D preview · F5 refresh · F1/? help · esc back";
+const HELP_VMS: &str = "type to filter · ⏎/^X stop · ^D prune · F5 refresh · F1/? help · esc back";
+const HELP_MENU: &str = "key or ⏎ run · ↑↓ move · F1/? help · esc back";
+const HELP_TAILOR: &str = "a agent · e edit · s skip · F1/? help";
+const HELP_RETAILOR: &str = "a agent · e edit · F1/? help · esc back";
+const HELP_NEW_WORKTREE: &str = "tab name/prompt · ←→ agent · ⏎ create · F1/? help · esc back";
+const HELP_PROJECT_FORM: &str = "tab ↑↓ field · ←→ space change · ⏎ create · F1/? help · esc back";
+const HELP_RESULT: &str = "↑↓ scroll · ⏎/esc back · F1/? help";
 const HELP_OVERLAY: &str = "any key closes help";
 
 /// Update viewport-dependent state before drawing, including after a resize.
@@ -126,26 +126,26 @@ fn tab_keys() -> String {
 
 fn home_help() -> String {
     format!(
-        "{} [ ] tabs · 1-9 run · / search · ? help · q quit",
+        "{} [ ] tabs · 1-9 run · / search · F1/? help · q quit",
         tab_keys()
     )
 }
 
 fn details_help(app: &App) -> &'static str {
     if app.print_shell {
-        "⏎ cd & exit · d remove · ? help · esc back"
+        "⏎ cd & exit · d remove · F1/? help · esc back"
     } else {
-        "⏎ cd here · d remove · ? help · esc back"
+        "⏎ cd here · d remove · F1/? help · esc back"
     }
 }
 
 fn project_help(state: &ProjectState) -> &'static str {
     if state.status.worktrees.is_empty() {
-        "a add · u start · v review saved · m more · ? help · esc back"
+        "a add · u start · v review saved · m more · F1/? help · esc back"
     } else if state.status.vm.is_some() {
-        "v review · x stop · a add · ⏎ cd · D done · d remove · m more · ? help"
+        "v review · x stop · a add · ⏎ cd · D done · d remove · m more · F1/? help"
     } else {
-        "v review saved · u start · a add · ⏎ cd · D done · d remove · m more · ? help"
+        "v review saved · u start · a add · ⏎ cd · D done · d remove · m more · F1/? help"
     }
 }
 
@@ -199,6 +199,7 @@ fn help_entries(app: &App) -> Vec<(String, &'static str)> {
             } else if picker.tool == ToolId::AgentTools {
                 entries.extend([
                     entry("⏎", "toggle for this repository; on the sync row, sync"),
+                    entry("^S", "sync agent files"),
                     entry("^D", "preview the sync without changing files"),
                 ]);
             } else if picker.tool == ToolId::SandboxVms {
@@ -606,7 +607,7 @@ fn resource_line(resource: &Resource, name_width: usize) -> Line<'static> {
                 Span::styled("files are up to date", Style::new().fg(Color::Green))
             } else {
                 Span::styled(
-                    "pending changes · ⏎ to sync, ^D to preview",
+                    "pending changes · ^S to sync, ^D to preview",
                     Style::new().fg(Color::Yellow),
                 )
             },
@@ -971,7 +972,7 @@ fn confirm_help(confirm: &ConfirmState) -> String {
         .iter()
         .map(|choice| format!("{} {}", choice.key, choice.label.to_lowercase()))
         .collect();
-    keys.extend(["n cancel".into(), "←→ ⏎ choose".into(), "? help".into()]);
+    keys.extend(["n cancel".into(), "←→ ⏎ choose".into(), "F1/? help".into()]);
     keys.join(" · ")
 }
 
@@ -1487,7 +1488,8 @@ mod tests {
         assert!(list.contains("mcp      backlog-work  [on]"), "{list}");
         assert!(list.contains("skills   review        [off]"), "{list}");
         assert!(list.contains("pending changes"), "{list}");
-        assert!(list.contains("⏎ toggle or sync"), "{list}");
+        assert!(list.contains("^S sync"), "{list}");
+        assert!(list.contains("Agents › Agent tools"), "{list}");
     }
 
     #[test]

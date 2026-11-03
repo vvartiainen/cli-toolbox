@@ -9,7 +9,7 @@ required; subdirectories and linked worktrees resolve to their own checkout.
 
 ```sh
 ct agents                          # Toggle choices with fzf or the built-in picker, then sync
-ct tui                             # Git › Agent tools: toggle, sync, preview
+ct tui                             # Agents › Agent tools: toggle, sync, preview
 ct agents status                   # Choices and whether the files match them
 ct agents set targets claude enable
 ct agents set mcp nixos enable

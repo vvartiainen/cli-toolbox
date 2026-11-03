@@ -28,15 +28,17 @@ pub(crate) enum Category {
     Aws,
     Azure,
     Git,
+    Agents,
     Sandbox,
     Terminal,
 }
 
 impl Category {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Aws,
         Self::Azure,
         Self::Git,
+        Self::Agents,
         Self::Sandbox,
         Self::Terminal,
     ];
@@ -46,6 +48,7 @@ impl Category {
             Self::Aws => "AWS",
             Self::Azure => "Azure",
             Self::Git => "Git",
+            Self::Agents => "Agents",
             Self::Sandbox => "Sandbox",
             Self::Terminal => "Terminal",
         }
@@ -57,6 +60,7 @@ impl Category {
             Self::Aws => 'a',
             Self::Azure => 'z',
             Self::Git => 'g',
+            Self::Agents => 'n',
             Self::Sandbox => 's',
             Self::Terminal => 't',
         }
@@ -116,7 +120,8 @@ impl ToolId {
         match self {
             Self::AwsProfile => Category::Aws,
             Self::AzureSubscription | Self::AzureAccount => Category::Azure,
-            Self::GitWorktrees | Self::AgentTools => Category::Git,
+            Self::GitWorktrees => Category::Git,
+            Self::AgentTools => Category::Agents,
             Self::SandboxProjects | Self::SandboxVms => Category::Sandbox,
             Self::KittySession | Self::SshConnect => Category::Terminal,
         }
@@ -1061,9 +1066,7 @@ impl App {
             self.show_help = false;
             return Effect::None;
         }
-        if key.code == KeyCode::F(1)
-            || (key.code == KeyCode::Char('?') && self.question_opens_help())
-        {
+        if matches!(key.code, KeyCode::F(1) | KeyCode::Char('?')) {
             self.show_help = true;
             return Effect::None;
         }
@@ -1079,21 +1082,6 @@ impl App {
             Screen::ProjectForm(_) => self.handle_project_form_key(key),
             Screen::Confirm(_) => self.handle_confirm_key(key),
             Screen::Result(_) => self.handle_result_key(key),
-        }
-    }
-
-    /// `?` is text input while searching, filtering or writing a prompt, so
-    /// only F1 opens help there.
-    fn question_opens_help(&self) -> bool {
-        match self.screen {
-            Screen::Home => !self.searching,
-            Screen::Picker(_) | Screen::NewWorktree(_) | Screen::ProjectForm(_) => false,
-            Screen::WorktreeDetails(_)
-            | Screen::ProjectDetails(_)
-            | Screen::ProjectMenu(_)
-            | Screen::TailorFlake(_)
-            | Screen::Confirm(_)
-            | Screen::Result(_) => true,
         }
     }
 
@@ -1200,11 +1188,11 @@ impl App {
             return effect;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('d')
+            && matches!(key.code, KeyCode::Char('s' | 'd'))
             && self.picker().is_some_and(|p| p.tool == ToolId::AgentTools)
         {
             self.loading = None;
-            return Effect::Execute(Action::SyncAgents(true));
+            return Effect::Execute(Action::SyncAgents(key.code == KeyCode::Char('d')));
         }
         if let Screen::Picker(picker) = &mut self.screen
             && let Some(effect) = picker_text_key(picker, key)
@@ -1959,8 +1947,8 @@ pub(crate) fn branch_label(worktree: &Worktree) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, App, Category, Effect, NewProject, NewWorktree, Prepare, Resource, Screen, Tailor,
-        ToolId,
+        Action, App, Category, ConfirmState, Effect, NewProject, NewWorktree, Prepare, Resource,
+        Screen, Tailor, ToolId,
     };
     use crate::agent::Launch;
     use crate::agent::Step;
@@ -2106,6 +2094,7 @@ mod tests {
         for expected in [
             Category::Azure,
             Category::Git,
+            Category::Agents,
             Category::Sandbox,
             Category::Terminal,
             Category::Aws,
@@ -2324,11 +2313,10 @@ mod tests {
         assert_eq!((form.name.as_str(), form.template()), ("demo", "rust"));
         app.handle_key(ctrl('u'));
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Effect::None, "no name");
-        for ch in "my-app?".chars() {
+        for ch in "my-appx".chars() {
             app.handle_key(key(KeyCode::Char(ch)));
         }
         app.handle_key(key(KeyCode::Backspace));
-        assert!(!app.show_help, "? is name text");
         app.handle_key(key(KeyCode::Tab));
         app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Down));
@@ -2572,9 +2560,11 @@ mod tests {
     #[test]
     fn agent_tools_toggle_entries() {
         let mut app = App::new("/repo".into());
-        app.handle_key(key(KeyCode::Char('g')));
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.category, Category::Agents);
+        assert_eq!(Category::Git.tools(), vec![ToolId::GitWorktrees]);
         assert_eq!(
-            app.handle_key(key(KeyCode::Char('2'))),
+            app.handle_key(key(KeyCode::Char('1'))),
             Effect::Load(ToolId::AgentTools)
         );
         app.loaded(
@@ -2711,11 +2701,10 @@ mod tests {
         }
         app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Down));
-        for ch in "Fix it?".chars() {
+        for ch in "Fix it!".chars() {
             app.handle_key(key(KeyCode::Char(ch)));
         }
         app.handle_key(key(KeyCode::Backspace));
-        assert!(!app.show_help, "? is prompt text");
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
             Effect::Execute(Action::CreateWorktree(
@@ -2925,13 +2914,87 @@ mod tests {
         assert!(app.show_help);
         assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Effect::None);
         assert!(!app.show_help);
-        // In pickers `?` filters, and F1 opens help.
-        app.handle_key(key(KeyCode::Enter));
+    }
+
+    #[test]
+    fn both_help_keys_work_in_every_view_without_changing_input() {
+        let mut app = App::new("/repo".into());
+        let mut screens = vec![app.screen.clone()];
         app.loaded(ToolId::AwsProfile, Ok(vec![profile("prod")]));
-        app.handle_key(key(KeyCode::Char('?')));
-        assert!(!app.show_help);
-        app.handle_key(key(KeyCode::F(1)));
-        assert!(app.show_help);
+        screens.push(app.screen.clone());
+        app = worktree_manager(&[worktree("demo")]);
+        app.handle_key(key(KeyCode::Enter));
+        screens.push(app.screen.clone());
+        app.loaded(
+            ToolId::SandboxProjects,
+            Ok(vec![Resource::Project(Box::new(project("demo", &[])))]),
+        );
+        app.handle_key(key(KeyCode::Enter));
+        screens.push(app.screen.clone());
+        app.handle_key(key(KeyCode::Char('m')));
+        screens.push(app.screen.clone());
+        app.tailor_prompt(
+            NewProject {
+                name: "demo".into(),
+                summary: "Created demo".into(),
+            },
+            "claude".into(),
+            "vi".into(),
+        );
+        screens.push(app.screen.clone());
+        app = worktree_manager(&[]);
+        app.handle_key(ctrl('a'));
+        screens.push(app.screen.clone());
+        app.project_form(Ok(create_options()));
+        screens.push(app.screen.clone());
+        app.confirm(ConfirmState::new("Remove?", vec![], vec![]));
+        screens.push(app.screen.clone());
+        app.finished(
+            &Action::SyncAgents(false),
+            "Synced".into(),
+            "Done".into(),
+            false,
+        );
+        screens.push(app.screen.clone());
+        assert_eq!(screens.len(), 10);
+        for screen in screens {
+            for code in [KeyCode::F(1), KeyCode::Char('?')] {
+                app.screen = screen.clone();
+                let before = format!("{:?}", app.screen);
+                assert_eq!(app.handle_key(key(code)), Effect::None);
+                assert!(app.show_help, "{code:?} on {before}");
+                assert_eq!(app.handle_key(key(KeyCode::Esc)), Effect::None);
+                assert!(!app.show_help);
+                assert_eq!(format!("{:?}", app.screen), before);
+            }
+        }
+        app.screen = Screen::Home;
+        app.searching = true;
+        for code in [KeyCode::F(1), KeyCode::Char('?')] {
+            app.handle_key(key(code));
+            assert!(app.show_help);
+            assert!(app.home_query.is_empty());
+            app.handle_key(key(KeyCode::Esc));
+        }
+    }
+
+    #[test]
+    fn agent_sync_shortcut_works_from_entries_and_an_empty_filter() {
+        let mut app = App::new("/repo".into());
+        app.loaded(
+            ToolId::AgentTools,
+            Ok(vec![Resource::Agent(agent_entry("skills", "review", true))]),
+        );
+        for query in ["", "no matches"] {
+            if let Screen::Picker(picker) = &mut app.screen {
+                picker.query = query.into();
+            }
+            assert_eq!(
+                app.handle_key(ctrl('s')),
+                Effect::Execute(Action::SyncAgents(false))
+            );
+            assert_eq!(app.picker().unwrap().query, query);
+        }
     }
 
     #[test]
